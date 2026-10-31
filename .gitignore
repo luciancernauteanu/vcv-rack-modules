@@ -1,0 +1,21 @@
+# VCV Rack source checkout and SDK (downloaded, not part of this repo)
+/Rack/
+/Rack-SDK-*/
+
+# Logs
+*.log
+
+# Plugin build output
+build/
+dist/
+plugin.dll
+plugin.so
+plugin.dylib
+
+# Offline test binaries
+waveArtifact/tests/test_bank
+waveArtifact/tests/test_bank.exe
+waveArtifact/tests/test_engine
+waveArtifact/tests/test_engine.exe
+waveArtifact/tests/test_lfo
+waveArtifact/tests/test_lfo.exe

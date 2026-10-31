@@ -1,0 +1,27 @@
+{
+  "slug": "waveArtifact",
+  "name": "waveArtifact",
+  "version": "2.0.0",
+  "license": "GPL-3.0-or-later",
+  "brand": "waveArtifact",
+  "author": "luciancernauteanu",
+  "authorEmail": "",
+  "authorUrl": "",
+  "pluginUrl": "",
+  "manualUrl": "",
+  "sourceUrl": "",
+  "donateUrl": "",
+  "changelogUrl": "",
+  "minRackVersion": "2.6.0",
+  "modules": [
+    {
+      "slug": "waveArtifact",
+      "name": "waveArtifact",
+      "description": "Wavetable morph oscillator built from an imported WAV sample",
+      "tags": [
+        "Oscillator",
+        "Digital"
+      ]
+    }
+  ]
+}

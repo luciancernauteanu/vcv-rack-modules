@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 36 HP dark panel. Same geometry as waveArtifact.svg; see that file for notes. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="182.88mm" height="128.5mm" viewBox="0 0 182.88 128.5" version="1.1">
+  <g id="panel">
+    <rect id="background" x="0" y="0" width="182.88" height="128.5" fill="#23262b"/>
+    <rect id="edit-area" x="6" y="11" width="104" height="25" rx="2" ry="2" fill="#2d3137"/>
+    <rect id="screen" x="6" y="40" width="170.88" height="40" rx="2" ry="2" fill="#0b0d10"/>
+    <rect id="bar-track" x="14" y="69.4" width="154.88" height="1.2" rx="0.6" ry="0.6" fill="#3a3f47"/>
+    <rect id="output-box" x="138" y="83" width="38.88" height="21" rx="2" ry="2" fill="#e6e6e6"/>
+    <rect id="dots-strip" x="6" y="106" width="170.88" height="14" rx="2" ry="2" fill="#0b0d10"/>
+  </g>
+</svg>
