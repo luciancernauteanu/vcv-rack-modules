@@ -1,8 +1,9 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
-// Per-marker WAVE LFO and the clock tracker it syncs to. No Rack dependencies (tested in tests/).
+// The LFO (six shapes) used by the markers, the position and the expander, and the clock tracker it syncs to. No Rack dependencies (tested in tests/).
 
 namespace wa {
 
@@ -71,6 +72,16 @@ inline float fold01(float x) {
 	return (x > 1.f) ? 2.f - x : x;
 }
 
+/** Centered sweep for a 0..1 target such as the playhead: the LFO moves it by +-amount/2, so 100%
+sweeps the whole range. The center (`base`) is held far enough from the ends that the whole swing
+fits, so the LFO's shape is never cut off, rectified or folded (folding turns a symmetric LFO at
+the ends into a stuck or double-speed signal). The result is always in 0..1. */
+inline float lfoCentered(float base, float amount, float lfo) {
+	float h = 0.5f * std::min(std::max(amount, 0.f), 1.f);
+	float center = std::min(std::max(base, h), 1.f - h);
+	return center + h * lfo;
+}
+
 /** Measures the clock period from rising edges (1 pulse = 1 quarter note). */
 class ClockTracker {
 public:
@@ -131,11 +142,71 @@ private:
 	long beatCount = -1;
 };
 
-/** Sine LFO, free in Hz or synced to the clock by note value. */
+enum LfoShape {
+	LFO_SINE,
+	LFO_TRIANGLE,
+	LFO_SAW,
+	/** Falling ramp: starts at +1 and drops to -1 */
+	LFO_SAW_REVERSE,
+	LFO_SQUARE,
+	/** A new random target each cycle, reached along a smooth S-curve */
+	LFO_SMOOTH_RANDOM,
+	/** A random walk: each cycle's target is a bounded step from the last one */
+	LFO_DRUNK,
+	NUM_LFO_SHAPES
+};
+
+static const char* const LFO_SHAPE_NAMES[NUM_LFO_SHAPES] = {"Sine", "Triangle", "Saw", "Reverse saw", "Square", "Smooth random", "Drunk"};
+
+inline bool lfoShapeIsRandom(int shape) {
+	return shape == LFO_SMOOTH_RANDOM || shape == LFO_DRUNK;
+}
+
+/** The periodic shapes at `phase` (0..1), -1..1. All start at 0 except the saws and square, which start
+at their cycle's beginning (-1, +1 and +1). Random shapes are not periodic: returns 0. */
+inline float lfoShapeValue(int shape, double phase) {
+	switch (shape) {
+		case LFO_SINE:
+			return (float) std::sin(2.0 * 3.14159265358979323846 * phase);
+		case LFO_TRIANGLE:
+			return (float) (phase < 0.25 ? 4.0 * phase : phase < 0.75 ? 2.0 - 4.0 * phase : 4.0 * phase - 4.0);
+		case LFO_SAW:
+			return (float) (2.0 * phase - 1.0);
+		case LFO_SAW_REVERSE:
+			return (float) (1.0 - 2.0 * phase);
+		case LFO_SQUARE:
+			return phase < 0.5 ? 1.f : -1.f;
+		default:
+			return 0.f;
+	}
+}
+
+/** LFO: sine, triangle, saw, square, smooth random or drunk walk; free in Hz or synced to the clock
+by note value. The random shapes pick a new target every cycle, so their rate is the rate of change
+(and when synced they step on the clock grid). */
 class Lfo {
 public:
-	/** Returns -1..1. */
+	/** Different seeds give different random sequences (see seed()). */
+	void seed(uint32_t s) {
+		rng = s ? s : 0x9E3779B9u;
+	}
+
+	/** Sine. */
 	float process(bool sync, float rateKnob, bool triplets, bool dotted, const ClockTracker& clock, float sampleTime) {
+		return process(LFO_SINE, sync, rateKnob, triplets, dotted, clock, sampleTime);
+	}
+
+	/** Returns -1..1. */
+	float process(int shape, bool sync, float rateKnob, bool triplets, bool dotted, const ClockTracker& clock, float sampleTime) {
+		if (shape != lastShape) {
+			// Random shapes start from wherever the output was, so switching does not jump.
+			lastShape = shape;
+			if (lfoShapeIsRandom(shape)) {
+				from = lastOut;
+				to = nextTarget(shape);
+				walk = std::min(std::max(lastOut, -1.f), 1.f);
+			}
+		}
 		double freq;
 		if (sync) {
 			double beats = SYNC_DIVISIONS[lfoDivision(rateKnob, triplets, dotted)].beats;
@@ -154,11 +225,26 @@ public:
 			freq = lfoFreeHz(rateKnob);
 			correction = 0.0;
 		}
-		float out = (float) std::sin(2.0 * 3.14159265358979323846 * phase);
+		float out;
+		if (lfoShapeIsRandom(shape)) {
+			float t = (float) phase;
+			t = t * t * (3.f - 2.f * t); // smoothstep between the two targets
+			out = from + (to - from) * t;
+		}
+		else {
+			out = lfoShapeValue(shape, phase);
+		}
 		double pull = correction * std::min(1.0, sampleTime / CORRECTION_TIME);
 		correction -= pull;
+		double before = phase;
 		phase += freq * sampleTime + pull;
 		phase -= std::floor(phase);
+		// A forward wrap (not a small backward correction) starts the next random segment.
+		if (phase < before - 0.5 && lfoShapeIsRandom(shape)) {
+			from = to;
+			to = nextTarget(shape);
+		}
+		lastOut = out;
 		return out;
 	}
 
@@ -168,9 +254,40 @@ public:
 
 private:
 	static constexpr double CORRECTION_TIME = 0.02;
+	/** Largest step of the drunk walk per cycle (of the full -1..1 range) */
+	static constexpr float DRUNK_STEP = 0.35f;
+
+	/** -1..1 from an xorshift32 generator */
+	float random() {
+		rng ^= rng << 13;
+		rng ^= rng >> 17;
+		rng ^= rng << 5;
+		return (float) (rng >> 8) * (1.f / 8388608.f) - 1.f;
+	}
+
+	float nextTarget(int shape) {
+		if (shape == LFO_DRUNK) {
+			walk += random() * DRUNK_STEP;
+			// Reflect at the ends so it wanders without sticking to a wall.
+			if (walk > 1.f)
+				walk = 2.f - walk;
+			if (walk < -1.f)
+				walk = -2.f - walk;
+			walk = std::min(std::max(walk, -1.f), 1.f);
+			return walk;
+		}
+		return random();
+	}
+
 	double phase = 0.0;
 	/** Remaining phase error still to pull in (cycles) */
 	double correction = 0.0;
+	uint32_t rng = 0x9E3779B9u;
+	int lastShape = LFO_SINE;
+	float lastOut = 0.f;
+	float from = 0.f;
+	float to = 0.f;
+	float walk = 0.f;
 };
 
 } // namespace wa

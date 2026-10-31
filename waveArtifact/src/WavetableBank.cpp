@@ -182,7 +182,7 @@ int extractFrame(const std::vector<float>& src, double center, double sampleRate
 }
 
 /** Writes NUM_LEVELS band-limited frames for one table. */
-void buildLevels(const std::vector<float>& raw, int maxHarmonic, WavetableBank& bank, int table) {
+void buildLevels(const std::vector<float>& raw, int maxHarmonic, WavetableBank& bank, int table, TableTone tone) {
 	const int n = FRAME_SIZE;
 	std::vector<cplx> spec(n);
 	for (int i = 0; i < n; i++)
@@ -193,6 +193,19 @@ void buildLevels(const std::vector<float>& raw, int maxHarmonic, WavetableBank& 
 	for (int k = maxHarmonic + 1; k <= n / 2; k++) {
 		spec[k] = 0.0;
 		spec[(n - k) % n] = 0.0;
+	}
+
+	// Tone: a 2nd-order low-pass shape on the harmonic number (-3 dB at `corner`, -12 dB per octave
+	// above). Sampled instruments carry a lot of energy in the top harmonics that, played at low
+	// pitches, reads as a harsh, buzzy edge; this takes the edge off without dulling the body.
+	double corner = (tone == TONE_SMOOTH) ? 48.0 : (tone == TONE_SOFT) ? 20.0 : 0.0;
+	if (corner > 0.0) {
+		for (int k = 1; k <= maxHarmonic; k++) {
+			double r = k / corner;
+			double g = 1.0 / std::sqrt(1.0 + r * r * r * r);
+			spec[k] *= g;
+			spec[n - k] *= g;
+		}
 	}
 
 	// Rotate in time so harmonic 1 has zero phase.
@@ -215,8 +228,11 @@ void buildLevels(const std::vector<float>& raw, int maxHarmonic, WavetableBank& 
 
 	std::vector<cplx> level(n);
 	for (int l = 0; l < NUM_LEVELS; l++) {
-		int harmonics = std::min(maxHarmonic, std::max(1, (n / 2) >> l));
+		int harmonics = std::min(maxHarmonic, levelHarmonics(l));
 		std::fill(level.begin(), level.end(), cplx(0.0));
+		// A plain cut, no taper: the wobble at a band-limited edge is just the highest harmonic kept,
+		// not an artifact you hear, and a taper only dulled the top end (measured in test_sound).
+		// Softening is the job of the tone setting above, which is the same at every pitch.
 		for (int k = 1; k <= harmonics && k < n / 2; k++) {
 			level[k] = spec[k];
 			level[n - k] = spec[n - k];
@@ -227,12 +243,19 @@ void buildLevels(const std::vector<float>& raw, int maxHarmonic, WavetableBank& 
 			out[i] = (float) level[i].real();
 	}
 
-	// Peak-normalize every level with the gain of level 0 so levels stay consistent.
+	// Loudness-normalize: scale level 0 to ARTIFACT_RMS unless its peak would pass ARTIFACT_PEAK_CAP
+	// (spiky shapes stop at the cap). Peak normalization made a narrow pulse ~12 dB quieter than a
+	// square, so moving between them swelled and dipped. Every level gets the same gain, so the
+	// levels stay consistent with each other.
 	float* base = bank.frame(table, 0);
 	float peak = 0.f;
-	for (int i = 0; i < n; i++)
+	double sumSq = 0.0;
+	for (int i = 0; i < n; i++) {
 		peak = std::max(peak, std::fabs(base[i]));
-	float gain = (peak > 1e-6f) ? 1.f / peak : 0.f;
+		sumSq += (double) base[i] * base[i];
+	}
+	float rms = (float) std::sqrt(sumSq / n);
+	float gain = (peak > 1e-6f && rms > 1e-9f) ? std::min(ARTIFACT_RMS / rms, ARTIFACT_PEAK_CAP / peak) : 0.f;
 	for (int l = 0; l < NUM_LEVELS; l++) {
 		float* out = bank.frame(table, l);
 		for (int i = 0; i < n; i++)
@@ -254,7 +277,7 @@ int tableCountFor(TableCountMode mode, double seconds) {
 	}
 }
 
-WavetableBank* analyzeWav(const uint8_t* bytes, size_t size, TableCountMode mode, std::string* error) {
+WavetableBank* analyzeWav(const uint8_t* bytes, size_t size, TableCountMode mode, std::string* error, TableTone tone) {
 	auto fail = [&](const char* msg) -> WavetableBank* {
 		if (error)
 			*error = msg;
@@ -298,7 +321,7 @@ WavetableBank* analyzeWav(const uint8_t* bytes, size_t size, TableCountMode mode
 		bool pitched = false;
 		int maxHarmonic = extractFrame(mono, center, sampleRate, raw, &pitched);
 		bank->pitched[t] = pitched ? 1 : 0;
-		buildLevels(raw, maxHarmonic, *bank, t);
+		buildLevels(raw, maxHarmonic, *bank, t, tone);
 	}
 	return bank.release();
 }

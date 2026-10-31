@@ -5,9 +5,9 @@
 // 36 HP = 182.88 mm x 128.5 mm.
 //
 //  y  11..43.5  per-marker sections: MARKER | WAVE | GAIN | FILTER | PITCH | PAN | ARRANGE + CLOCK
-//  y  46..76    screen: marker waveforms, marker bar, file status (click to load)
-//  y  79..104   POSITION | FREQ + V/OCT | MASTER FILTER | outputs
-//  y 106..120   wavetable dots
+//  y  46..75.5  screen: marker waveforms, marker bar, file status (click to load)
+//  y  77.5..106 POSITION | FREQ + V/OCT | MASTER (type, cutoff, res, drive, spread, fdbk, each with CV) | outputs
+//  y 108..120   wavetable dots
 
 namespace layout {
 
@@ -26,35 +26,47 @@ static const float ROW1_LABEL_Y = 26.f;
 static const float ROW2_Y = 34.f;
 static const float ROW2_LABEL_Y = 40.5f;
 static const Section TOP_SECTIONS[] = {
-	{6.f, 17.f},      // marker badge
-	{19.f, 53.f},     // WAVE, LFO rate, SMOOTH
-	{55.f, 69.f},     // GAIN
-	{71.f, 113.f},    // FILTER: cutoff, drive, res, type
-	{115.f, 131.f},   // PITCH, FINE
-	{133.f, 147.f},   // PAN
-	{149.f, 176.88f}, // ARRANGE, CLOCK
+	{6.f, 16.f},      // ARTIFACT badge
+	{18.f, 66.f},     // WAVE, SMOOTH | LFO: shape screen, RATE, AMT, SYNC / T / D
+	{68.f, 80.f},     // GAIN
+	{82.f, 118.f},    // FILTER: cutoff, drive, res, type
+	{120.f, 138.f},   // PITCH, FINE, FREE
+	{140.f, 152.f},   // PAN
+	{154.f, 176.88f}, // ARRANGE, CLOCK
 };
-static const Vec MARKER_BADGE = Vec(11.5f, ROW1_Y);
-static const Vec WAVE_KNOB = Vec(36.f, ROW1_Y);
-static const Vec LFO_RATE_KNOB = Vec(28.f, ROW2_Y);
-static const Vec SMOOTH_KNOB = Vec(44.f, ROW2_Y);
-static const Vec GAIN_KNOB = Vec(62.f, ROW1_Y);
-static const Vec CUTOFF_KNOB = Vec(81.f, ROW1_Y);
-static const Vec DRIVE_KNOB = Vec(103.f, ROW1_Y);
-static const Vec RES_KNOB = Vec(81.f, ROW2_Y);
-static const Vec FILTER_MODE_BUTTON = Vec(103.f, ROW2_Y);
-static const Vec PITCH_KNOB = Vec(123.f, ROW1_Y);
-static const Vec FINE_KNOB = Vec(123.f, ROW2_Y);
-static const Vec PAN_KNOB = Vec(140.f, ROW1_Y);
-static const Vec ARRANGE_BUTTON = Vec(162.94f, ROW1_Y);
-static const Vec CLOCK_INPUT = Vec(162.94f, ROW2_Y);
+static const Vec MARKER_BADGE = Vec(11.f, ROW1_Y);
+static const Vec WAVE_KNOB = Vec(27.f, ROW1_Y);
+static const Vec SMOOTH_KNOB = Vec(27.f, ROW2_Y);
+// The marker's WAVE LFO: shape screen and RATE on top; SYNC / T / D and AMT below.
+static const Vec LFO_SHAPE_SCREEN = Vec(44.5f, 18.5f);
+static const Vec LFO_SHAPE_SIZE = Vec(16.f, 9.f);
+static const Vec LFO_RATE_KNOB = Vec(59.f, ROW1_Y);
+static const Vec LFO_SYNC_BUTTON = Vec(40.5f, ROW2_Y);
+static const Vec LFO_TRIP_BUTTON = Vec(46.4f, ROW2_Y);
+static const Vec LFO_DOT_BUTTON = Vec(51.2f, ROW2_Y);
+static const Vec LFO_AMT_KNOB = Vec(60.5f, ROW2_Y);
+static const Vec GAIN_KNOB = Vec(74.f, ROW1_Y);
+static const Vec CUTOFF_KNOB = Vec(92.f, ROW1_Y);
+static const Vec DRIVE_KNOB = Vec(108.f, ROW1_Y);
+static const Vec RES_KNOB = Vec(92.f, ROW2_Y);
+static const Vec FILTER_MODE_BUTTON = Vec(108.f, ROW2_Y);
+// PITCH steps in semitones; the FREE button next to FINE switches it to continuous.
+static const Vec PITCH_KNOB = Vec(129.f, ROW1_Y);
+static const Vec FINE_KNOB = Vec(124.2f, ROW2_Y);
+static const Vec PITCH_FREE_BUTTON = Vec(132.9f, ROW2_Y);
+static const Vec PAN_KNOB = Vec(146.f, ROW1_Y);
+static const Vec ARRANGE_BUTTON = Vec(165.44f, ROW1_Y);
+static const Vec CLOCK_INPUT = Vec(165.44f, ROW2_Y);
 
 /** Size of the click-to-cycle filter type buttons */
 static const Vec MODE_BUTTON_SIZE = Vec(10.f, 5.f);
+/** Size of the small lit buttons: SYNC / FREE, and the narrower T and D */
+static const Vec LFO_TOGGLE_SIZE = Vec(6.8f, 4.4f);
+static const Vec LFO_TOGGLE_SMALL = Vec(4.2f, 4.4f);
 
 // Middle screen: the 5 markers' waveforms side by side on top, the marker bar, the file line.
 static const Vec SCREEN_POS = Vec(6.f, 46.f);
-static const Vec SCREEN_SIZE = Vec(170.88f, 30.f);
+static const Vec SCREEN_SIZE = Vec(170.88f, 29.5f);
 // The rest is relative to SCREEN_POS. The bar matches the SVG's bar-track (y 64.9..66.1, x 14..168.88).
 static const float SLOTS_TOP = 1.2f;
 static const float SLOTS_BOTTOM = 14.2f;
@@ -65,38 +77,56 @@ static const float BAR_X0 = 8.f;
 static const float BAR_X1 = 162.88f;
 static const float BULLET_R = 2.1f;
 /** File/status line (click it to load a WAV) */
-static const float STATUS_Y = 26.6f;
+static const float STATUS_Y = 26.f;
 
 // Controls band
-static const float CTRL_Y0 = 79.f;
-static const float CTRL_Y1 = 104.f;
-static const float CONTROL_Y = 90.f;
-static const float CONTROL_LABEL_Y = 99.5f;
+static const float CTRL_Y0 = 77.5f;
+static const float CTRL_Y1 = 106.f;
+static const float CONTROL_Y = 90.5f;
+static const float CONTROL_LABEL_Y = 101.2f;
 static const Section CTRL_SECTIONS[] = {
-	{6.f, 50.f},  // POSITION, CV AMT, POS CV
-	{52.f, 76.f}, // FREQ, V/OCT
-	{78.f, 136.f}, // master filter
+	{6.f, 57.f},    // POSITION, CV AMT, POS CV, position LFO
+	{59.f, 81.f},   // FREQ, V/OCT
+	{83.f, 148.f},  // master: TYPE, then CUTOFF RES DRIVE SPREAD FDBK
 };
-static const Vec POSITION_KNOB = Vec(16.f, CONTROL_Y);
-static const Vec POS_ATTEN = Vec(31.f, CONTROL_Y);
-static const Vec POS_INPUT = Vec(43.f, CONTROL_Y);
-static const Vec FREQ_KNOB = Vec(58.f, CONTROL_Y);
-static const Vec VOCT_INPUT = Vec(70.f, CONTROL_Y);
-static const Vec MASTER_MODE_BUTTON = Vec(85.f, CONTROL_Y);
-static const Vec MASTER_CUTOFF_KNOB = Vec(96.5f, CONTROL_Y);
-static const Vec MASTER_RES_KNOB = Vec(107.5f, CONTROL_Y);
-static const Vec MASTER_SPREAD_KNOB = Vec(118.5f, CONTROL_Y);
-static const Vec MASTER_FDBK_KNOB = Vec(129.5f, CONTROL_Y);
+static const Vec POSITION_KNOB = Vec(14.f, CONTROL_Y);
+static const float POS_CV_LABEL_Y = 79.9f;
+static const Vec POS_ATTEN = Vec(27.f, 85.f);
+static const Vec POS_INPUT = Vec(27.f, 96.2f);
+// The position LFO (same controls as a marker's): shape screen, SYNC / T / D, RATE and AMT. Its
+// amount is also in RATE's right-click menu.
+static const Vec POS_LFO_SHAPE_SCREEN = Vec(44.5f, 85.2f);
+static const Vec POS_LFO_SHAPE_SIZE = Vec(17.f, 7.f);
+static const Vec POS_LFO_SYNC_BUTTON = Vec(38.6f, 92.4f);
+static const Vec POS_LFO_TRIP_BUTTON = Vec(45.f, 92.4f);
+static const Vec POS_LFO_DOT_BUTTON = Vec(49.9f, 92.4f);
+static const Vec POS_LFO_RATE_KNOB = Vec(38.5f, 98.8f);
+static const Vec POS_LFO_AMT_KNOB = Vec(51.f, 98.8f);
+static const float POS_LFO_KNOB_LABEL_Y = 104.6f;
+static const Vec FREQ_KNOB = Vec(64.5f, CONTROL_Y);
+static const Vec VOCT_INPUT = Vec(75.5f, CONTROL_Y);
+
+// Master section. Each of the five knobs has its CV amount trimpot and CV jack stacked under it.
+static const float MASTER_LABEL_Y = 79.9f;
+static const float MASTER_KNOB_Y = 85.2f;
+static const float MASTER_AMT_Y = 92.4f;
+static const float MASTER_CV_Y = 100.f;
+static const Vec MASTER_MODE_BUTTON = Vec(89.f, MASTER_KNOB_Y);
+static const float MASTER_COL_X[5] = {101.5f, 111.9f, 122.3f, 132.7f, 143.1f}; // cutoff, res, drive, spread, fdbk
 
 // Outputs on an inverted background
-static const Vec OUT_BOX_POS = Vec(138.f, CTRL_Y0);
-static const Vec OUT_BOX_SIZE = Vec(38.88f, CTRL_Y1 - CTRL_Y0);
-static const Vec LEFT_OUTPUT = Vec(150.f, CONTROL_Y);
-static const Vec RIGHT_OUTPUT = Vec(165.f, CONTROL_Y);
+static const Vec OUT_BOX_POS = Vec(150.f, CTRL_Y0);
+static const Vec OUT_BOX_SIZE = Vec(26.88f, CTRL_Y1 - CTRL_Y0);
+// Master GAIN knob on top, the two jacks under it (labels L / R below them).
+static const Vec MASTER_GAIN_KNOB = Vec(163.44f, 85.4f);
+static const float MASTER_GAIN_LABEL_Y = 79.6f;
+static const Vec LEFT_OUTPUT = Vec(157.5f, 97.6f);
+static const Vec RIGHT_OUTPUT = Vec(169.5f, 97.6f);
+static const float OUTPUT_LABEL_Y = 104.1f;
 
 // Bottom: wavetable dots
-static const Vec DOTS_POS = Vec(6.f, 106.f);
-static const Vec DOTS_SIZE = Vec(170.88f, 14.f);
+static const Vec DOTS_POS = Vec(6.f, 108.f);
+static const Vec DOTS_SIZE = Vec(170.88f, 12.f);
 
 // Pastel, blue through purple to red.
 static const NVGcolor MARKER_COLORS[5] = {

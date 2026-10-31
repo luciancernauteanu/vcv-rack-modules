@@ -50,6 +50,26 @@ struct WaveArtifact : Module {
 		MASTER_RES_PARAM,
 		MASTER_SPREAD_PARAM,
 		MASTER_FDBK_PARAM,
+		MASTER_DRIVE_PARAM,
+		/** CV amounts for the master knobs (-100%..100%, default 0) */
+		MASTER_CUTOFF_AMT_PARAM,
+		MASTER_RES_AMT_PARAM,
+		MASTER_DRIVE_AMT_PARAM,
+		MASTER_SPREAD_AMT_PARAM,
+		MASTER_FDBK_AMT_PARAM,
+		/** wa::LfoShape of each marker's WAVE LFO */
+		ENUMS(MARKER_LFO_SHAPE_PARAM, NUM_MARKERS),
+		/** The position LFO: same controls as a marker's. It moves POSITION, folding at the ends. */
+		POS_LFO_SHAPE_PARAM,
+		POS_LFO_RATE_PARAM,
+		POS_LFO_AMT_PARAM,
+		POS_LFO_SYNC_PARAM,
+		POS_LFO_TRIPLET_PARAM,
+		POS_LFO_DOTTED_PARAM,
+		/** 0 = PITCH steps in whole semitones, 1 = free (continuous) */
+		ENUMS(MARKER_PITCH_FREE_PARAM, NUM_MARKERS),
+		/** Output gain 0..200% (100% = unity), before the output protection */
+		MASTER_GAIN_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -57,6 +77,11 @@ struct WaveArtifact : Module {
 		POS_INPUT,
 		/** 1 pulse per quarter note, for LFO sync */
 		CLOCK_INPUT,
+		MASTER_CUTOFF_INPUT,
+		MASTER_RES_INPUT,
+		MASTER_DRIVE_INPUT,
+		MASTER_SPREAD_INPUT,
+		MASTER_FDBK_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -89,6 +114,7 @@ struct WaveArtifact : Module {
 	wa::MorphEngine engine;
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
+	wa::Lfo posLfo;
 	int displayCounter = 0;
 
 	// UI thread only
@@ -96,10 +122,10 @@ struct WaveArtifact : Module {
 	std::vector<uint8_t> wavBytes;
 	std::string fileName;
 	wa::TableCountMode tableCountMode = wa::TABLES_AUTO;
+	/** How soft the artifacts are (see wa::TableTone); re-analyzes when changed. */
+	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 
-	/** Closest two markers may get on the bar. */
-	static constexpr float MIN_MARKER_GAP = 0.01f;
 
 	WaveArtifact();
 	~WaveArtifact();
@@ -119,8 +145,6 @@ struct WaveArtifact : Module {
 	/** Sets a marker's wavetable to table `t` of the loaded bank. Turns the marker on (in the
 	widest gap of the bar) if it was off, and selects it. */
 	void assignTable(int i, int t);
-	/** Range marker i may be dragged in without crossing its neighbors. */
-	void markerDragRange(int i, float* lo, float* hi);
 	/** Nearest table to a marker's WAVE value, or -1 without a bank. */
 	int markerTable(int i);
 

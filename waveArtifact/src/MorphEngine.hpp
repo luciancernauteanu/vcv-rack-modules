@@ -5,6 +5,7 @@
 
 #include "Filters.hpp"
 #include "Lfo.hpp"
+#include "Limiter.hpp"
 #include "WavetableBank.hpp"
 
 // Per-sample morph oscillator. No Rack dependencies, so it can be tested offline (tests/).
@@ -23,7 +24,7 @@
 // - A marker's wavetable position glides (small moves) or crossfades over 20 ms (jumps).
 // - Structural changes (marker added/removed/reordered, bank swapped) fade out 5 ms, apply
 //   while silent, fade back in 5 ms.
-// - Per-marker gain is smoothed (5 ms). A linked peak limiter keeps the output within 10 V when
+// - Per-marker gain is smoothed (5 ms). A look-ahead limiter (SafetyLimiter) keeps the output within 10 V when
 //   gain or resonance push it hot.
 
 namespace wa {
@@ -75,7 +76,8 @@ struct EngineInput {
 	/** Table to audition instead of the morph, or -1. Switching crossfades over 20 ms. */
 	int previewTable = -1;
 
-	// Master filter (stereo, on the whole output). See MasterFilter.
+	// Master section (stereo, on the whole output): drive -> filter. See MasterFilter. The *Mod values
+	// are CV, added after smoothing so they can run at audio rate.
 	/** -1 = off, else FilterMode */
 	int masterMode = -1;
 	float masterCutoff = 0.7f;
@@ -83,6 +85,14 @@ struct EngineInput {
 	/** -1..1 = -2..+2 octaves between left and right */
 	float masterSpread = 0.f;
 	float masterFdbk = 0.f;
+	float masterDrive = 0.f;
+	/** Output gain, 0..2 (100% = unity) */
+	float masterGain = 1.f;
+	float masterCutoffMod = 0.f;
+	float masterResMod = 0.f;
+	float masterSpreadMod = 0.f;
+	float masterFdbkMod = 0.f;
+	float masterDriveMod = 0.f;
 };
 
 class MorphEngine {
@@ -99,8 +109,7 @@ public:
 		for (int i = 0; i < NUM_MARKERS; i++)
 			tables[i].smoothTime = -1.f; // recompute glide coefficients for the new rate
 		lfoAmountCoef = 1.f - std::exp(-1.f / (LFO_AMOUNT_SMOOTH_TIME * sr));
-		limReleaseCoef = 1.f - std::exp(-1.f / (LIMIT_RELEASE_TIME * sr));
-		limHoldSamples = (int) (LIMIT_HOLD_TIME * sr);
+		limiter.setSampleRate(sr);
 	}
 
 	float getSampleRate() const {
@@ -268,30 +277,30 @@ public:
 		}
 
 		// Master filter on the whole output (preview included).
-		master.process(&l, &r, in.masterMode, in.masterCutoff, in.masterRes, in.masterSpread, in.masterFdbk, smoothCoef, sampleRate);
+		MasterParams mp;
+		mp.mode = in.masterMode;
+		mp.cutoff = in.masterCutoff;
+		mp.res = in.masterRes;
+		mp.spread = in.masterSpread;
+		mp.fdbk = in.masterFdbk;
+		mp.drive = in.masterDrive;
+		mp.cutoffMod = in.masterCutoffMod;
+		mp.resMod = in.masterResMod;
+		mp.spreadMod = in.masterSpreadMod;
+		mp.fdbkMod = in.masterFdbkMod;
+		mp.driveMod = in.masterDriveMod;
+		master.process(&l, &r, mp, smoothCoef, sampleRate);
 
-		// Peak limiter at LIMIT (x5 V = 10 V), linked on both channels. Instant attack, 50 ms hold
-		// (longer than one cycle down to 20 Hz, so the gain stays steady within a waveform instead of
-		// clipping each peak), then a 200 ms release. It turns the level down instead of shaping the
-		// waveform, so a steady tone stays clean, and signals below the limit pass untouched.
-		float peak = std::max(std::fabs(l), std::fabs(r));
-		if (peak >= limEnv) {
-			limEnv = peak;
-			limHoldLeft = limHoldSamples;
-		}
-		else if (limHoldLeft > 0) {
-			limHoldLeft--;
-		}
-		else {
-			limEnv += (peak - limEnv) * limReleaseCoef;
-		}
-		if (limEnv > LIMIT) {
-			float g = LIMIT / limEnv;
-			l *= g;
-			r *= g;
-		}
-		*outL = l;
-		*outR = r;
+		// Master gain (0..200%), then output protection: a look-ahead limiter at LIMIT (x5 V = 10 V), a
+		// DC blocker, a NaN guard and a final clamp. See SafetyLimiter: nothing the module does upstream
+		// (artifact gains, drive, resonance, feedback, master gain) can send more than 10 V out.
+		masterGainS += (std::min(std::max(in.masterGain, 0.f), (float) MAX_MASTER_GAIN) - masterGainS) * smoothCoef;
+		limiter.process(l * masterGainS, r * masterGainS, LIMIT, outL, outR);
+	}
+
+	/** Output gain reduction of the limiter (1 = not limiting), for a meter */
+	float getLimiterGain() const {
+		return limiter.getGain();
 	}
 
 private:
@@ -396,12 +405,13 @@ private:
 		*outR = out * std::sin(angle) * SQRT2;
 	}
 
-	/** One sample of a fractional table index at `phase`. The mip level comes from `freq`, with one
-	octave of headroom so the highest harmonic stays below Nyquist. Fractional indexes blend the two
-	neighboring tables. */
+	/** One sample of a fractional table index at `phase`. The band-limited level comes from `freq`:
+	the brighter of the two blended levels never holds a harmonic above Nyquist (one level of
+	headroom, half an octave), so there is no aliasing while the top end reaches 70-100% of Nyquist
+	at every pitch. Fractional indexes blend the two neighboring tables. */
 	float readAt(const WavetableBank& bank, float idx, double phase, float freq) const {
 		float maxHarmonic = sampleRate / (2.f * freq);
-		float lv = std::log2((FRAME_SIZE / 2) / maxHarmonic) + 1.f;
+		float lv = LEVELS_PER_OCTAVE * std::log2((FRAME_SIZE / 2) / maxHarmonic) + MIP_HEADROOM;
 		lv = std::min(std::max(lv, 0.f), (float) (NUM_LEVELS - 1));
 		int l0 = (int) lv;
 		int l1 = std::min(l0 + 1, NUM_LEVELS - 1);
@@ -409,13 +419,22 @@ private:
 
 		float x = (float) (phase * FRAME_SIZE);
 		int i0 = std::min((int) x, FRAME_SIZE - 1);
+		int im = (i0 - 1) & (FRAME_SIZE - 1);
 		int i1 = (i0 + 1) & (FRAME_SIZE - 1);
+		int i2 = (i0 + 2) & (FRAME_SIZE - 1);
 		float fr = x - i0;
+		// Cubic (Catmull-Rom) interpolation between table samples: linear interpolation leaves
+		// a grainy, slightly harsh haze of images above the harmonics, cubic does not.
+		auto cubic = [&](const float* f) {
+			float ym = f[im], y0 = f[i0], y1 = f[i1], y2 = f[i2];
+			float a = -0.5f * ym + 1.5f * y0 - 1.5f * y1 + 0.5f * y2;
+			float b = ym - 2.5f * y0 + 2.f * y1 - 0.5f * y2;
+			float c = -0.5f * ym + 0.5f * y1;
+			return ((a * fr + b) * fr + c) * fr + y0;
+		};
 		auto readTable = [&](int t) {
-			const float* f0 = bank.frame(t, l0);
-			const float* f1 = bank.frame(t, l1);
-			float s0 = f0[i0] + (f0[i1] - f0[i0]) * fr;
-			float s1 = f1[i0] + (f1[i1] - f1[i0]) * fr;
+			float s0 = cubic(bank.frame(t, l0));
+			float s1 = (l1 == l0) ? s0 : cubic(bank.frame(t, l1));
 			return s0 + (s1 - s0) * lf;
 		};
 		int t0 = std::min(std::max((int) idx, 0), bank.numTables - 1);
@@ -439,8 +458,9 @@ private:
 	static constexpr float MAX_GAIN = 4.f;
 	/** Output ceiling in engine units; the module scales by 5 V, so this is 10 V. */
 	static constexpr float LIMIT = 2.f;
-	static constexpr float LIMIT_HOLD_TIME = 0.05f;
-	static constexpr float LIMIT_RELEASE_TIME = 0.2f;
+	static constexpr float MAX_MASTER_GAIN = 2.f;
+	/** Levels of safety above the exact band limit (see readAt) */
+	static constexpr float MIP_HEADROOM = 1.f;
 
 	struct TableState {
 		/** Fractional table index */
@@ -465,24 +485,23 @@ private:
 	float smoothCoef = 0.f;
 	float fadeStep = 0.f;
 	float tableFadeStep = 0.f;
-	float limReleaseCoef = 0.f;
 	float lfoAmountCoef = 0.f;
-	int limHoldSamples = 0;
-	int limHoldLeft = 0;
 
 	double phases[NUM_MARKERS] = {};
 	float posS = 0.f;
 	float panS = 0.f;
 	// Marker filter (one path after the crossfade; settings interpolated between the two markers)
-	float cutoffS = 0.5f;
+	// Starts as the panel default (low-pass, wide open) so there is no sweep at start-up.
+	float cutoffS = 1.f;
 	float resS = 0.f;
 	float driveS = 0.f;
-	float mixS[NUM_MIX] = {1.f, 0.f, 0.f, 0.f, 0.f};
-	Drive drive;
+	float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
+	WarmDrive drive;
 	Svf markerSvf;
 	MasterFilter master;
 	float gainS[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
-	float limEnv = 0.f;
+	SafetyLimiter limiter;
+	float masterGainS = 1.f;
 	/** Declick gain (structural fades) */
 	float gain = 0.f;
 

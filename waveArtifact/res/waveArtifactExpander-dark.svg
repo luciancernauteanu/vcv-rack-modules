@@ -4,11 +4,11 @@
   <g id="panel">
     <rect id="background" x="0" y="0" width="50.8" height="128.5" fill="#23262b"/>
     <g id="sections" fill="#2d3137">
-      <rect x="4" y="11" width="42.8" height="14.5" rx="2" ry="2"/>
-      <rect x="4" y="27.5" width="42.8" height="65.5" rx="2" ry="2"/>
-      <rect x="4" y="95" width="42.8" height="25" rx="2" ry="2"/>
+      <rect x="4" y="11" width="42.8" height="13.8" rx="2" ry="2"/>
+      <rect x="4" y="26" width="42.8" height="57" rx="2" ry="2"/>
+      <rect x="4" y="85" width="42.8" height="37" rx="2" ry="2"/>
     </g>
-    <rect id="lfo1-out" x="7.5" y="108.4" width="13" height="11" rx="1.5" ry="1.5" fill="#e6e6e6"/>
-    <rect id="lfo2-out" x="30.5" y="108.4" width="13" height="11" rx="1.5" ry="1.5" fill="#e6e6e6"/>
+    <rect id="lfo1-out" x="7.8" y="112.6" width="14" height="9.2" rx="1.5" ry="1.5" fill="#e6e6e6"/>
+    <rect id="lfo2-out" x="29.2" y="112.6" width="14" height="9.2" rx="1.5" ry="1.5" fill="#e6e6e6"/>
   </g>
 </svg>
