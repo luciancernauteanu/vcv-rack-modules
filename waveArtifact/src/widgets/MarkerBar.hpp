@@ -1,0 +1,413 @@
+#pragma once
+#include "../Layout.hpp"
+#include "../WaveArtifact.hpp"
+#include "WaveDraw.hpp"
+
+/** Middle screen.
+Top: one slot per marker (1..5, side by side) showing the waveform it plays right now, so it follows
+WAVE, its LFO and dot assignments. The slot lights up with the marker's share of the output.
+While a table is previewed, it covers the slots; click it to stop the preview.
+Bottom: the marker bar. Click empty bar to add a marker (up to 5; when all 5 are in use it moves
+the playhead instead), drag a bullet to move it (markers never cross), click a bullet or slot to
+edit that marker, right-click a bullet or slot to delete it. Drag the white playhead to set POSITION.
+*/
+struct MarkerBar : widget::Widget {
+	WaveArtifact* module = nullptr;
+
+	enum DragMode {
+		DRAG_NONE,
+		DRAG_MARKER,
+		DRAG_PLAYHEAD,
+	};
+	DragMode dragMode = DRAG_NONE;
+	bool loadOnRelease = false;
+	bool hoverStatus = false;
+	int dragMarker = -1;
+	float dragLo = 0.f;
+	float dragHi = 1.f;
+
+	// Geometry in px
+	float barX0() {
+		return mm2px(layout::BAR_X0);
+	}
+	float barX1() {
+		return mm2px(layout::BAR_X1);
+	}
+	float barY() {
+		return mm2px(layout::BAR_Y);
+	}
+	float xToPos(float x) {
+		return clamp((x - barX0()) / (barX1() - barX0()), 0.f, 1.f);
+	}
+	float posToX(float p) {
+		return barX0() + p * (barX1() - barX0());
+	}
+	math::Rect slotRect(int i) {
+		float x0 = mm2px(layout::SLOTS_MARGIN);
+		float gap = mm2px(layout::SLOTS_GAP);
+		float w = (box.size.x - 2.f * x0 - (wa::NUM_MARKERS - 1) * gap) / wa::NUM_MARKERS;
+		float top = mm2px(layout::SLOTS_TOP);
+		return math::Rect(x0 + i * (w + gap), top, w, mm2px(layout::SLOTS_BOTTOM) - top);
+	}
+	math::Rect slotsArea() {
+		math::Rect a = slotRect(0);
+		a.size.x = slotRect(wa::NUM_MARKERS - 1).getRight() - a.pos.x;
+		return a;
+	}
+
+	/** Active marker whose bullet is under `p`, nearest first, or -1. */
+	int bulletAt(Vec p) {
+		int best = -1;
+		float bestD = mm2px(layout::BULLET_R * 1.5f);
+		for (int i = 0; i < wa::NUM_MARKERS; i++) {
+			if (!module->isMarkerActive(i))
+				continue;
+			float x = posToX(module->params[WaveArtifact::MARKER_POS_PARAM + i].getValue());
+			float d = p.minus(Vec(x, barY())).norm();
+			// Prefer the selected marker when bullets overlap.
+			if (d < bestD || (d <= bestD + 0.5f && i == module->selectedMarker)) {
+				best = i;
+				bestD = d;
+			}
+		}
+		return best;
+	}
+
+	/** Mouse position in this widget's coordinates, valid during a drag. */
+	Vec mouseLocal() {
+		Vec offset = getAbsoluteOffset(Vec(0, 0));
+		return APP->scene->getMousePos().minus(offset).div(getAbsoluteZoom());
+	}
+
+	void openMarkerMenu(int i) {
+		WaveArtifact* m = module;
+		ui::Menu* menu = createMenu();
+		menu->addChild(createMenuLabel("Marker " + std::to_string(i + 1)));
+		int t = m->markerTable(i);
+		if (t >= 0)
+			menu->addChild(createMenuLabel(string::f("Wavetable %d / %d", t + 1, m->activeBank.load()->numTables)));
+		menu->addChild(createMenuItem("Edit", "", [=]() {
+			m->selectedMarker = i;
+		}));
+		menu->addChild(createMenuItem("Delete", "", [=]() {
+			m->deleteMarker(i);
+		}, m->activeMarkerCount() <= 1));
+	}
+
+	/** The file line at the bottom of the screen; clicking it loads a WAV. */
+	bool inStatusLine(Vec p) {
+		return p.y >= mm2px(layout::STATUS_Y - 3.f);
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		if (!module || e.action != GLFW_PRESS)
+			return;
+		bool left = e.button == GLFW_MOUSE_BUTTON_LEFT;
+		bool right = e.button == GLFW_MOUSE_BUTTON_RIGHT;
+		if (!left && !right)
+			return;
+
+		// Load: the file line, or the empty screen before anything is loaded. The dialog opens on
+		// release (onDragEnd), so the press/release pair is not split by the modal dialog.
+		bool noBank = !module->activeBank.load();
+		if (left && (inStatusLine(e.pos) || (noBank && e.pos.y < mm2px(layout::SLOTS_BOTTOM + 1.f)))) {
+			loadOnRelease = true;
+			e.consume(this);
+			return;
+		}
+
+		// Slots
+		if (e.pos.y < mm2px(layout::SLOTS_BOTTOM + 1.f)) {
+			if (module->previewTable >= 0) {
+				if (left) {
+					module->previewTable = -1;
+					e.consume(this);
+				}
+				return;
+			}
+			for (int i = 0; i < wa::NUM_MARKERS; i++) {
+				if (!slotRect(i).contains(e.pos) || !module->isMarkerActive(i))
+					continue;
+				if (left)
+					module->selectedMarker = i;
+				else
+					openMarkerMenu(i);
+				e.consume(this);
+				return;
+			}
+			return;
+		}
+
+		// Bar
+		int hit = bulletAt(e.pos);
+		if (hit >= 0) {
+			if (right) {
+				openMarkerMenu(hit);
+			}
+			else {
+				module->selectedMarker = hit;
+				dragMode = DRAG_MARKER;
+				dragMarker = hit;
+				module->markerDragRange(hit, &dragLo, &dragHi);
+			}
+			e.consume(this);
+			return;
+		}
+		if (!left)
+			return; // right-click on empty bar: the module's menu
+		float playX = posToX(module->shownPosition.load());
+		if (std::fabs(e.pos.x - playX) < mm2px(1.5f) || module->activeMarkerCount() >= wa::NUM_MARKERS) {
+			dragMode = DRAG_PLAYHEAD;
+			module->params[WaveArtifact::POSITION_PARAM].setValue(xToPos(e.pos.x));
+		}
+		else {
+			int added = module->addMarker(xToPos(e.pos.x));
+			if (added >= 0) {
+				dragMode = DRAG_MARKER;
+				dragMarker = added;
+				module->markerDragRange(added, &dragLo, &dragHi);
+			}
+		}
+		e.consume(this);
+	}
+
+	void onDragMove(const DragMoveEvent& e) override {
+		if (!module || e.button != GLFW_MOUSE_BUTTON_LEFT)
+			return;
+		float p = xToPos(mouseLocal().x);
+		if (dragMode == DRAG_MARKER && dragMarker >= 0)
+			module->params[WaveArtifact::MARKER_POS_PARAM + dragMarker].setValue(clamp(p, dragLo, dragHi));
+		else if (dragMode == DRAG_PLAYHEAD)
+			module->params[WaveArtifact::POSITION_PARAM].setValue(p);
+	}
+
+	void onDragEnd(const DragEndEvent& e) override {
+		dragMode = DRAG_NONE;
+		dragMarker = -1;
+		if (loadOnRelease) {
+			loadOnRelease = false;
+			openLoadDialog(module);
+		}
+	}
+
+	void onHover(const HoverEvent& e) override {
+		hoverStatus = module && inStatusLine(e.pos);
+		Widget::onHover(e);
+		e.consume(this); // needed to receive onLeave
+	}
+
+	void onLeave(const LeaveEvent& e) override {
+		hoverStatus = false;
+	}
+
+	void drawStatus(const DrawArgs& args) {
+		std::shared_ptr<window::Font> font = wadraw::monoFont();
+		if (!font)
+			return;
+		std::string text = module ? module->getStatus() : "Load a WAV (max 2 MB)";
+		float y = mm2px(layout::STATUS_Y);
+		float x = mm2px(layout::BAR_X0);
+		nvgFontFaceId(args.vg, font->handle);
+		nvgFontSize(args.vg, 9.5f);
+		nvgTextAlign(args.vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+		nvgFillColor(args.vg, hoverStatus ? nvgRGB(0xff, 0xff, 0xff) : layout::SCREEN_TEXT);
+		float right = nvgText(args.vg, x, y, text.c_str(), NULL);
+		if (hoverStatus) {
+			nvgBeginPath(args.vg);
+			nvgMoveTo(args.vg, x, y + 5.f);
+			nvgLineTo(args.vg, right, y + 5.f);
+			nvgStrokeColor(args.vg, nvgRGBAf(1.f, 1.f, 1.f, 0.6f));
+			nvgStrokeWidth(args.vg, 0.7f);
+			nvgStroke(args.vg);
+		}
+		if (module && module->activeBank.load()) {
+			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+			nvgFillColor(args.vg, layout::SCREEN_DIM);
+			nvgText(args.vg, mm2px(layout::BAR_X1), y, "click the file name to load another WAV", NULL);
+		}
+	}
+
+	void drawLayer(const DrawArgs& args, int layer) override {
+		if (layer == 1) {
+			nvgSave(args.vg);
+			nvgScissor(args.vg, 0, 0, box.size.x, box.size.y);
+			drawSlots(args);
+			drawPreview(args);
+			drawBar(args);
+			drawStatus(args);
+			nvgRestore(args.vg);
+		}
+		Widget::drawLayer(args, layer);
+	}
+
+	void drawSlots(const DrawArgs& args) {
+		// Safe to read: only the UI thread (this thread) frees banks, in ModuleWidget::step().
+		const wa::WavetableBank* bank = module ? module->activeBank.load() : nullptr;
+		std::shared_ptr<window::Font> font = wadraw::monoFont();
+		float pad = mm2px(0.8f);
+
+		for (int i = 0; i < wa::NUM_MARKERS; i++) {
+			math::Rect r = slotRect(i);
+			NVGcolor c = layout::MARKER_COLORS[i];
+			bool active = module ? module->isMarkerActive(i) : (i < 3);
+			bool selected = module && module->selectedMarker == i;
+			float heard = module ? module->shownHeard[i].load() : (i == 0 ? 1.f : 0.f);
+
+			// Fill grows with this marker's share of the output.
+			nvgBeginPath(args.vg);
+			nvgRoundedRect(args.vg, r.pos.x, r.pos.y, r.size.x, r.size.y, 3.f);
+			nvgFillColor(args.vg, nvgTransRGBAf(c, active ? 0.05f + 0.18f * heard : 0.02f));
+			nvgFill(args.vg);
+			nvgStrokeColor(args.vg, nvgTransRGBAf(c, selected ? 1.f : active ? 0.45f : 0.15f));
+			nvgStrokeWidth(args.vg, selected ? 1.5f : 0.75f);
+			nvgStroke(args.vg);
+
+			math::Rect wr = r.grow(Vec(-pad, -pad));
+			wr.pos.y += mm2px(2.2f);
+			wr.size.y -= mm2px(2.2f);
+			// Center line
+			nvgBeginPath(args.vg);
+			nvgMoveTo(args.vg, wr.pos.x, wr.getCenter().y);
+			nvgLineTo(args.vg, wr.getRight(), wr.getCenter().y);
+			nvgStrokeColor(args.vg, nvgTransRGBAf(c, 0.12f));
+			nvgStrokeWidth(args.vg, 0.5f);
+			nvgStroke(args.vg);
+
+			float index = 0.f;
+			if (active) {
+				if (bank) {
+					index = module->shownIndex[i].load();
+					wadraw::drawTable(args.vg, *bank, index, wr, c, 1.3f);
+				}
+				else if (!module) {
+					wadraw::drawSine(args.vg, wr, 2.f + i, c, 1.3f);
+				}
+			}
+
+			if (!font)
+				continue;
+			nvgFontFaceId(args.vg, font->handle);
+			nvgFontSize(args.vg, 9.f);
+			nvgFillColor(args.vg, nvgTransRGBAf(c, active ? 1.f : 0.35f));
+			nvgTextAlign(args.vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+			std::string num = std::to_string(i + 1);
+			nvgText(args.vg, r.pos.x + pad + 1.f, r.pos.y + pad, num.c_str(), NULL);
+			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
+			std::string info;
+			if (!active)
+				info = "off";
+			else if (bank)
+				info = string::f("%d/%d", (int) std::round(index) + 1, bank->numTables);
+			nvgText(args.vg, r.getRight() - pad - 1.f, r.pos.y + pad, info.c_str(), NULL);
+		}
+
+		if (module && !bank && font) {
+			math::Rect a = slotsArea();
+			nvgFontFaceId(args.vg, font->handle);
+			nvgFontSize(args.vg, 11.f);
+			nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+			nvgFillColor(args.vg, layout::SCREEN_DIM);
+			nvgText(args.vg, a.getCenter().x, a.getCenter().y + mm2px(1.f), "Click here to load a WAV", NULL);
+		}
+	}
+
+	void drawPreview(const DrawArgs& args) {
+		if (!module)
+			return;
+		int t = module->previewTable.load();
+		const wa::WavetableBank* bank = module->activeBank.load();
+		if (t < 0 || !bank || t >= bank->numTables)
+			return;
+		math::Rect a = slotsArea();
+		nvgBeginPath(args.vg);
+		nvgRoundedRect(args.vg, a.pos.x, a.pos.y, a.size.x, a.size.y, 3.f);
+		nvgFillColor(args.vg, nvgRGBAf(0.03f, 0.035f, 0.05f, 0.94f));
+		nvgFill(args.vg);
+		nvgStrokeColor(args.vg, layout::SCREEN_TEXT);
+		nvgStrokeWidth(args.vg, 1.f);
+		nvgStroke(args.vg);
+
+		math::Rect wr = a.grow(Vec(-mm2px(30.f), -mm2px(1.5f)));
+		wadraw::drawTable(args.vg, *bank, (float) t, wr, nvgRGB(0xf0, 0xf0, 0xff), 1.6f);
+
+		std::shared_ptr<window::Font> font = wadraw::monoFont();
+		if (!font)
+			return;
+		nvgFontFaceId(args.vg, font->handle);
+		nvgFontSize(args.vg, 10.f);
+		nvgFillColor(args.vg, layout::SCREEN_TEXT);
+		float x = a.pos.x + mm2px(2.f);
+		nvgTextAlign(args.vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+		nvgText(args.vg, x, a.pos.y + mm2px(1.5f), "PREVIEW", NULL);
+		std::string tt = string::f("table %d/%d", t + 1, bank->numTables);
+		nvgText(args.vg, x, a.pos.y + mm2px(5.5f), tt.c_str(), NULL);
+		nvgTextAlign(args.vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+		nvgFillColor(args.vg, layout::SCREEN_DIM);
+		nvgText(args.vg, x, a.getBottom() - mm2px(1.2f), "click to stop", NULL);
+	}
+
+	void drawBar(const DrawArgs& args) {
+		float y = barY();
+		nvgBeginPath(args.vg);
+		nvgRoundedRect(args.vg, barX0(), y - mm2px(0.6f), barX1() - barX0(), mm2px(1.2f), mm2px(0.6f));
+		nvgFillColor(args.vg, nvgRGB(0x3a, 0x3f, 0x52));
+		nvgFill(args.vg);
+
+		// Playhead: where the morph is now (knob + CV, smoothed).
+		float play = module ? module->shownPosition.load() : 0.35f;
+		float px = posToX(play);
+		float top = mm2px(layout::SLOTS_BOTTOM + 1.2f);
+		float bottom = mm2px(layout::BAR_Y + 3.2f);
+		nvgBeginPath(args.vg);
+		nvgMoveTo(args.vg, px, top);
+		nvgLineTo(args.vg, px, bottom);
+		nvgStrokeColor(args.vg, nvgRGBAf(1.f, 1.f, 1.f, 0.85f));
+		nvgStrokeWidth(args.vg, 1.2f);
+		nvgStroke(args.vg);
+		float tri = mm2px(1.3f);
+		nvgBeginPath(args.vg);
+		nvgMoveTo(args.vg, px - tri, top);
+		nvgLineTo(args.vg, px + tri, top);
+		nvgLineTo(args.vg, px, top + tri * 1.2f);
+		nvgClosePath(args.vg);
+		nvgFillColor(args.vg, nvgRGB(0xff, 0xff, 0xff));
+		nvgFill(args.vg);
+
+		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/Nunito-Bold.ttf"));
+		float r = mm2px(layout::BULLET_R);
+		// Selected marker last, so it draws on top.
+		int sel = module ? module->selectedMarker : -1;
+		for (int k = 0; k <= wa::NUM_MARKERS; k++) {
+			int i = (k < wa::NUM_MARKERS) ? k : sel;
+			if (k < wa::NUM_MARKERS && i == sel)
+				continue;
+			if (k == wa::NUM_MARKERS && !module)
+				break;
+			bool active = module ? module->isMarkerActive(i) : (i < 3);
+			if (!active)
+				continue;
+			float pos = module ? module->params[WaveArtifact::MARKER_POS_PARAM + i].getValue() : i * 0.5f;
+			float x = posToX(pos);
+			NVGcolor c = layout::MARKER_COLORS[i];
+			nvgBeginPath(args.vg);
+			nvgCircle(args.vg, x, y, r);
+			nvgFillColor(args.vg, c);
+			nvgFill(args.vg);
+			if (module && i == sel) {
+				nvgBeginPath(args.vg);
+				nvgCircle(args.vg, x, y, r + 1.6f);
+				nvgStrokeColor(args.vg, nvgRGB(0xff, 0xff, 0xff));
+				nvgStrokeWidth(args.vg, 1.2f);
+				nvgStroke(args.vg);
+			}
+			if (font) {
+				nvgFontFaceId(args.vg, font->handle);
+				nvgFontSize(args.vg, r * 1.4f);
+				nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+				nvgFillColor(args.vg, nvgRGB(0x16, 0x18, 0x22));
+				std::string label = std::to_string(i + 1);
+				nvgText(args.vg, x, y + 0.5f, label.c_str(), NULL);
+			}
+		}
+	}
+};

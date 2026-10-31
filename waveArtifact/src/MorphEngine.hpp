@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "Filters.hpp"
 #include "Lfo.hpp"
 #include "WavetableBank.hpp"
 
@@ -10,7 +11,8 @@
 //
 // Signal path: each marker has its own pitch and phase -> read the two neighboring markers'
 // tables (band-limited mip level picked from each marker's frequency) -> crossfade by position
-// -> band-pass with dry/wet -> equal-power pan -> declick gain.
+// -> drive -> multimode filter (its mode mix morphs between the markers) -> declick gain
+// -> equal-power pan -> preview mix -> stereo master filter -> limiter.
 //
 // The morph is audio-only: pitch is NOT interpolated between markers, so a marker at -12 st and
 // a marker at 0 st crossfade as two separate pitches, never sliding (glide could be a later option).
@@ -39,18 +41,24 @@ struct MarkerInput {
 	float wave = 0.f;
 	/** Glide time for WAVE moves in seconds, from MIN_WAVE_SMOOTH (default) up to MAX_WAVE_SMOOTH. */
 	float waveSmooth = 0.02f;
-	/** WAVE LFO output -1..1. Added after the glide, so its depth and timing are exact. */
+	/** WAVE LFO output -1..1. Moves the WAVE glide target, so the marker's SMOOTH applies to it. */
 	float lfo = 0.f;
 	/** LFO depth 0..1 in WAVE units (1 = swing across the whole sample). Smoothed in the engine. */
 	float lfoAmount = 0.f;
-	/** 0 = filter off, otherwise center frequency 20 Hz * 1000^bp (20 Hz..20 kHz) */
-	float bp = 0.f;
-	/** Band-pass resonance 0..1: Q 0.7 (wide) .. 20 (narrow, ringing) */
+	/** 0 = filter off, otherwise cutoff 20 Hz * 1000^cutoff (20 Hz..20 kHz) */
+	float cutoff = 0.f;
+	/** FilterMode: LP, BP, HP, notch */
+	int filterMode = MODE_LP;
+	/** Resonance 0..1: Q 0.7 (wide) .. 20 (narrow, ringing) */
 	float res = 0.f;
+	/** Pre-filter soft-clip drive 0..1 (0 = clean). Works with the filter off too. */
+	float drive = 0.f;
 	/** Linear gain applied to this marker's audio, 0..4 (400%) */
 	float gain = 1.f;
 	/** Semitones */
 	float pitch = 0.f;
+	/** Fine tune in semitones (-1..1) */
+	float fine = 0.f;
 	/** -1 (left) .. 1 (right) */
 	float pan = 0.f;
 };
@@ -64,6 +72,17 @@ struct EngineInput {
 	const WavetableBank* bank = nullptr;
 	/** Fade out and stay silent, e.g. while a bank swap is pending. */
 	bool holdSilent = false;
+	/** Table to audition instead of the morph, or -1. Switching crossfades over 20 ms. */
+	int previewTable = -1;
+
+	// Master filter (stereo, on the whole output). See MasterFilter.
+	/** -1 = off, else FilterMode */
+	int masterMode = -1;
+	float masterCutoff = 0.7f;
+	float masterRes = 0.f;
+	/** -1..1 = -2..+2 octaves between left and right */
+	float masterSpread = 0.f;
+	float masterFdbk = 0.f;
 };
 
 class MorphEngine {
@@ -98,9 +117,20 @@ public:
 		return posS;
 	}
 
-	/** Current (gliding) fractional table index of a marker's WAVE knob, before the LFO. */
+	/** Current (gliding) fractional table index of a marker, including its LFO. Updated for every
+	marker, heard or not. */
 	float getTableIndex(int marker) const {
 		return tables[marker].cur;
+	}
+
+	/** How much of the morph output comes from a marker right now (0..1). */
+	float getHeard(int marker) const {
+		return heard[marker];
+	}
+
+	/** 0 = morph only, 1 = preview only. */
+	float getPreviewLevel() const {
+		return previewEnv;
 	}
 
 	/** Table index actually played, including the LFO. Updated only while the marker is heard. */
@@ -150,7 +180,8 @@ public:
 					tables[i].cur = tables[i].prev = tables[i].lastTarget = t;
 					tables[i].fade = 1.f;
 				}
-				ic1 = ic2 = 0.f;
+				markerSvf.reset();
+				master.reset();
 			}
 			structureApplied = true;
 		}
@@ -158,7 +189,9 @@ public:
 		float target = std::min(std::max(in.position, 0.f), 1.f);
 		posS += (target - posS) * smoothCoef;
 
-		// Wavetable position per marker (the WAVE knob; the LFO is added later, after this glide).
+		// Wavetable position per marker: the WAVE knob plus the marker's LFO, folded back at the
+		// sample's ends. That sum is the glide target, so SMOOTH shapes the LFO too: a long SMOOTH
+		// slows and softens the LFO, and at minimum it only trims the fastest motion.
 		// Moves glide (one-pole, time set by the marker's SMOOTH), so the read passes smoothly
 		// through neighboring tables.
 		// At minimum SMOOTH, a target that jumps by more than JUMP_TABLES in one step (a fast knob
@@ -181,7 +214,7 @@ public:
 				s.smoothTime = smooth;
 				s.smoothCoef = 1.f - std::exp(-1.f / (smooth * sampleRate));
 			}
-			float t = tableIndex(in.markers[i].wave, in.bank);
+			float t = tableIndex(fold01(in.markers[i].wave + s.lfoAmountS * in.markers[i].lfo), in.bank);
 			bool atMinimum = smooth <= MIN_WAVE_SMOOTH * 1.05f;
 			bool jumped = std::fabs(t - s.lastTarget) > JUMP_TABLES;
 			s.lastTarget = t;
@@ -195,10 +228,76 @@ public:
 			}
 		}
 
-		if (!in.bank || gain <= 0.f)
-			return;
-		const WavetableBank& bank = *in.bank;
+		float l = 0.f, r = 0.f;
+		if (in.bank && gain > 0.f)
+			renderMorph(in, *in.bank, &l, &r);
 
+		// Preview (audition) of one table: replaces the morph with a 20 ms crossfade, plays at the
+		// base pitch, centered, unfiltered. A different table while previewing crossfades too.
+		// It fades out like the morph while a bank swap is pending.
+		bool wantPreview = in.previewTable >= 0 && in.bank && in.bank == appliedBank && !in.holdSilent;
+		if (wantPreview) {
+			int t = std::min(in.previewTable, in.bank->numTables - 1);
+			if (previewEnv <= 0.f) {
+				previewCur = previewPrev = t;
+				previewFade = 1.f;
+			}
+			else if (t != previewCur && previewFade >= 1.f) {
+				previewPrev = previewCur;
+				previewCur = t;
+				previewFade = 0.f;
+			}
+		}
+		previewEnv = wantPreview ? std::min(1.f, previewEnv + tableFadeStep) : std::max(0.f, previewEnv - tableFadeStep);
+		previewFade = std::min(1.f, previewFade + tableFadeStep);
+		if (previewEnv > 0.f && in.bank && in.bank == appliedBank) {
+			const WavetableBank& bank = *in.bank;
+			float f = FREQ_C4 * std::exp2(in.voct);
+			f = std::min(std::max(f, 0.01f), 0.45f * sampleRate);
+			int maxT = bank.numTables - 1;
+			float p = readAt(bank, (float) std::min(previewCur, maxT), previewPhase, f);
+			if (previewFade < 1.f) {
+				float old = readAt(bank, (float) std::min(previewPrev, maxT), previewPhase, f);
+				p = old + (p - old) * previewFade;
+			}
+			previewPhase += f / sampleRate;
+			if (previewPhase >= 1.0)
+				previewPhase -= std::floor(previewPhase);
+			l += (p - l) * previewEnv;
+			r += (p - r) * previewEnv;
+		}
+
+		// Master filter on the whole output (preview included).
+		master.process(&l, &r, in.masterMode, in.masterCutoff, in.masterRes, in.masterSpread, in.masterFdbk, smoothCoef, sampleRate);
+
+		// Peak limiter at LIMIT (x5 V = 10 V), linked on both channels. Instant attack, 50 ms hold
+		// (longer than one cycle down to 20 Hz, so the gain stays steady within a waveform instead of
+		// clipping each peak), then a 200 ms release. It turns the level down instead of shaping the
+		// waveform, so a steady tone stays clean, and signals below the limit pass untouched.
+		float peak = std::max(std::fabs(l), std::fabs(r));
+		if (peak >= limEnv) {
+			limEnv = peak;
+			limHoldLeft = limHoldSamples;
+		}
+		else if (limHoldLeft > 0) {
+			limHoldLeft--;
+		}
+		else {
+			limEnv += (peak - limEnv) * limReleaseCoef;
+		}
+		if (limEnv > LIMIT) {
+			float g = LIMIT / limEnv;
+			l *= g;
+			r *= g;
+		}
+		*outL = l;
+		*outR = r;
+	}
+
+private:
+	/** The morph itself: neighboring markers' oscillators crossfaded by position, band-pass, pan.
+	Writes the stereo signal before the limiter. */
+	void renderMorph(const EngineInput& in, const WavetableBank& bank, float* outL, float* outR) {
 		// Neighboring markers a, b and blend weight w, using the applied (current) structure.
 		int a = order[0], b = order[0];
 		float w = 0.f;
@@ -228,50 +327,22 @@ public:
 		// pitch stay phase-locked (their tables then blend without cancelling) whenever they meet.
 		float freqs[NUM_MARKERS];
 		for (int m = 0; m < NUM_MARKERS; m++) {
-			float f = FREQ_C4 * std::exp2(in.voct + in.markers[m].pitch / 12.f);
+			float f = FREQ_C4 * std::exp2(in.voct + (in.markers[m].pitch + in.markers[m].fine) / 12.f);
 			freqs[m] = std::min(std::max(f, 0.01f), 0.45f * sampleRate);
 		}
 
-		auto readMarker = [&](int m) {
-			// Mip level: one octave of headroom so the highest harmonic stays below Nyquist.
-			float maxHarmonic = sampleRate / (2.f * freqs[m]);
-			float lv = std::log2((FRAME_SIZE / 2) / maxHarmonic) + 1.f;
-			lv = std::min(std::max(lv, 0.f), (float) (NUM_LEVELS - 1));
-			int l0 = (int) lv;
-			int l1 = std::min(l0 + 1, NUM_LEVELS - 1);
-			float lf = lv - l0;
+		for (int m = 0; m < NUM_MARKERS; m++)
+			heard[m] = 0.f;
+		heard[a] += 1.f - w;
+		heard[b] += w;
 
-			float x = (float) (phases[m] * FRAME_SIZE);
-			int i0 = std::min((int) x, FRAME_SIZE - 1);
-			int i1 = (i0 + 1) & (FRAME_SIZE - 1);
-			float fr = x - i0;
-			auto readTable = [&](int t) {
-				const float* f0 = bank.frame(t, l0);
-				const float* f1 = bank.frame(t, l1);
-				float s0 = f0[i0] + (f0[i1] - f0[i0]) * fr;
-				float s1 = f1[i0] + (f1[i1] - f1[i0]) * fr;
-				return s0 + (s1 - s0) * lf;
-			};
-			// Fractional index: blend the two neighboring tables.
-			auto readIndex = [&](float idx) {
-				int t0 = std::min(std::max((int) idx, 0), bank.numTables - 1);
-				int t1 = std::min(t0 + 1, bank.numTables - 1);
-				float tf = idx - t0;
-				float v0 = readTable(t0);
-				return (tf > 0.f && t1 != t0) ? v0 + (readTable(t1) - v0) * tf : v0;
-			};
-			// The LFO offset is added to the glided position and folded back at the sample's ends.
+		auto readMarker = [&](int m) {
+			// The LFO is already inside s.cur (it moves the glide target), so SMOOTH shapes it too.
 			const TableState& s = tables[m];
-			float span = (float) (bank.numTables - 1);
-			float mod = s.lfoAmountS * in.markers[m].lfo;
-			auto modulated = [&](float idx) {
-				return (span > 0.f && mod != 0.f) ? fold01(idx / span + mod) * span : idx;
-			};
-			float idx = modulated(s.cur);
-			playedIndex[m] = idx;
-			float v = readIndex(idx);
+			playedIndex[m] = s.cur;
+			float v = readAt(bank, s.cur, phases[m], freqs[m]);
 			if (s.fade < 1.f) {
-				float old = readIndex(modulated(s.prev));
+				float old = readAt(bank, s.prev, phases[m], freqs[m]);
 				v = old + (v - old) * s.fade;
 			}
 			return v;
@@ -291,59 +362,69 @@ public:
 				phases[m] -= std::floor(phases[m]);
 		}
 
-		// Band-pass: wet amount and cutoff are interpolated; an "Off" marker contributes dry.
-		bool onA = A.bp > 0.f;
-		bool onB = B.bp > 0.f;
-		float wetT = (onA ? 1.f - w : 0.f) + (onB ? w : 0.f);
-		float bpT = (onA && onB) ? A.bp + (B.bp - A.bp) * w : onA ? A.bp : onB ? B.bp : bpS;
+		// Marker filter: drive, then the multimode filter. The mode mix (dry/LP/BP/HP/notch) is
+		// interpolated between the two markers, so moving from an LP marker to an HP marker morphs
+		// the response. A marker with CUTOFF at "Off" contributes dry. Cutoff (log) and RES are
+		// interpolated between the markers whose filter is on.
+		bool onA = A.cutoff > 0.f;
+		bool onB = B.cutoff > 0.f;
+		float mixA[NUM_MIX], mixB[NUM_MIX];
+		modeWeights(onA, A.filterMode, mixA);
+		modeWeights(onB, B.filterMode, mixB);
+		for (int k = 0; k < NUM_MIX; k++)
+			mixS[k] += (mixA[k] + (mixB[k] - mixA[k]) * w - mixS[k]) * smoothCoef;
+		float cutT = (onA && onB) ? A.cutoff + (B.cutoff - A.cutoff) * w : onA ? A.cutoff : onB ? B.cutoff : cutoffS;
 		float resT = (onA && onB) ? A.res + (B.res - A.res) * w : onA ? A.res : onB ? B.res : resS;
-		wetS += (wetT - wetS) * smoothCoef;
-		bpS += (bpT - bpS) * smoothCoef;
+		cutoffS += (cutT - cutoffS) * smoothCoef;
 		resS += (std::min(std::max(resT, 0.f), 1.f) - resS) * smoothCoef;
+		float driveT = A.drive + (B.drive - A.drive) * w;
+		driveS += (std::min(std::max(driveT, 0.f), 1.f) - driveS) * smoothCoef;
 		float panT = A.pan + (B.pan - A.pan) * w;
 		panS += (panT - panS) * smoothCoef;
 
-		float fc = 20.f * std::exp(bpS * LN_1000);
-		fc = std::min(fc, 0.45f * sampleRate);
-		float q = Q_MIN * std::exp(resS * LN_Q_RANGE);
-		float wet = bandpass(dry, fc, q);
-		float out = (dry + (wet - dry) * wetS) * gain;
+		float driven = drive.process(dry, driveS < 1e-5f ? 0.f : driveS);
+		float out = markerSvf.process(driven, filterHz(cutoffS), filterQ(resS), sampleRate, mixS) * gain;
 
 		if (!std::isfinite(out)) {
-			ic1 = ic2 = 0.f;
+			markerSvf.reset();
 			return;
 		}
 
 		// Equal-power pan, unity at center.
 		float angle = (panS + 1.f) * (float) (M_PI_4_F);
-		float l = out * std::cos(angle) * SQRT2;
-		float r = out * std::sin(angle) * SQRT2;
-
-		// Peak limiter at LIMIT (x5 V = 10 V), linked on both channels. Instant attack, 50 ms hold
-		// (longer than one cycle down to 20 Hz, so the gain stays steady within a waveform instead of
-		// clipping each peak), then a 200 ms release. It turns the level down instead of shaping the
-		// waveform, so a steady tone stays clean, and signals below the limit pass untouched.
-		float peak = std::max(std::fabs(l), std::fabs(r));
-		if (peak >= limEnv) {
-			limEnv = peak;
-			limHoldLeft = limHoldSamples;
-		}
-		else if (limHoldLeft > 0) {
-			limHoldLeft--;
-		}
-		else {
-			limEnv += (peak - limEnv) * limReleaseCoef;
-		}
-		if (limEnv > LIMIT) {
-			float g = LIMIT / limEnv;
-			l *= g;
-			r *= g;
-		}
-		*outL = l;
-		*outR = r;
+		*outL = out * std::cos(angle) * SQRT2;
+		*outR = out * std::sin(angle) * SQRT2;
 	}
 
-private:
+	/** One sample of a fractional table index at `phase`. The mip level comes from `freq`, with one
+	octave of headroom so the highest harmonic stays below Nyquist. Fractional indexes blend the two
+	neighboring tables. */
+	float readAt(const WavetableBank& bank, float idx, double phase, float freq) const {
+		float maxHarmonic = sampleRate / (2.f * freq);
+		float lv = std::log2((FRAME_SIZE / 2) / maxHarmonic) + 1.f;
+		lv = std::min(std::max(lv, 0.f), (float) (NUM_LEVELS - 1));
+		int l0 = (int) lv;
+		int l1 = std::min(l0 + 1, NUM_LEVELS - 1);
+		float lf = lv - l0;
+
+		float x = (float) (phase * FRAME_SIZE);
+		int i0 = std::min((int) x, FRAME_SIZE - 1);
+		int i1 = (i0 + 1) & (FRAME_SIZE - 1);
+		float fr = x - i0;
+		auto readTable = [&](int t) {
+			const float* f0 = bank.frame(t, l0);
+			const float* f1 = bank.frame(t, l1);
+			float s0 = f0[i0] + (f0[i1] - f0[i0]) * fr;
+			float s1 = f1[i0] + (f1[i1] - f1[i0]) * fr;
+			return s0 + (s1 - s0) * lf;
+		};
+		int t0 = std::min(std::max((int) idx, 0), bank.numTables - 1);
+		int t1 = std::min(t0 + 1, bank.numTables - 1);
+		float tf = idx - t0;
+		float v0 = readTable(t0);
+		return (tf > 0.f && t1 != t0) ? v0 + (readTable(t1) - v0) * tf : v0;
+	}
+
 	static constexpr float SMOOTH_TIME = 0.005f;
 	static constexpr float DECLICK_TIME = 0.005f;
 	static constexpr float TABLE_FADE_TIME = 0.02f;
@@ -353,13 +434,8 @@ private:
 	/** At minimum SMOOTH, moves larger than this many tables crossfade instead of gliding. */
 	static constexpr float JUMP_TABLES = 2.f;
 	static constexpr float FREQ_C4 = 261.6256f;
-	static constexpr float LN_1000 = 6.907755279f;
 	static constexpr float SQRT2 = 1.414213562f;
 	static constexpr float M_PI_4_F = 0.785398163f;
-	static constexpr float PI_F = 3.141592654f;
-	/** Resonance 0 = Q 0.7 (wide band), 1 = Q 20. */
-	static constexpr float Q_MIN = 0.7f;
-	static constexpr float LN_Q_RANGE = 3.352407217f; // ln(20 / 0.7)
 	static constexpr float MAX_GAIN = 4.f;
 	/** Output ceiling in engine units; the module scales by 5 V, so this is 10 V. */
 	static constexpr float LIMIT = 2.f;
@@ -385,23 +461,6 @@ private:
 		return std::min(std::max(wave, 0.f), 1.f) * std::max(maxT, 0);
 	}
 
-	/** Trapezoidal SVF band-pass (Cytomic/Simper), stable under cutoff/Q modulation.
-	Center gain is sqrt(Q / 0.7): unity at the default Q, a moderate boost when resonant, so the
-	peak rings without the full Q-times jump of a raw SVF band output. */
-	float bandpass(float x, float fc, float q) {
-		float k = 1.f / q;
-		float g = std::tan(PI_F * fc / sampleRate);
-		float a1 = 1.f / (1.f + g * (g + k));
-		float a2 = g * a1;
-		float a3 = g * a2;
-		float v3 = x - ic2;
-		float v1 = a1 * ic1 + a2 * v3;
-		float v2 = ic2 + a2 * ic1 + a3 * v3;
-		ic1 = 2.f * v1 - ic1;
-		ic2 = 2.f * v2 - ic2;
-		return k * v1 * std::sqrt(q / Q_MIN);
-	}
-
 	float sampleRate = 44100.f;
 	float smoothCoef = 0.f;
 	float fadeStep = 0.f;
@@ -414,15 +473,18 @@ private:
 	double phases[NUM_MARKERS] = {};
 	float posS = 0.f;
 	float panS = 0.f;
-	float bpS = 0.5f;
-	float wetS = 0.f;
+	// Marker filter (one path after the crossfade; settings interpolated between the two markers)
+	float cutoffS = 0.5f;
 	float resS = 0.f;
+	float driveS = 0.f;
+	float mixS[NUM_MIX] = {1.f, 0.f, 0.f, 0.f, 0.f};
+	Drive drive;
+	Svf markerSvf;
+	MasterFilter master;
 	float gainS[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	float limEnv = 0.f;
 	/** Declick gain (structural fades) */
 	float gain = 0.f;
-	float ic1 = 0.f;
-	float ic2 = 0.f;
 
 	bool structureApplied = false;
 	uint32_t appliedSig = 0;
@@ -431,6 +493,15 @@ private:
 	int numActive = 1;
 	TableState tables[NUM_MARKERS];
 	float playedIndex[NUM_MARKERS] = {};
+	/** Morph weight of each marker in the current output (0..1, sums to 1) */
+	float heard[NUM_MARKERS] = {1.f, 0.f, 0.f, 0.f, 0.f};
+
+	// Preview (audition)
+	float previewEnv = 0.f;
+	float previewFade = 1.f;
+	int previewCur = 0;
+	int previewPrev = 0;
+	double previewPhase = 0.0;
 };
 
 } // namespace wa

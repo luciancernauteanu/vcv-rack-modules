@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 static int failures = 0;
 
@@ -31,7 +32,7 @@ static int countCycles(bool sync, float knob, float bpm, float seconds, float se
 	for (int n = 0; n < total; n++) {
 		float v = (period > 0 && n % period < (int) (0.001f * SR)) ? 10.f : 0.f;
 		clock.process(v, period > 0, SR);
-		float out = lfo.process(sync, knob, clock, 1.f / SR);
+		float out = lfo.process(sync, knob, true, true, clock, 1.f / SR);
 		if (n >= (int) (settle * SR) && prev < 0.f && out >= 0.f)
 			cycles++;
 		prev = out;
@@ -45,6 +46,39 @@ static float knobFor(const char* name) {
 			return (float) i / (wa::NUM_SYNC_DIVISIONS - 1);
 	}
 	return -1.f;
+}
+
+/** Names the synced knob steps through, slow to fast, for the given options. */
+static std::string divisionList(bool triplets, bool dotted) {
+	std::string s;
+	int n = wa::lfoDivisionCount(triplets, dotted);
+	for (int k = 0; k < n; k++) {
+		float knob = (n > 1) ? (float) k / (n - 1) : 0.f;
+		s += wa::SYNC_DIVISIONS[wa::lfoDivision(knob, triplets, dotted)].name;
+		s += (k + 1 < n) ? " " : "";
+	}
+	return s;
+}
+
+static void testDivisionOptions() {
+	std::printf("RATE in sync mode steps through straight values, plus triplets and/or dotted if enabled\n");
+	std::string straight = divisionList(false, false);
+	std::string trip = divisionList(true, false);
+	std::string dot = divisionList(false, true);
+	std::printf("  straight: %s\n  +triplets: %s\n  +dotted: %s\n", straight.c_str(), trip.c_str(), dot.c_str());
+	CHECK(straight == "4/1 2/1 1/1 1/2 1/4 1/8 1/16 1/32", "straight list wrong: %s", straight.c_str());
+	CHECK(trip == "4/1 4/1T 2/1 2/1T 1/1 1/1T 1/2 1/2T 1/4 1/4T 1/8 1/8T 1/16 1/16T 1/32 1/32T", "triplet list wrong: %s", trip.c_str());
+	CHECK(dot == "4/1D 4/1 2/1D 2/1 1/1D 1/1 1/2D 1/2 1/4D 1/4 1/8D 1/8 1/16D 1/16 1/32D 1/32", "dotted list wrong: %s", dot.c_str());
+	CHECK(wa::lfoDivisionCount(true, true) == 24, "both should give all 24");
+	// Every knob position must land on an enabled value, never on a disabled one.
+	for (int t = 0; t <= 1; t++) {
+		for (int d = 0; d <= 1; d++) {
+			for (float knob = 0.f; knob <= 1.f; knob += 0.001f) {
+				int i = wa::lfoDivision(knob, t, d);
+				CHECK(wa::divisionEnabled(i, t, d), "knob %f lands on disabled %s", knob, wa::SYNC_DIVISIONS[i].name);
+			}
+		}
+	}
 }
 
 static void testFree() {
@@ -98,7 +132,7 @@ static void testPhaseLock() {
 	for (int n = 0; n < (int) (4.f * SR); n++) {
 		float v = (n % period < (int) (0.001f * SR)) ? 10.f : 0.f;
 		clock.process(v, true, SR);
-		lfo.process(true, knob, clock, 1.f / SR);
+		lfo.process(true, knob, true, true, clock, 1.f / SR);
 		// After the 3rd pulse, the phase right after each pulse must be ~0 (one sample in).
 		if (clock.isEdge() && clock.getBeatCount() >= 2) {
 			double p = lfo.getPhase();
@@ -141,7 +175,7 @@ static void testContinuity() {
 		// Clock starts late (first lock happens with a large phase error).
 		float v = (n > (int) (0.77f * SR) && n % period < (int) (0.001f * SR)) ? 10.f : 0.f;
 		clock.process(v, true, SR);
-		float out = lfo.process(sync, sync ? knob : 0.394f, clock, 1.f / SR);
+		float out = lfo.process(sync, sync ? knob : 0.394f, true, true, clock, 1.f / SR);
 		if (n > 0)
 			maxStep = std::max(maxStep, std::fabs(out - prev));
 		prev = out;
@@ -154,6 +188,7 @@ static void testContinuity() {
 }
 
 int main() {
+	testDivisionOptions();
 	testFree();
 	testSync();
 	testPhaseLock();

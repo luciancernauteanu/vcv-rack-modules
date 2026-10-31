@@ -100,7 +100,8 @@ static void testClickFree() {
 	in.markers[1].wave = 1.f;
 	in.markers[1].pitch = 7.f;
 	in.markers[1].pan = 0.6f;
-	in.markers[1].bp = 0.6f;
+	in.markers[1].cutoff = 0.6f;
+	in.markers[1].filterMode = wa::MODE_BP;
 	in.markers[2].pos = 0.5f;
 	in.markers[2].wave = 3.f / 7.f;
 	in.markers[2].pitch = -5.f;
@@ -135,7 +136,7 @@ static void testClickFree() {
 		if (n == (int) (1.0f * sr)) in.markers[2].active = true;
 		if (n == (int) (1.5f * sr)) pending = bankB.get();
 		if (n == (int) (2.6f * sr)) in.markers[2].active = false;
-		if (n == (int) (3.0f * sr)) in.markers[1].bp = 0.f;   // filter on -> off
+		if (n == (int) (3.0f * sr)) in.markers[1].cutoff = 0.f;   // filter on -> off
 		if (n == (int) (3.2f * sr)) in.markers[0].pan = -1.f; // hard pan
 		// Turning WAVE: the knob value arrives in UI-frame steps (60 Hz), 0 -> 1 in 0.25 s.
 		if (t >= 3.4f && t < 3.65f && n % (int) (sr / 60.f) == 0)
@@ -362,14 +363,15 @@ static void testResonance() {
 	// A bright table, so the band-pass has something to ring on.
 	rig.bank.reset(makeBank(std::vector<std::vector<double>>(1, {1, 0.8, 0.6, 0.5}), &slope));
 	rig.in.bank = rig.bank.get();
-	rig.in.markers[0].bp = 0.5f;
+	rig.in.markers[0].cutoff = 0.5f;
+	rig.in.markers[0].filterMode = wa::MODE_BP;
 	rig.in.markers[0].res = 1.f;
 	rig.in.markers[0].gain = 4.f;
 	float l, r, peak = 0.f;
 	bool finite = true;
 	for (int i = 0; i < (int) (2.f * rig.sr); i++) {
 		// Cutoff swept 20 Hz..20 kHz at 30 Hz (far faster than any hand on a knob).
-		rig.in.markers[0].bp = 0.5f + 0.5f * (float) std::sin(2 * PI * 30.0 * i / rig.sr);
+		rig.in.markers[0].cutoff = 0.5f + 0.5f * (float) std::sin(2 * PI * 30.0 * i / rig.sr);
 		rig.engine.process(rig.in, &l, &r);
 		if (!std::isfinite(l) || !std::isfinite(r))
 			finite = false;
@@ -469,7 +471,7 @@ static float maxAdjacentDiff(const wa::WavetableBank& bank) {
 }
 
 static void testWaveLfo() {
-	std::printf("WAVE LFO: full depth at 20 Hz, click-free, independent of SMOOTH\n");
+	std::printf("WAVE LFO: follows SMOOTH, click-free\n");
 	const float sr = 48000.f;
 	double slope;
 	std::unique_ptr<wa::WavetableBank> bank(makeBank(ampsFor(64, 7), &slope));
@@ -482,30 +484,43 @@ static void testWaveLfo() {
 	// 20 Hz at 50% depth: index speed peaks at 0.5 * 2*pi*20/sr * 63 tables per sample.
 	float limit = limitFor((float) (0.5 * 2 * PI * 20.0 / sr * 63.0));
 
-	for (float smooth : {wa::MIN_WAVE_SMOOTH, wa::MAX_WAVE_SMOOTH}) {
-		wa::MorphEngine engine;
-		engine.setSampleRate(sr);
-		wa::EngineInput in;
-		in.markers[0].active = true;
-		in.markers[0].wave = 0.5f;
-		in.markers[0].waveSmooth = smooth;
-		in.markers[0].lfoAmount = 0.5f;
-		in.bank = bank.get();
-		float l, r, prev = 0.f, maxStep = 0.f, lo = 1e9f, hi = -1e9f;
-		for (int n = 0; n < (int) sr; n++) {
-			in.markers[0].lfo = (float) std::sin(2 * PI * 20.0 * n / sr);
-			engine.process(in, &l, &r);
-			if (n > (int) (0.1f * sr)) {
-				maxStep = std::max(maxStep, std::fabs(l - prev));
-				lo = std::min(lo, engine.getPlayedIndex(0));
-				hi = std::max(hi, engine.getPlayedIndex(0));
+	// The LFO moves the glide target, so SMOOTH filters it like any WAVE move: a one-pole
+	// glide with time constant SMOOTH has gain 1/sqrt(1 + (2*pi*f*SMOOTH)^2) at LFO rate f.
+	// Measured as the peak-to-peak of the played table index, in steady state.
+	const float amt = 0.2f;
+	const float depthTables = amt * 63.f; // LFO swing at the input, before SMOOTH
+	std::printf("  LFO 0.2 (wave 0.5) through SMOOTH: played swing, measured vs expected (tables)\n");
+	for (float smooth : {wa::MIN_WAVE_SMOOTH, 0.2f, 2.f}) {
+		for (float freq : {2.f, 20.f}) {
+			wa::MorphEngine engine;
+			engine.setSampleRate(sr);
+			wa::EngineInput in;
+			in.markers[0].active = true;
+			in.markers[0].wave = 0.5f;
+			in.markers[0].waveSmooth = smooth;
+			in.markers[0].lfoAmount = amt;
+			in.bank = bank.get();
+			float l, r, prev = 0.f, maxStep = 0.f, lo = 1e9f, hi = -1e9f;
+			int total = (int) (12.f * sr); // long enough for SMOOTH = 2 s to reach steady state
+			for (int n = 0; n < total; n++) {
+				in.markers[0].lfo = (float) std::sin(2 * PI * freq * n / sr);
+				engine.process(in, &l, &r);
+				if (n > total - (int) (2.f * sr)) {
+					lo = std::min(lo, engine.getPlayedIndex(0));
+					hi = std::max(hi, engine.getPlayedIndex(0));
+					maxStep = std::max(maxStep, std::fabs(l - prev));
+				}
+				prev = l;
 			}
-			prev = l;
+			double w = 2 * PI * freq * smooth;
+			float expected = depthTables / (float) std::sqrt(1.0 + w * w);
+			float measured = (hi - lo) / 2.f;
+			std::printf("  SMOOTH %5.0f ms, LFO %4.0f Hz: expected %6.2f, measured %6.2f\n",
+				smooth * 1000.f, freq, expected, measured);
+			CHECK(std::fabs(measured - expected) <= 0.1f * expected + 0.15f,
+				"SMOOTH %f, %f Hz: swing %f, expected %f", smooth, freq, measured, expected);
+			CHECK(maxStep <= limit, "LFO modulation clicks at SMOOTH %f, %f Hz: %f > %f", smooth, freq, maxStep, limit);
 		}
-		std::printf("  SMOOTH %4.0f ms: played table range %.1f..%.1f of 0..63, max step %.4f (limit %.4f)\n",
-			smooth * 1000.f, lo, hi, maxStep, limit);
-		CHECK(lo < 1.f && hi > 62.f, "LFO depth reduced: %f..%f", lo, hi);
-		CHECK(maxStep <= limit, "LFO modulation clicks: %f > %f", maxStep, limit);
 	}
 
 	// AMT knob steps (UI rate) and a sudden full-depth start must not click.
@@ -532,7 +547,215 @@ static void testWaveLfo() {
 	CHECK(maxStep <= amtLimit, "AMT jump clicks: %f > %f", maxStep, amtLimit);
 }
 
+static void testPreview() {
+	std::printf("preview: start, switch tables, stop, during a marker change; no clicks\n");
+	const float sr = 48000.f;
+	double slope;
+	std::unique_ptr<wa::WavetableBank> bank(makeBank(ampsFor(8, 1), &slope));
+	wa::MorphEngine engine;
+	engine.setSampleRate(sr);
+	wa::EngineInput in;
+	in.markers[0].active = true;
+	in.markers[0].pos = 0.f;
+	in.markers[0].wave = 0.f;
+	in.markers[0].pitch = 12.f;
+	in.markers[0].pan = -1.f;
+	in.markers[1].active = true;
+	in.markers[1].pos = 1.f;
+	in.markers[1].wave = 1.f;
+	in.markers[2].pos = 0.5f;
+	in.position = 0.3f;
+	in.bank = bank.get();
+
+	// Highest pitch is marker 0 at +12 st; hard pan can scale a channel by sqrt(2).
+	float limit = (float) (slope * 2 * PI * 261.6256 * 2.0 / sr * std::sqrt(2.0) * 1.2 + 0.01);
+	float prevL = 0.f, prevR = 0.f, maxStep = 0.f, levelAtFull = 0.f, maxLR = 0.f;
+	for (int n = 0; n < (int) (2.f * sr); n++) {
+		float t = n / sr;
+		in.previewTable = (t >= 0.3f && t < 1.6f) ? (t < 0.8f ? 2 : 6) : -1;
+		in.markers[2].active = t >= 1.0f; // structural change while previewing
+		float l, r;
+		engine.process(in, &l, &r);
+		if (n > 0)
+			maxStep = std::max(maxStep, std::max(std::fabs(l - prevL), std::fabs(r - prevR)));
+		prevL = l;
+		prevR = r;
+		if (t > 0.5f && t < 0.75f) {
+			levelAtFull = std::max(levelAtFull, engine.getPreviewLevel());
+			// Fully previewed: centered (no pan), so L == R.
+			maxLR = std::max(maxLR, std::fabs(l - r));
+		}
+	}
+	std::printf("  max step %.4f (limit %.4f), preview level %.2f, |L-R| while previewing %.5f\n", maxStep, limit, levelAtFull, maxLR);
+	CHECK(maxStep <= limit, "preview clicks: %f > %f", maxStep, limit);
+	CHECK(levelAtFull >= 0.999f, "preview never fully replaced the morph");
+	CHECK(maxLR < 1e-5f, "preview output is not the centered table: |L-R| %f", maxLR);
+	CHECK(engine.getPreviewLevel() == 0.f, "preview did not stop");
+}
+
+static float cutoffFor(float hz) {
+	return std::log(hz / 20.f) / std::log(1000.f);
+}
+
+static void testFilterModes() {
+	std::printf("marker filter modes on a C4 sine (261.6 Hz)\n");
+	struct Case {
+		const char* name;
+		int mode;
+		float hz;
+		float lo, hi;
+	} cases[] = {
+		{"LP @ 2 kHz (passes)", wa::MODE_LP, 2000.f, 0.9f, 1.1f},
+		{"LP @ 40 Hz (blocks)", wa::MODE_LP, 40.f, 0.f, 0.05f},
+		{"HP @ 2 kHz (blocks)", wa::MODE_HP, 2000.f, 0.f, 0.05f},
+		{"HP @ 40 Hz (passes)", wa::MODE_HP, 40.f, 0.9f, 1.1f},
+		{"BP @ 261 Hz (center)", wa::MODE_BP, 261.6f, 0.9f, 1.1f},
+		{"BP @ 4 kHz (off center)", wa::MODE_BP, 4000.f, 0.f, 0.12f},
+		{"NOTCH @ 261 Hz (dip)", wa::MODE_NOTCH, 261.6f, 0.f, 0.05f},
+		{"NOTCH @ 4 kHz (passes)", wa::MODE_NOTCH, 4000.f, 0.9f, 1.1f},
+	};
+	for (const Case& c : cases) {
+		SineRig rig;
+		rig.in.markers[0].cutoff = cutoffFor(c.hz);
+		rig.in.markers[0].filterMode = c.mode;
+		float peak = rig.peakOver(1.f);
+		std::printf("  %-24s level %.3f (expected %.2f..%.2f)\n", c.name, peak, c.lo, c.hi);
+		CHECK(peak >= c.lo && peak <= c.hi, "%s: level %f", c.name, peak);
+	}
+
+	std::printf("mode morph LP marker -> HP marker, and TYPE switched while playing: no clicks\n");
+	SineRig rig;
+	rig.in.markers[0].cutoff = cutoffFor(800.f);
+	rig.in.markers[0].filterMode = wa::MODE_LP;
+	rig.in.markers[1].active = true;
+	rig.in.markers[1].pos = 1.f;
+	rig.in.markers[1].cutoff = cutoffFor(200.f);
+	rig.in.markers[1].filterMode = wa::MODE_HP;
+	float prev = 0.f, maxStep = 0.f;
+	for (int n = 0; n < (int) (2.f * rig.sr); n++) {
+		float t = n / rig.sr;
+		rig.in.position = 0.5f + 0.5f * (float) std::sin(2 * PI * 2.0 * t);
+		if (n == (int) (0.7f * rig.sr)) rig.in.markers[0].filterMode = wa::MODE_NOTCH;
+		if (n == (int) (1.3f * rig.sr)) rig.in.markers[1].filterMode = wa::MODE_BP;
+		float l, r;
+		rig.engine.process(rig.in, &l, &r);
+		if (n > 0)
+			maxStep = std::max(maxStep, std::fabs(l - prev));
+		prev = l;
+	}
+	// A unit sine at 261.6 Hz steps at most 0.034 per sample; allow for the resonant tilt and fades.
+	std::printf("  max step %.4f (limit 0.08)\n", maxStep);
+	CHECK(maxStep <= 0.08f, "filter mode change clicks: %f", maxStep);
+}
+
+static void testDrive() {
+	std::printf("drive: 0 is clean, more adds odd harmonics, level stays near full scale\n");
+	for (float d : {0.f, 0.3f, 1.f}) {
+		SineRig rig;
+		rig.in.markers[0].drive = d;
+		std::vector<float> tail;
+		float peak = rig.peakOver(1.f, &tail);
+		double f = 261.6256;
+		double h1 = tone(tail, f, rig.sr), h3 = tone(tail, 3 * f, rig.sr);
+		std::printf("  drive %.1f: peak %.3f, 3rd harmonic %.1f%% of fundamental\n", d, peak, 100.0 * h3 / h1);
+		if (d == 0.f)
+			CHECK(h3 / h1 < 0.005, "drive 0 is not clean: %f", h3 / h1);
+		else
+			CHECK(h3 / h1 > 0.05, "drive %.1f adds too little: %f", d, h3 / h1);
+		CHECK(peak <= 1.1f, "drive raises the peak: %f", peak);
+	}
+	// Aliasing: a high note driven hard. Harmonics of 3520 Hz land on multiples of 3520; with
+	// 48 kHz, the 7th harmonic (24640) folds to 23360 and the 9th (31680) to 16320 Hz.
+	SineRig rig;
+	rig.in.voct = std::log2(3520.0 / 261.6256);
+	rig.in.markers[0].drive = 1.f;
+	std::vector<float> tail;
+	rig.peakOver(1.f, &tail);
+	double fund = tone(tail, 3520.0, rig.sr);
+	double alias = tone(tail, 16320.0, rig.sr);
+	std::printf("  3520 Hz at full drive: 9th-harmonic alias at 16320 Hz is %.1f dB below the fundamental\n",
+		20 * std::log10(alias / fund + 1e-12));
+	CHECK(alias / fund < 0.03, "too much aliasing: %f", alias / fund);
+
+	// The oversampled path is always in; it must stay flat across the audio band.
+	for (double hz : {5000.0, 10000.0, 15000.0}) {
+		SineRig flat;
+		flat.in.voct = (float) std::log2(hz / 261.6256);
+		float peak = flat.peakOver(0.5f);
+		std::printf("  drive 0, %5.0f Hz sine: level %.3f\n", hz, peak);
+		CHECK(peak > 0.95f && peak < 1.05f, "drive path not flat at %f Hz: %f", hz, peak);
+	}
+}
+
+static void testMasterFilter() {
+	std::printf("master filter: off is transparent, spread splits L/R, feedback self-oscillates but stays bounded\n");
+	{
+		SineRig a, b;
+		b.in.masterMode = -1;
+		b.in.masterFdbk = 1.f; // ignored while off
+		float maxDiff = 0.f;
+		for (int n = 0; n < 20000; n++) {
+			float l1, r1, l2, r2;
+			a.engine.process(a.in, &l1, &r1);
+			b.engine.process(b.in, &l2, &r2);
+			maxDiff = std::max(maxDiff, std::fabs(l1 - l2) + std::fabs(r1 - r2));
+		}
+		std::printf("  off vs no filter: max difference %.6f\n", maxDiff);
+		CHECK(maxDiff < 1e-6f, "master off is not transparent: %f", maxDiff);
+	}
+	{
+		// LP at C4 with SPREAD +100% (+-1 octave): left cutoff 131 Hz, right 523 Hz.
+		SineRig rig;
+		rig.in.masterMode = wa::MODE_LP;
+		rig.in.masterCutoff = cutoffFor(261.6f);
+		rig.in.masterSpread = 0.5f;
+		int n = (int) rig.sr;
+		float l, r, pl = 0.f, pr = 0.f;
+		for (int i = 0; i < n; i++) {
+			rig.engine.process(rig.in, &l, &r);
+			if (i > n / 2) {
+				pl = std::max(pl, std::fabs(l));
+				pr = std::max(pr, std::fabs(r));
+			}
+		}
+		std::printf("  spread: left %.3f, right %.3f\n", pl, pr);
+		CHECK(pr > pl * 2.f, "spread does not open the right channel: L %f R %f", pl, pr);
+	}
+	{
+		// Feedback: play 0.2 s, then silence (no bank -> engine input 0). Above the threshold the
+		// filter keeps ringing; below it, it dies away.
+		for (float fb : {0.4f, 1.f}) {
+			SineRig rig;
+			rig.in.masterMode = wa::MODE_BP;
+			rig.in.masterCutoff = cutoffFor(500.f);
+			rig.in.masterFdbk = fb;
+			float l, r, late = 0.f, peak = 0.f;
+			bool finite = true;
+			for (int i = 0; i < (int) (2.f * rig.sr); i++) {
+				if (i == (int) (0.2f * rig.sr))
+					rig.in.markers[0].gain = 0.f;
+				rig.engine.process(rig.in, &l, &r);
+				finite = finite && std::isfinite(l) && std::isfinite(r);
+				peak = std::max(peak, std::fabs(l));
+				if (i > (int) (1.5f * rig.sr))
+					late = std::max(late, std::fabs(l));
+			}
+			std::printf("  FDBK %3.0f%%: level 1.3 s after the input stopped %.4f, peak %.3f\n", fb * 100, late, peak);
+			CHECK(finite, "feedback produced NaN");
+			CHECK(peak <= 2.0001f, "feedback beyond the limiter: %f", peak);
+			if (fb < 0.5f)
+				CHECK(late < 0.001f, "low feedback should decay: %f", late);
+			else
+				CHECK(late > 0.1f, "full feedback should self-oscillate: %f", late);
+		}
+	}
+}
+
 int main() {
+	testFilterModes();
+	testDrive();
+	testMasterFilter();
+	testPreview();
 	testClickFree();
 	testSilenceWithoutBank();
 	testPitchAndPan();

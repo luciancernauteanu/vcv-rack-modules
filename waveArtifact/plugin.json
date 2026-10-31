@@ -22,6 +22,15 @@
         "Oscillator",
         "Digital"
       ]
+    },
+    {
+      "slug": "waveArtifactExpander",
+      "name": "waveArtifact Expander",
+      "description": "Per-marker CV inputs and two LFOs for waveArtifact; place it to the right (up to 5)",
+      "tags": [
+        "Expander",
+        "Low-frequency oscillator"
+      ]
     }
   ]
 }

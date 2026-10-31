@@ -2,10 +2,13 @@
 
 #include "Layout.hpp"
 #include "WaveArtifact.hpp"
+#include "WaveArtifactExpander.hpp"
 #include "widgets/DotStrip.hpp"
+#include "widgets/LfoControls.hpp"
 #include "widgets/MarkerBadge.hpp"
+#include "widgets/MarkerBar.hpp"
+#include "widgets/ModeButton.hpp"
 #include "widgets/PanelLabels.hpp"
-#include "widgets/StatusDisplay.hpp"
 
 namespace {
 
@@ -13,8 +16,8 @@ const float DEFAULT_MARKER_POS[WaveArtifact::NUM_MARKERS] = {0.f, 1.f, 0.25f, 0.
 const size_t MAX_SHOWN_NAME = 22;
 const float LN_100 = 4.605170186f;
 
-/** Band-pass frequency 20 Hz to 20 kHz on a log scale. Fully counter-clockwise bypasses the filter. */
-struct BpQuantity : ParamQuantity {
+/** Filter cutoff 20 Hz to 20 kHz on a log scale. Fully counter-clockwise bypasses the filter. */
+struct CutoffQuantity : ParamQuantity {
 	bool isOff() {
 		return getValue() <= getMinValue();
 	}
@@ -37,23 +40,6 @@ struct WaveQuantity : ParamQuantity {
 	}
 	std::string getUnit() override {
 		return "";
-	}
-};
-
-/** LFO rate: Hz in free mode, note value (e.g. "1/8T") in sync mode. */
-struct LfoRateQuantity : ParamQuantity {
-	int marker = 0;
-	bool isSync() {
-		return module && module->params[WaveArtifact::MARKER_LFO_SYNC_PARAM + marker].getValue() > 0.5f;
-	}
-	std::string getDisplayValueString() override {
-		if (isSync())
-			return wa::SYNC_DIVISIONS[wa::lfoDivision(getValue())].name;
-		float hz = wa::lfoFreeHz(getValue());
-		return string::f(hz < 1.f ? "%.3f" : "%.2f", hz);
-	}
-	std::string getUnit() override {
-		return isSync() ? "" : " Hz";
 	}
 };
 
@@ -83,13 +69,20 @@ WaveArtifact::WaveArtifact() {
 		// Minimum is the default knob-step smoothing; turning it up makes WAVE glide slowly.
 		configParam(MARKER_SMOOTH_PARAM + i, 0.f, 1.f, 0.f, name + " WAVE smoothing", " ms", 100.f, 1000.f * wa::MIN_WAVE_SMOOTH);
 		// Default rate is ~0.2 Hz, a slow scan (knob = ln(20) / ln(2000)).
-		configParam<LfoRateQuantity>(MARKER_LFO_RATE_PARAM + i, 0.f, 1.f, 0.394f, name + " WAVE LFO rate")->marker = i;
+		configLfoRate(this, MARKER_LFO_RATE_PARAM + i, MARKER_LFO_SYNC_PARAM + i, MARKER_LFO_TRIPLET_PARAM + i, MARKER_LFO_DOTTED_PARAM + i, name + " WAVE LFO rate");
 		configParam(MARKER_LFO_AMT_PARAM + i, 0.f, 1.f, 0.f, name + " WAVE LFO amount", "%", 0.f, 100.f);
 		configSwitch(MARKER_LFO_SYNC_PARAM + i, 0.f, 1.f, 0.f, name + " WAVE LFO sync", {"Free (Hz)", "Clock sync"});
+		configSwitch(MARKER_LFO_TRIPLET_PARAM + i, 0.f, 1.f, 0.f, name + " WAVE LFO triplets", {"Off", "On"});
+		configSwitch(MARKER_LFO_DOTTED_PARAM + i, 0.f, 1.f, 0.f, name + " WAVE LFO dotted", {"Off", "On"});
+		for (int id : {MARKER_LFO_SYNC_PARAM, MARKER_LFO_TRIPLET_PARAM, MARKER_LFO_DOTTED_PARAM})
+			getParamQuantity(id + i)->randomizeEnabled = false;
 		configParam(MARKER_GAIN_PARAM + i, 0.f, 4.f, 1.f, name + " gain", "%", 0.f, 100.f);
-		configParam<BpQuantity>(MARKER_BP_PARAM + i, 0.f, 1.f, 0.f, name + " band-pass frequency", " Hz", 1000.f, 20.f);
-		configParam(MARKER_RES_PARAM + i, 0.f, 1.f, 0.f, name + " band-pass resonance", "%", 0.f, 100.f);
+		configParam<CutoffQuantity>(MARKER_CUTOFF_PARAM + i, 0.f, 1.f, 0.f, name + " filter cutoff", " Hz", 1000.f, 20.f);
+		configParam(MARKER_RES_PARAM + i, 0.f, 1.f, 0.f, name + " filter resonance", "%", 0.f, 100.f);
+		configSwitch(MARKER_FILTER_MODE_PARAM + i, 0.f, 3.f, 0.f, name + " filter type", {"Low-pass", "Band-pass", "High-pass", "Notch"});
+		configParam(MARKER_DRIVE_PARAM + i, 0.f, 1.f, 0.f, name + " drive", "%", 0.f, 100.f);
 		configParam(MARKER_PITCH_PARAM + i, -24.f, 24.f, 0.f, name + " pitch", " st")->snapEnabled = true;
+		configParam(MARKER_FINE_PARAM + i, -1.f, 1.f, 0.f, name + " fine tune", " cents", 0.f, 100.f);
 		configParam(MARKER_PAN_PARAM + i, -1.f, 1.f, 0.f, name + " pan", "%", 0.f, 100.f);
 
 		// Randomizing these would shuffle the bar layout, not the sound.
@@ -97,13 +90,32 @@ WaveArtifact::WaveArtifact() {
 		getParamQuantity(MARKER_POS_PARAM + i)->randomizeEnabled = false;
 	}
 
+	configSwitch(MASTER_MODE_PARAM, 0.f, 4.f, 0.f, "Master filter type", {"Off", "Low-pass", "Band-pass", "High-pass", "Notch"});
+	configParam(MASTER_CUTOFF_PARAM, 0.f, 1.f, 0.7f, "Master filter cutoff", " Hz", 1000.f, 20.f);
+	configParam(MASTER_RES_PARAM, 0.f, 1.f, 0.f, "Master filter resonance", "%", 0.f, 100.f);
+	configParam(MASTER_SPREAD_PARAM, -1.f, 1.f, 0.f, "Master filter spread (right above left)", " oct", 0.f, 2.f);
+	configParam(MASTER_FDBK_PARAM, 0.f, 1.f, 0.f, "Master filter feedback (self-oscillates above ~75%)", "%", 0.f, 100.f);
+
 	configInput(VOCT_INPUT, "1V/octave pitch");
 	configInput(POS_INPUT, "Position CV");
 	configInput(CLOCK_INPUT, "Clock (1 pulse per quarter note) for LFO sync");
 	configOutput(LEFT_OUTPUT, "Left");
 	configOutput(RIGHT_OUTPUT, "Right");
 
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		shownIndex[i].store(0.f);
+		shownHeard[i].store(0.f);
+	}
+	// Modulation arrives from expanders on the right.
+	rightExpander.producerMessage = new wa::ToMainMessage;
+	rightExpander.consumerMessage = new wa::ToMainMessage;
 	setStatus("Load a WAV (max 2 MB)");
+}
+
+void WaveArtifact::onReset(const ResetEvent& e) {
+	Module::onReset(e);
+	selectedMarker = 0;
+	previewTable = -1;
 }
 
 WaveArtifact::~WaveArtifact() {
@@ -112,6 +124,8 @@ WaveArtifact::~WaveArtifact() {
 	delete pendingBank.exchange(nullptr);
 	delete activeBank.exchange(nullptr);
 	delete retiredBank.exchange(nullptr);
+	delete (wa::ToMainMessage*) rightExpander.producerMessage;
+	delete (wa::ToMainMessage*) rightExpander.consumerMessage;
 }
 
 void WaveArtifact::process(const ProcessArgs& args) {
@@ -124,6 +138,22 @@ void WaveArtifact::process(const ProcessArgs& args) {
 
 	clock.process(inputs[CLOCK_INPUT].getVoltage(), inputs[CLOCK_INPUT].isConnected(), args.sampleRate);
 
+	// Expanders: send them the clock and their chain position, take their summed modulation.
+	static const wa::ToMainMessage noMod;
+	const wa::ToMainMessage* mod = &noMod;
+	Module* right = rightExpander.module;
+	if (isWaveArtifactExpander(right)) {
+		mod = (const wa::ToMainMessage*) rightExpander.consumerMessage;
+		wa::ToExpanderMessage* out = (wa::ToExpanderMessage*) right->leftExpander.producerMessage;
+		out->clock = clock;
+		out->index = 0;
+		out->linked = true;
+		right->leftExpander.requestMessageFlip();
+	}
+	auto modOf = [&](int marker, int target) {
+		return mod->mod[marker][target] / 10.f * wa::MOD_SCALE_PER_10V[target];
+	};
+
 	wa::EngineInput in;
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		wa::MarkerInput& m = in.markers[i];
@@ -133,25 +163,54 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		// The engine adds the LFO after WAVE's glide (so SMOOTH does not dull it) and folds it back
 		// at the ends of the sample.
 		bool sync = params[MARKER_LFO_SYNC_PARAM + i].getValue() > 0.5f;
-		m.lfo = lfos[i].process(sync, params[MARKER_LFO_RATE_PARAM + i].getValue(), clock, args.sampleTime);
+		bool triplets = params[MARKER_LFO_TRIPLET_PARAM + i].getValue() > 0.5f;
+		bool dotted = params[MARKER_LFO_DOTTED_PARAM + i].getValue() > 0.5f;
+		m.lfo = lfos[i].process(sync, params[MARKER_LFO_RATE_PARAM + i].getValue(), triplets, dotted, clock, args.sampleTime);
 		m.lfoAmount = params[MARKER_LFO_AMT_PARAM + i].getValue();
 		m.waveSmooth = wa::MIN_WAVE_SMOOTH * std::exp(params[MARKER_SMOOTH_PARAM + i].getValue() * LN_100);
 		m.gain = params[MARKER_GAIN_PARAM + i].getValue();
-		m.bp = params[MARKER_BP_PARAM + i].getValue();
+		m.filterMode = (int) std::round(params[MARKER_FILTER_MODE_PARAM + i].getValue());
 		m.res = params[MARKER_RES_PARAM + i].getValue();
 		m.pitch = params[MARKER_PITCH_PARAM + i].getValue();
-		m.pan = params[MARKER_PAN_PARAM + i].getValue();
+
+		// Expander CV, added in each param's own units (see MOD_SCALE_PER_10V). WAVE is folded at
+		// the sample's ends by the engine, like the LFO. CUTOFF CV moves the filter but cannot switch
+		// it on or off: that stays on the knob.
+		m.wave += modOf(i, wa::MOD_WAVE);
+		m.gain = clamp(m.gain + modOf(i, wa::MOD_GAIN), 0.f, 4.f);
+		float cutoff = params[MARKER_CUTOFF_PARAM + i].getValue();
+		m.cutoff = (cutoff > 0.f) ? clamp(cutoff + modOf(i, wa::MOD_CUTOFF), 1e-4f, 1.f) : 0.f;
+		m.drive = clamp(params[MARKER_DRIVE_PARAM + i].getValue() + modOf(i, wa::MOD_DRIVE), 0.f, 1.f);
+		m.fine = clamp(params[MARKER_FINE_PARAM + i].getValue() + modOf(i, wa::MOD_FINE), -12.f, 12.f);
+		m.pan = clamp(params[MARKER_PAN_PARAM + i].getValue() + modOf(i, wa::MOD_PAN), -1.f, 1.f);
 	}
 	// 0..10 V on POS CV sweeps the whole bar.
 	in.position = params[POSITION_PARAM].getValue() + params[POS_ATTEN_PARAM].getValue() * inputs[POS_INPUT].getVoltage() / 10.f;
 	in.voct = params[FREQ_PARAM].getValue() + inputs[VOCT_INPUT].getVoltage();
 	in.bank = activeBank.load(std::memory_order_relaxed);
 	in.holdSilent = swapWanted;
+	in.previewTable = previewTable.load(std::memory_order_relaxed);
+	in.masterMode = (int) std::round(params[MASTER_MODE_PARAM].getValue()) - 1;
+	in.masterCutoff = params[MASTER_CUTOFF_PARAM].getValue();
+	in.masterRes = params[MASTER_RES_PARAM].getValue();
+	in.masterSpread = params[MASTER_SPREAD_PARAM].getValue();
+	in.masterFdbk = params[MASTER_FDBK_PARAM].getValue();
 
 	float l, r;
 	engine.process(in, &l, &r);
 	outputs[LEFT_OUTPUT].setVoltage(5.f * l);
 	outputs[RIGHT_OUTPUT].setVoltage(5.f * r);
+
+	// Display values, a few hundred times a second is plenty for a 60 Hz screen.
+	if (++displayCounter >= 64) {
+		displayCounter = 0;
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			shownIndex[i].store(engine.getTableIndex(i), std::memory_order_relaxed);
+			shownHeard[i].store(engine.getHeard(i), std::memory_order_relaxed);
+		}
+		shownPosition.store(engine.getPosition(), std::memory_order_relaxed);
+		shownPreview.store(engine.getPreviewLevel(), std::memory_order_relaxed);
+	}
 
 	if (swapWanted && engine.isSilent()) {
 		wa::WavetableBank* fresh = pendingBank.exchange(nullptr);
@@ -224,6 +283,30 @@ void WaveArtifact::startAnalysis() {
 
 void WaveArtifact::uiStep() {
 	delete retiredBank.exchange(nullptr);
+	// The edit area always shows an active marker.
+	if (!isMarkerActive(selectedMarker)) {
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			if (isMarkerActive(i)) {
+				selectedMarker = i;
+				break;
+			}
+		}
+	}
+	// A bank with fewer tables (re-analysis) cannot play a preview beyond its end.
+	const wa::WavetableBank* bank = activeBank.load();
+	int p = previewTable.load();
+	if (p >= 0 && (!bank || p >= bank->numTables))
+		previewTable = -1;
+}
+
+/** Everything per marker except on/off, bar position and wavetable, back to default. */
+static void resetMarkerSettings(WaveArtifact* m, int i) {
+	for (int id : {WaveArtifact::MARKER_SMOOTH_PARAM, WaveArtifact::MARKER_LFO_RATE_PARAM, WaveArtifact::MARKER_LFO_AMT_PARAM,
+			WaveArtifact::MARKER_LFO_SYNC_PARAM, WaveArtifact::MARKER_LFO_TRIPLET_PARAM, WaveArtifact::MARKER_LFO_DOTTED_PARAM,
+			WaveArtifact::MARKER_GAIN_PARAM, WaveArtifact::MARKER_CUTOFF_PARAM, WaveArtifact::MARKER_RES_PARAM,
+			WaveArtifact::MARKER_FILTER_MODE_PARAM, WaveArtifact::MARKER_DRIVE_PARAM,
+			WaveArtifact::MARKER_PITCH_PARAM, WaveArtifact::MARKER_FINE_PARAM, WaveArtifact::MARKER_PAN_PARAM})
+		m->params[id + i].setValue(m->getParamQuantity(id + i)->getDefaultValue());
 }
 
 void WaveArtifact::autoArrange() {
@@ -234,9 +317,113 @@ void WaveArtifact::autoArrange() {
 		params[MARKER_ACTIVE_PARAM + i].setValue(1.f);
 		params[MARKER_POS_PARAM + i].setValue(pos);
 		params[MARKER_WAVE_PARAM + i].setValue(pos);
-		for (int id : {MARKER_SMOOTH_PARAM, MARKER_LFO_RATE_PARAM, MARKER_LFO_AMT_PARAM, MARKER_LFO_SYNC_PARAM, MARKER_GAIN_PARAM, MARKER_BP_PARAM, MARKER_RES_PARAM, MARKER_PITCH_PARAM, MARKER_PAN_PARAM})
-			params[id + i].setValue(getParamQuantity(id + i)->getDefaultValue());
+		resetMarkerSettings(this, i);
 	}
+}
+
+bool WaveArtifact::isMarkerActive(int i) {
+	return params[MARKER_ACTIVE_PARAM + i].getValue() > 0.5f;
+}
+
+int WaveArtifact::activeMarkerCount() {
+	int n = 0;
+	for (int i = 0; i < NUM_MARKERS; i++)
+		n += isMarkerActive(i);
+	return n;
+}
+
+int WaveArtifact::addMarker(float pos) {
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		if (isMarkerActive(i))
+			continue;
+		pos = clamp(pos, 0.f, 1.f);
+		params[MARKER_POS_PARAM + i].setValue(pos);
+		// Like ARRANGE: the bar position picks the same spot in the sample.
+		params[MARKER_WAVE_PARAM + i].setValue(pos);
+		resetMarkerSettings(this, i);
+		params[MARKER_ACTIVE_PARAM + i].setValue(1.f);
+		selectedMarker = i;
+		return i;
+	}
+	return -1;
+}
+
+void WaveArtifact::deleteMarker(int i) {
+	if (activeMarkerCount() <= 1)
+		return;
+	params[MARKER_ACTIVE_PARAM + i].setValue(0.f);
+	// uiStep() moves the selection to an active marker.
+}
+
+void WaveArtifact::assignTable(int i, int t) {
+	const wa::WavetableBank* bank = activeBank.load();
+	if (!bank || t < 0 || t >= bank->numTables)
+		return;
+	if (!isMarkerActive(i)) {
+		// Put it in the widest free stretch of the bar (the bar ends count as stretches).
+		float ps[NUM_MARKERS];
+		int n = 0;
+		for (int k = 0; k < NUM_MARKERS; k++) {
+			if (!isMarkerActive(k))
+				continue;
+			// Insertion sort (at most 5 values)
+			float v = params[MARKER_POS_PARAM + k].getValue();
+			int j = n++;
+			while (j > 0 && ps[j - 1] > v) {
+				ps[j] = ps[j - 1];
+				j--;
+			}
+			ps[j] = v;
+		}
+		float best = 0.5f, bestGap = -1.f;
+		if (n > 0) {
+			if (ps[0] > bestGap) {
+				best = 0.f;
+				bestGap = ps[0];
+			}
+			if (1.f - ps[n - 1] > bestGap) {
+				best = 1.f;
+				bestGap = 1.f - ps[n - 1];
+			}
+			for (int k = 0; k + 1 < n; k++) {
+				if ((ps[k + 1] - ps[k]) / 2.f > bestGap) {
+					best = (ps[k] + ps[k + 1]) / 2.f;
+					bestGap = (ps[k + 1] - ps[k]) / 2.f;
+				}
+			}
+		}
+		params[MARKER_POS_PARAM + i].setValue(best);
+		resetMarkerSettings(this, i);
+		params[MARKER_ACTIVE_PARAM + i].setValue(1.f);
+	}
+	params[MARKER_WAVE_PARAM + i].setValue(bank->numTables > 1 ? (float) t / (bank->numTables - 1) : 0.f);
+	selectedMarker = i;
+}
+
+void WaveArtifact::markerDragRange(int i, float* lo, float* hi) {
+	// Neighbors in bar order; ties are broken by marker number, like a stable sort.
+	float p = params[MARKER_POS_PARAM + i].getValue();
+	*lo = 0.f;
+	*hi = 1.f;
+	for (int k = 0; k < NUM_MARKERS; k++) {
+		if (k == i || !isMarkerActive(k))
+			continue;
+		float q = params[MARKER_POS_PARAM + k].getValue();
+		bool before = q < p || (q == p && k < i);
+		if (before)
+			*lo = std::max(*lo, q + MIN_MARKER_GAP);
+		else
+			*hi = std::min(*hi, q - MIN_MARKER_GAP);
+	}
+	if (*lo > *hi)
+		*lo = *hi = clamp(p, 0.f, 1.f);
+}
+
+int WaveArtifact::markerTable(int i) {
+	const wa::WavetableBank* bank = activeBank.load();
+	if (!bank)
+		return -1;
+	return (int) std::round(params[MARKER_WAVE_PARAM + i].getValue() * (bank->numTables - 1));
 }
 
 std::string WaveArtifact::getStatus() {
@@ -249,7 +436,7 @@ void WaveArtifact::setStatus(const std::string& s) {
 	status = s;
 }
 
-static void openLoadDialog(WaveArtifact* module) {
+void openLoadDialog(WaveArtifact* module) {
 	if (!module)
 		return;
 	osdialog_filters* filters = osdialog_filters_parse("WAV:wav,WAV");
@@ -261,17 +448,6 @@ static void openLoadDialog(WaveArtifact* module) {
 	std::free(path);
 }
 
-/** Momentary button that opens the file dialog on release. */
-struct LoadButton : VCVButton {
-	void onDragEnd(const DragEndEvent& e) override {
-		VCVButton::onDragEnd(e);
-		if (e.button != GLFW_MOUSE_BUTTON_LEFT)
-			return;
-		openLoadDialog(dynamic_cast<WaveArtifact*>(module));
-	}
-};
-
-/** Momentary button that auto-arranges the markers on release. */
 struct ArrangeButton : VCVButton {
 	void onDragEnd(const DragEndEvent& e) override {
 		VCVButton::onDragEnd(e);
@@ -283,8 +459,17 @@ struct ArrangeButton : VCVButton {
 	}
 };
 
+static ModeButton* createModeButton(Vec mmCenter, Module* module, int paramId, std::vector<std::string> labels, NVGcolor color) {
+	ModeButton* b = createParam<ModeButton>(Vec(0, 0), module, paramId);
+	b->box.size = mm2px(layout::MODE_BUTTON_SIZE);
+	b->box.pos = mm2px(mmCenter).minus(b->box.size.div(2.f));
+	b->labels = labels;
+	b->color = color;
+	return b;
+}
+
 struct WaveArtifactWidget : ModuleWidget {
-	static const int EDIT_KNOBS = 10;
+	static const int EDIT_KNOBS = 11;
 	ParamWidget* editKnobs[WaveArtifact::NUM_MARKERS][EDIT_KNOBS] = {};
 
 	WaveArtifactWidget(WaveArtifact* module) {
@@ -303,34 +488,41 @@ struct WaveArtifactWidget : ModuleWidget {
 		PanelLabels* labels = createWidget<PanelLabels>(Vec(0, 0));
 		labels->box.size = box.size;
 		labels->add(Vec(PANEL_W / 2.f, 6.f), "waveArtifact", 13.f);
-		labels->add(Vec(MARKER_BADGE.x, EDIT_LABEL_Y), "MARKER");
-		labels->add(Vec(WAVE_KNOB.x, EDIT_LABEL_Y), "WAVE");
-		labels->add(Vec(SMOOTH_KNOB.x + 4.f, SMOOTH_KNOB.y), "SMOOTH", 6.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-		labels->add(Vec(LFO_RATE_KNOB.x + 4.f, LFO_RATE_KNOB.y), "LFO RATE", 6.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-		labels->add(Vec(LFO_AMT_KNOB.x + 4.f, LFO_AMT_KNOB.y), "AMT", 6.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-		labels->add(Vec(LFO_SYNC_BUTTON.x + 4.f, LFO_SYNC_BUTTON.y), "SYNC", 6.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-		labels->add(Vec(CLOCK_INPUT.x, CONTROL_LABEL_Y), "CLOCK");
-		labels->add(Vec(GAIN_KNOB.x, EDIT_LABEL_Y), "GAIN");
-		labels->add(Vec(BP_KNOB.x, EDIT_LABEL_Y), "BP");
-		labels->add(Vec(RES_KNOB.x, EDIT_LABEL_Y), "RES");
-		labels->add(Vec(PITCH_KNOB.x, EDIT_LABEL_Y), "PITCH");
-		labels->add(Vec(PAN_KNOB.x, EDIT_LABEL_Y), "PAN");
-		labels->add(Vec(LOAD_BUTTON.x + 5.f, LOAD_BUTTON.y), "LOAD WAV", 7.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-		labels->add(Vec(STATUS_POS.x + STATUS_SIZE.x, STATUS_POS.y + STATUS_SIZE.y + 2.f), "MAX 2 MB", 6.f, false, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-		labels->add(Vec(ARRANGE_BUTTON.x + 5.f, ARRANGE_BUTTON.y), "ARRANGE", 7.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+		// Marker sections, row 1
+		labels->add(Vec(MARKER_BADGE.x, ROW1_LABEL_Y), "MARKER", 6.f);
+		labels->add(Vec(WAVE_KNOB.x, ROW1_LABEL_Y), "WAVE");
+		labels->add(Vec(GAIN_KNOB.x, ROW1_LABEL_Y), "GAIN");
+		labels->add(Vec(CUTOFF_KNOB.x, ROW1_LABEL_Y), "CUTOFF");
+		labels->add(Vec(DRIVE_KNOB.x, ROW1_LABEL_Y), "DRIVE");
+		labels->add(Vec(PITCH_KNOB.x, ROW1_LABEL_Y), "PITCH");
+		labels->add(Vec(PAN_KNOB.x, ROW1_LABEL_Y), "PAN");
+		labels->add(Vec(ARRANGE_BUTTON.x, ROW1_LABEL_Y), "ARRANGE");
+		// Row 2
+		labels->add(Vec(LFO_RATE_KNOB.x, ROW2_LABEL_Y), "LFO", 6.f);
+		labels->add(Vec(SMOOTH_KNOB.x, ROW2_LABEL_Y), "SMOOTH", 6.f);
+		labels->add(Vec(RES_KNOB.x, ROW2_LABEL_Y), "RES", 6.f);
+		labels->add(Vec(FILTER_MODE_BUTTON.x, ROW2_LABEL_Y), "TYPE", 6.f);
+		labels->add(Vec(FINE_KNOB.x, ROW2_LABEL_Y), "FINE", 6.f);
+		labels->add(Vec(CLOCK_INPUT.x, ROW2_LABEL_Y + 0.5f), "CLOCK", 6.f);
+		// Controls band
 		labels->add(Vec(POSITION_KNOB.x, CONTROL_LABEL_Y), "POSITION");
-		labels->add(Vec(POS_ATTEN.x, CONTROL_LABEL_Y), "CV AMT");
-		labels->add(Vec(POS_INPUT.x, CONTROL_LABEL_Y), "POS CV");
+		labels->add(Vec(POS_ATTEN.x, CONTROL_LABEL_Y), "CV AMT", 6.f);
+		labels->add(Vec(POS_INPUT.x, CONTROL_LABEL_Y), "POS CV", 6.f);
 		labels->add(Vec(FREQ_KNOB.x, CONTROL_LABEL_Y), "FREQ");
 		labels->add(Vec(VOCT_INPUT.x, CONTROL_LABEL_Y), "V/OCT");
-		labels->add(Vec(LEFT_OUTPUT.x, CONTROL_LABEL_Y - 1.f), "L", 7.f, true);
-		labels->add(Vec(RIGHT_OUTPUT.x, CONTROL_LABEL_Y - 1.f), "R", 7.f, true);
+		labels->add(Vec(MASTER_MODE_BUTTON.x, CONTROL_LABEL_Y), "TYPE", 6.f);
+		labels->add(Vec(MASTER_CUTOFF_KNOB.x, CONTROL_LABEL_Y), "CUTOFF", 6.f);
+		labels->add(Vec(MASTER_RES_KNOB.x, CONTROL_LABEL_Y), "RES", 6.f);
+		labels->add(Vec(MASTER_SPREAD_KNOB.x, CONTROL_LABEL_Y), "SPREAD", 6.f);
+		labels->add(Vec(MASTER_FDBK_KNOB.x, CONTROL_LABEL_Y), "FDBK", 6.f);
+		labels->add(Vec(LEFT_OUTPUT.x, CONTROL_LABEL_Y), "L", 7.f, true);
+		labels->add(Vec(RIGHT_OUTPUT.x, CONTROL_LABEL_Y), "R", 7.f, true);
 		addChild(labels);
 
-		StatusDisplay* status = createWidget<StatusDisplay>(mm2px(STATUS_POS));
-		status->box.size = mm2px(STATUS_SIZE);
-		status->module = module;
-		addChild(status);
+		MarkerBar* bar = createWidget<MarkerBar>(mm2px(SCREEN_POS));
+		bar->box.size = mm2px(SCREEN_SIZE);
+		bar->module = module;
+		addChild(bar);
 
 		DotStrip* dots = createWidget<DotStrip>(mm2px(DOTS_POS));
 		dots->box.size = mm2px(DOTS_SIZE);
@@ -344,31 +536,41 @@ struct WaveArtifactWidget : ModuleWidget {
 
 		// One knob set per marker at the same spot; step() shows the selected marker's set.
 		for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
-			editKnobs[i][0] = createParamCentered<RoundBlackKnob>(mm2px(WAVE_KNOB), module, WaveArtifact::MARKER_WAVE_PARAM + i);
-			editKnobs[i][1] = createParamCentered<RoundBlackKnob>(mm2px(GAIN_KNOB), module, WaveArtifact::MARKER_GAIN_PARAM + i);
-			editKnobs[i][2] = createParamCentered<RoundBlackKnob>(mm2px(BP_KNOB), module, WaveArtifact::MARKER_BP_PARAM + i);
-			editKnobs[i][3] = createParamCentered<RoundBlackKnob>(mm2px(RES_KNOB), module, WaveArtifact::MARKER_RES_PARAM + i);
-			editKnobs[i][4] = createParamCentered<RoundBlackKnob>(mm2px(PITCH_KNOB), module, WaveArtifact::MARKER_PITCH_PARAM + i);
-			editKnobs[i][5] = createParamCentered<RoundBlackKnob>(mm2px(PAN_KNOB), module, WaveArtifact::MARKER_PAN_PARAM + i);
-			editKnobs[i][6] = createParamCentered<Trimpot>(mm2px(SMOOTH_KNOB), module, WaveArtifact::MARKER_SMOOTH_PARAM + i);
-			editKnobs[i][7] = createParamCentered<Trimpot>(mm2px(LFO_RATE_KNOB), module, WaveArtifact::MARKER_LFO_RATE_PARAM + i);
-			editKnobs[i][8] = createParamCentered<Trimpot>(mm2px(LFO_AMT_KNOB), module, WaveArtifact::MARKER_LFO_AMT_PARAM + i);
-			editKnobs[i][9] = createParamCentered<VCVLatch>(mm2px(LFO_SYNC_BUTTON), module, WaveArtifact::MARKER_LFO_SYNC_PARAM + i);
-			for (int k = 0; k < EDIT_KNOBS; k++) {
-				addParam(editKnobs[i][k]);
-				editKnobs[i][k]->setVisible(i == 0);
-			}
+			int k = 0;
+			auto add = [&](ParamWidget* w) {
+				editKnobs[i][k++] = w;
+				addParam(w);
+				w->setVisible(i == 0);
+			};
+			add(createParamCentered<RoundBlackKnob>(mm2px(WAVE_KNOB), module, WaveArtifact::MARKER_WAVE_PARAM + i));
+			add(createLfoRateKnob<LfoRateKnobT<Trimpot>>(LFO_RATE_KNOB, module, WaveArtifact::MARKER_LFO_RATE_PARAM + i,
+				WaveArtifact::MARKER_LFO_SYNC_PARAM + i, WaveArtifact::MARKER_LFO_TRIPLET_PARAM + i,
+				WaveArtifact::MARKER_LFO_DOTTED_PARAM + i, WaveArtifact::MARKER_LFO_AMT_PARAM + i));
+			add(createParamCentered<Trimpot>(mm2px(SMOOTH_KNOB), module, WaveArtifact::MARKER_SMOOTH_PARAM + i));
+			add(createParamCentered<RoundBlackKnob>(mm2px(GAIN_KNOB), module, WaveArtifact::MARKER_GAIN_PARAM + i));
+			add(createParamCentered<RoundBlackKnob>(mm2px(CUTOFF_KNOB), module, WaveArtifact::MARKER_CUTOFF_PARAM + i));
+			add(createParamCentered<RoundBlackKnob>(mm2px(DRIVE_KNOB), module, WaveArtifact::MARKER_DRIVE_PARAM + i));
+			add(createParamCentered<RoundSmallBlackKnob>(mm2px(RES_KNOB), module, WaveArtifact::MARKER_RES_PARAM + i));
+			add(createModeButton(FILTER_MODE_BUTTON, module, WaveArtifact::MARKER_FILTER_MODE_PARAM + i, {"LP", "BP", "HP", "NOTCH"}, MARKER_COLORS[i]));
+			add(createParamCentered<RoundBlackKnob>(mm2px(PITCH_KNOB), module, WaveArtifact::MARKER_PITCH_PARAM + i));
+			add(createParamCentered<Trimpot>(mm2px(FINE_KNOB), module, WaveArtifact::MARKER_FINE_PARAM + i));
+			add(createParamCentered<RoundBlackKnob>(mm2px(PAN_KNOB), module, WaveArtifact::MARKER_PAN_PARAM + i));
 		}
 
-		addParam(createParamCentered<LoadButton>(mm2px(LOAD_BUTTON), module, WaveArtifact::LOAD_PARAM));
 		addParam(createParamCentered<ArrangeButton>(mm2px(ARRANGE_BUTTON), module, WaveArtifact::ARRANGE_PARAM));
+		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(CLOCK_INPUT), module, WaveArtifact::CLOCK_INPUT));
 
 		addParam(createParamCentered<RoundLargeBlackKnob>(mm2px(POSITION_KNOB), module, WaveArtifact::POSITION_PARAM));
 		addParam(createParamCentered<Trimpot>(mm2px(POS_ATTEN), module, WaveArtifact::POS_ATTEN_PARAM));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(POS_INPUT), module, WaveArtifact::POS_INPUT));
 		addParam(createParamCentered<RoundBlackKnob>(mm2px(FREQ_KNOB), module, WaveArtifact::FREQ_PARAM));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(VOCT_INPUT), module, WaveArtifact::VOCT_INPUT));
-		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(CLOCK_INPUT), module, WaveArtifact::CLOCK_INPUT));
+
+		addParam(createModeButton(MASTER_MODE_BUTTON, module, WaveArtifact::MASTER_MODE_PARAM, {"OFF", "LP", "BP", "HP", "NOTCH"}, SCREEN_TEXT));
+		addParam(createParamCentered<RoundBlackKnob>(mm2px(MASTER_CUTOFF_KNOB), module, WaveArtifact::MASTER_CUTOFF_PARAM));
+		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(MASTER_RES_KNOB), module, WaveArtifact::MASTER_RES_PARAM));
+		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(MASTER_SPREAD_KNOB), module, WaveArtifact::MASTER_SPREAD_PARAM));
+		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(MASTER_FDBK_KNOB), module, WaveArtifact::MASTER_FDBK_PARAM));
 
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(LEFT_OUTPUT), module, WaveArtifact::LEFT_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(RIGHT_OUTPUT), module, WaveArtifact::RIGHT_OUTPUT));
@@ -405,49 +607,63 @@ struct WaveArtifactWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Auto arrange markers", "", [=]() {
 			m->autoArrange();
 		}));
-
-		// Interim marker controls until the marker bar (M5) handles this on the panel.
-		menu->addChild(new MenuSeparator);
-		menu->addChild(createMenuLabel("Markers (temporary, until the marker bar)"));
-		menu->addChild(createIndexSubmenuItem("Edit knobs for",
-			{"Marker 1", "Marker 2", "Marker 3", "Marker 4", "Marker 5"},
-			[=]() {
-				return (size_t) m->selectedMarker;
-			},
-			[=](size_t i) {
-				m->selectedMarker = (int) i;
-			}
-		));
-		for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
-			menu->addChild(createSubmenuItem("Marker " + std::to_string(i + 1), "", [=](Menu* sub) {
-				sub->addChild(createCheckMenuItem("Active", "",
-					[=]() {
-						return m->params[WaveArtifact::MARKER_ACTIVE_PARAM + i].getValue() > 0.5f;
-					},
-					[=]() {
-						Param& p = m->params[WaveArtifact::MARKER_ACTIVE_PARAM + i];
-						p.setValue(p.getValue() > 0.5f ? 0.f : 1.f);
-					}
-				));
-				sub->addChild(new MenuSeparator);
-				for (float pos : {0.f, 0.25f, 0.5f, 0.75f, 1.f}) {
-					sub->addChild(createMenuItem(string::f("Position %d%%", (int) (pos * 100)), "", [=]() {
-						m->params[WaveArtifact::MARKER_POS_PARAM + i].setValue(pos);
-					}));
-				}
-				const wa::WavetableBank* bank = m->activeBank.load();
-				int n = bank ? bank->numTables : 0;
-				if (n > 1) {
-					sub->addChild(new MenuSeparator);
-					for (int step = 0; step <= 4; step++) {
-						int t = (int) std::round(step / 4.f * (n - 1));
-						sub->addChild(createMenuItem(string::f("Wavetable %d", t + 1), "", [=]() {
-							m->params[WaveArtifact::MARKER_WAVE_PARAM + i].setValue((float) t / (n - 1));
-						}));
-					}
-				}
+		if (m->previewTable.load() >= 0) {
+			menu->addChild(createMenuItem("Stop wavetable preview", "", [=]() {
+				m->previewTable = -1;
 			}));
 		}
+
+		// Expanders already snapped on in a row to the right.
+		int count = 0;
+		Module* last = m;
+		while (count < wa::MAX_EXPANDERS && isWaveArtifactExpander(last->rightExpander.module)) {
+			last = last->rightExpander.module;
+			count++;
+		}
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuItem("Add expander", string::f("%d / %d", count, wa::MAX_EXPANDERS), [=]() {
+			addExpander();
+		}, count >= wa::MAX_EXPANDERS));
+	}
+
+	/** Creates an expander at the right end of the chain (pushing anything there aside), set to the
+	first marker no expander in the chain uses yet. Undoable. */
+	void addExpander() {
+		WaveArtifact* m = getModule<WaveArtifact>();
+		if (!m)
+			return;
+		bool used[WaveArtifact::NUM_MARKERS] = {};
+		int count = 0;
+		Module* last = m;
+		while (isWaveArtifactExpander(last->rightExpander.module)) {
+			last = last->rightExpander.module;
+			used[((WaveArtifactExpander*) last)->getMarker()] = true;
+			if (++count >= wa::MAX_EXPANDERS)
+				return;
+		}
+		int marker = count % WaveArtifact::NUM_MARKERS;
+		for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
+			if (!used[i]) {
+				marker = i;
+				break;
+			}
+		}
+		ModuleWidget* lastWidget = APP->scene->rack->getModule(last->id);
+		if (!lastWidget)
+			return;
+
+		Model* model = modelWaveArtifactExpander;
+		Module* em = model->createModule();
+		em->params[WaveArtifactExpander::MARKER_PARAM].setValue((float) marker);
+		APP->engine->addModule(em);
+		ModuleWidget* emw = model->createModuleWidget(em);
+		APP->scene->rack->addModule(emw);
+		APP->scene->rack->setModulePosForce(emw, Vec(lastWidget->box.getRight(), lastWidget->box.pos.y));
+
+		history::ModuleAdd* h = new history::ModuleAdd;
+		h->name = "add waveArtifact expander";
+		h->setModule(emw);
+		APP->history->push(h);
 	}
 };
 
