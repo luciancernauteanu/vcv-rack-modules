@@ -1,19 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 36 HP light panel. Geometry matches src/Layout.hpp.
+<!-- 42 HP light panel. Geometry matches src/Layout.hpp.
      Labels are drawn at runtime by PanelLabels until they are added here as paths in Inkscape.
      Section boxes group each marker's controls (marker, wave + LFO, gain, filter, pitch, pan,
      arrange/clock) and the global ones (position + position LFO, pitch, master, outputs). -->
-<svg xmlns="http://www.w3.org/2000/svg" width="182.88mm" height="128.5mm" viewBox="0 0 182.88 128.5" version="1.1">
+<svg xmlns="http://www.w3.org/2000/svg" width="213.36mm" height="128.5mm" viewBox="0 0 213.36 128.5" version="1.1">
   <g id="panel">
-    <rect id="background" x="0" y="0" width="182.88" height="128.5" fill="#e9e7e2"/>
+    <rect id="background" x="0" y="0" width="213.36" height="128.5" fill="#e9e7e2"/>
     <g id="marker-sections" fill="#d9d6cf">
       <rect x="6" y="11" width="10" height="32.5" rx="2" ry="2"/>
       <rect x="18" y="11" width="48" height="32.5" rx="2" ry="2"/>
       <rect x="68" y="11" width="12" height="32.5" rx="2" ry="2"/>
       <rect x="82" y="11" width="36" height="32.5" rx="2" ry="2"/>
       <rect x="120" y="11" width="18" height="32.5" rx="2" ry="2"/>
-      <rect x="140" y="11" width="12" height="32.5" rx="2" ry="2"/>
-      <rect x="154" y="11" width="22.88" height="32.5" rx="2" ry="2"/>
+      <rect x="140" y="11" width="36.88" height="32.5" rx="2" ry="2"/>
     </g>
     <rect id="screen" x="6" y="46" width="170.88" height="29.5" rx="2" ry="2" fill="#0f1115"/>
     <rect id="bar-track" x="14" y="64.9" width="154.88" height="1.2" rx="0.6" ry="0.6" fill="#3a3f52"/>
@@ -23,7 +22,9 @@
       <rect x="83" y="77.5" width="65" height="28.5" rx="2" ry="2"/>
     </g>
     <rect id="output-box" x="150" y="77.5" width="26.88" height="28.5" rx="2" ry="2" fill="#26282c"/>
+    <rect id="clock-out-box" x="162.3" y="12.2" width="10.4" height="15.6" rx="1.5" ry="1.5" fill="#26282c"/>
     <rect id="dots-strip" x="6" y="108" width="170.88" height="12" rx="2" ry="2" fill="#0f1115"/>
+    <rect id="artifact-out-box" x="180.88" y="11" width="26.48" height="109" rx="2" ry="2" fill="#26282c"/>
   </g>
   <g id="components" style="display:none">
     <circle id="MARKER_BADGE" cx="11" cy="19" r="4" fill="#ffff00"/>
@@ -43,13 +44,17 @@
     <circle id="MARKER_PITCH_PARAM" cx="129" cy="19" r="4" fill="#ff0000"/>
     <rect id="MARKER_PITCH_FREE_PARAM" x="129.5" y="31.8" width="6.8" height="4.4" fill="#ff0000"/>
     <circle id="MARKER_FINE_PARAM" cx="124.2" cy="34" r="3" fill="#ff0000"/>
-    <circle id="MARKER_PAN_PARAM" cx="146" cy="19" r="4" fill="#ff0000"/>
-    <circle id="ARRANGE_PARAM" cx="165.44" cy="19" r="2.5" fill="#ff0000"/>
-    <circle id="CLOCK_INPUT" cx="165.44" cy="34" r="4" fill="#00ff00"/>
+    <circle id="MARKER_PAN_PARAM" cx="74" cy="34" r="3.5" fill="#ff0000"/>
+
+    <circle id="INTERNAL_BPM_PARAM" cx="149.5" cy="19" r="3.5" fill="#ff0000"/>
+    <rect id="RESTART_PARAM" x="163.2" y="38.5" width="8.6" height="4.2" fill="#ff0000"/>
+    <circle id="CLOCK_INPUT" cx="149.5" cy="34" r="4" fill="#00ff00"/>
+    <circle id="CLOCK_OUTPUT" cx="167.5" cy="18.4" r="4" fill="#0000ff"/>
+    <circle id="RESET_INPUT" cx="167.5" cy="34" r="4" fill="#00ff00"/>
     <rect id="MARKER_BAR" x="6" y="46" width="170.88" height="29.5" fill="#ffff00"/>
     <circle id="POSITION_PARAM" cx="14" cy="90.5" r="6" fill="#ff0000"/>
-    <circle id="POS_ATTEN_PARAM" cx="27" cy="85" r="3" fill="#ff0000"/>
-    <circle id="POS_INPUT" cx="27" cy="96.2" r="4" fill="#00ff00"/>
+    <circle id="POS_ATTEN_PARAM" cx="27" cy="83.4" r="3" fill="#ff0000"/>
+    <circle id="POS_INPUT" cx="27" cy="94.6" r="4" fill="#00ff00"/>
     <rect id="POS_LFO_SHAPE_PARAM" x="36" y="81.7" width="17" height="7" fill="#ff0000"/>
     <rect id="POS_LFO_SYNC_PARAM" x="35.2" y="90.2" width="6.8" height="4.4" fill="#ff0000"/>
     <rect id="POS_LFO_TRIPLET_PARAM" x="42.9" y="90.2" width="4.2" height="4.4" fill="#ff0000"/>
@@ -58,17 +63,21 @@
     <circle id="POS_LFO_AMT_PARAM" cx="51" cy="98.8" r="3" fill="#ff0000"/>
     <circle id="FREQ_PARAM" cx="64.5" cy="90.5" r="4" fill="#ff0000"/>
     <circle id="VOCT_INPUT" cx="75.5" cy="90.5" r="4" fill="#00ff00"/>
-    <rect id="MASTER_MODE_PARAM" x="84" y="82.7" width="10" height="5" fill="#ff0000"/>
-    <circle id="MASTER_CUTOFF_PARAM" cx="101.5" cy="85.2" r="3.5" fill="#ff0000"/>
-    <circle id="MASTER_CUTOFF_AMT_PARAM" cx="101.5" cy="92.4" r="3" fill="#ff0000"/>
-    <circle id="MASTER_CUTOFF_INPUT" cx="101.5" cy="100" r="4" fill="#00ff00"/>
-    <circle id="MASTER_RES_PARAM" cx="111.9" cy="85.2" r="3.5" fill="#ff0000"/>
-    <circle id="MASTER_DRIVE_PARAM" cx="122.3" cy="85.2" r="3.5" fill="#ff0000"/>
-    <circle id="MASTER_SPREAD_PARAM" cx="132.7" cy="85.2" r="3.5" fill="#ff0000"/>
-    <circle id="MASTER_FDBK_PARAM" cx="143.1" cy="85.2" r="3.5" fill="#ff0000"/>
+    <rect id="MASTER_MODE_PARAM" x="84" y="82.3" width="10" height="5" fill="#ff0000"/>
+    <circle id="MASTER_CUTOFF_PARAM" cx="101.5" cy="84.8" r="3.5" fill="#ff0000"/>
+    <circle id="MASTER_CUTOFF_AMT_PARAM" cx="101.5" cy="93.2" r="3" fill="#ff0000"/>
+    <circle id="MASTER_CUTOFF_INPUT" cx="101.5" cy="101" r="4" fill="#00ff00"/>
+    <circle id="MASTER_RES_PARAM" cx="111.9" cy="84.8" r="3.5" fill="#ff0000"/>
+    <circle id="MASTER_DRIVE_PARAM" cx="122.3" cy="84.8" r="3.5" fill="#ff0000"/>
+    <circle id="MASTER_SPREAD_PARAM" cx="132.7" cy="84.8" r="3.5" fill="#ff0000"/>
+    <circle id="MASTER_FDBK_PARAM" cx="143.1" cy="84.8" r="3.5" fill="#ff0000"/>
     <circle id="MASTER_GAIN_PARAM" cx="163.44" cy="85.4" r="3.5" fill="#ff0000"/>
     <circle id="LEFT_OUTPUT" cx="157.5" cy="97.6" r="4" fill="#0000ff"/>
     <circle id="RIGHT_OUTPUT" cx="169.5" cy="97.6" r="4" fill="#0000ff"/>
     <rect id="DOT_STRIP" x="6" y="108" width="170.88" height="12" fill="#ffff00"/>
+    <circle id="ARTIFACT_L_OUTPUT_0" cx="189.3" cy="28" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_R_OUTPUT_0" cx="200.9" cy="28" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_L_OUTPUT_4" cx="189.3" cy="106" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_R_OUTPUT_4" cx="200.9" cy="106" r="4" fill="#0000ff"/>
   </g>
 </svg>

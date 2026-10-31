@@ -1,9 +1,9 @@
 {
   "slug": "waveArtifact",
-  "name": "waveArtifact",
+  "name": "Wave Artifacts",
   "version": "2.0.0",
   "license": "GPL-3.0-or-later",
-  "brand": "waveArtifact",
+  "brand": "Wave Artifacts",
   "author": "luciancernauteanu",
   "authorEmail": "",
   "authorUrl": "",
@@ -16,7 +16,7 @@
   "modules": [
     {
       "slug": "waveArtifact",
-      "name": "waveArtifact",
+      "name": "Wave Artifacts",
       "description": "Wavetable morph oscillator built from an imported WAV sample",
       "tags": [
         "Oscillator",
@@ -25,8 +25,8 @@
     },
     {
       "slug": "waveArtifactExpander",
-      "name": "waveArtifact Expander",
-      "description": "Per-marker CV inputs and two LFOs for waveArtifact; place it to the right (up to 5)",
+      "name": "Wave Artifacts Expander",
+      "description": "Per-marker CV inputs and two LFOs for Wave Artifacts; place it to the right (up to 5)",
       "tags": [
         "Expander",
         "Low-frequency oscillator"

@@ -62,7 +62,7 @@ struct LfoRateKnobT : TBase {
 				}
 			);
 		};
-		menu->addChild(toggle(syncId, "Sync to CLOCK"));
+		menu->addChild(toggle(syncId, "Sync to tempo (BPM / CLOCK)"));
 		menu->addChild(toggle(tripletId, "Triplets"));
 		menu->addChild(toggle(dottedId, "Dotted"));
 	}

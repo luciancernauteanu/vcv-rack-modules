@@ -45,6 +45,8 @@ struct ToExpanderMessage {
 	int index = 0;
 	/** The sender is connected to a main module (possibly through other expanders) */
 	bool linked = false;
+	/** RESET arrived this sample: restart the LFOs */
+	bool reset = false;
 };
 
 struct ToMainMessage {
@@ -52,6 +54,10 @@ struct ToMainMessage {
 	float mod[NUM_MARKERS][NUM_MOD_TARGETS] = {};
 	/** Product of every linked expander's VCA level for the marker (1 = untouched) */
 	float gainMul[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
+	/** Volts on the expanders' V/OCT inputs, summed per artifact (added to the main V/OCT) */
+	float voct[NUM_MARKERS] = {};
+	/** A linked expander is actively modulating this artifact (a CV with a non-zero amount, or V/OCT) */
+	bool modulated[NUM_MARKERS] = {};
 };
 
 } // namespace wa

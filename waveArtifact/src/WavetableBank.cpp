@@ -286,7 +286,7 @@ WavetableBank* analyzeWav(const uint8_t* bytes, size_t size, TableCountMode mode
 	if (!bytes || size == 0)
 		return fail("Empty file");
 	if (size > MAX_FILE_BYTES)
-		return fail("File larger than 2 MB");
+		return fail(("File larger than " + std::to_string(MAX_FILE_MB) + " MB").c_str());
 
 	unsigned channels = 0, sampleRate = 0;
 	drwav_uint64 frames = 0;

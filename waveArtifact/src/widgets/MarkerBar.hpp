@@ -200,7 +200,7 @@ struct MarkerBar : widget::Widget {
 		std::shared_ptr<window::Font> font = wadraw::monoFont();
 		if (!font)
 			return;
-		std::string text = module ? module->getStatus() : "Load a WAV (max 2 MB)";
+		std::string text = module ? module->getStatus() : "Load a WAV (max 10 MB)";
 		float y = mm2px(layout::STATUS_Y);
 		float x = mm2px(layout::BAR_X0);
 		nvgFontFaceId(args.vg, font->handle);
@@ -288,6 +288,20 @@ struct MarkerBar : widget::Widget {
 			nvgTextAlign(args.vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
 			std::string num = std::to_string(i + 1);
 			nvgText(args.vg, r.pos.x + pad + 1.f, r.pos.y + pad, num.c_str(), NULL);
+			// CV tag: an expander is modulating this artifact.
+			if (module && active && module->shownCv[i].load(std::memory_order_relaxed)) {
+				float tx = r.pos.x + pad + 9.f, ty = r.pos.y + pad, tw = 13.f, th = 8.5f;
+				nvgBeginPath(args.vg);
+				nvgRoundedRect(args.vg, tx, ty, tw, th, 2.f);
+				nvgFillColor(args.vg, c);
+				nvgFill(args.vg);
+				nvgFontSize(args.vg, 7.f);
+				nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
+				nvgFillColor(args.vg, nvgRGB(0x12, 0x14, 0x1c));
+				nvgText(args.vg, tx + tw / 2.f, ty + th / 2.f + 0.35f * 7.f, "CV", NULL);
+				nvgFontSize(args.vg, 9.f);
+				nvgFillColor(args.vg, nvgTransRGBAf(c, 1.f));
+			}
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
 			std::string info;
 			if (!active)
@@ -297,14 +311,7 @@ struct MarkerBar : widget::Widget {
 			nvgText(args.vg, r.getRight() - pad - 1.f, r.pos.y + pad, info.c_str(), NULL);
 		}
 
-		if (module && !bank && font) {
-			math::Rect a = slotsArea();
-			nvgFontFaceId(args.vg, font->handle);
-			nvgFontSize(args.vg, 11.f);
-			nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-			nvgFillColor(args.vg, layout::SCREEN_DIM);
-			nvgText(args.vg, a.getCenter().x, a.getCenter().y + mm2px(1.f), "Click here to load a WAV", NULL);
-		}
+		// (No hint text over the empty slots: the file line at the bottom already says "Load a WAV".)
 	}
 
 	void drawPreview(const DrawArgs& args) {
@@ -396,14 +403,8 @@ struct MarkerBar : widget::Widget {
 				nvgStrokeWidth(args.vg, 1.2f);
 				nvgStroke(args.vg);
 			}
-			if (font) {
-				nvgFontFaceId(args.vg, font->handle);
-				nvgFontSize(args.vg, r * 1.4f);
-				nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-				nvgFillColor(args.vg, nvgRGB(0x16, 0x18, 0x22));
-				std::string label = std::to_string(i + 1);
-				nvgText(args.vg, x, y + 0.5f, label.c_str(), NULL);
-			}
+			if (font)
+				wadraw::drawCenteredNumber(args.vg, font->handle, x, y, r * 1.4f, std::to_string(i + 1), nvgRGB(0x16, 0x18, 0x22));
 		}
 	}
 };

@@ -1,10 +1,17 @@
-# waveArtifact
+# Wave Artifacts
 
-A VCV Rack 2 wavetable morph oscillator. It turns one imported WAV file (max 2 MB) into
-50-100 single-cycle wavetables and morphs between up to 5 user-placed markers.
+A VCV Rack 2 wavetable morph oscillator. It turns one imported WAV file (max 10 MB) into
+50-100 single-cycle wavetables ("artifacts") and morphs between up to 5 user-placed markers.
+A wavetable map along the bottom shows the whole sample, with each marker's bullet at the
+artifact it plays. The **Wave Artifacts Expander** (up to 5, to the right) adds per-marker CV
+inputs and two LFOs.
 
-Status: M1 (panel) and M2 (WAV import and analysis) are done. The oscillator, markers and
-per-marker controls come in later milestones, so the outputs are silent for now.
+The plugin and module slugs stay `waveArtifact` and `waveArtifactExpander`, so patches saved
+with earlier builds still load.
+
+Status: playable. Oscillator, markers, per-artifact controls, master filter, internal tempo and
+clock, artifact outputs and the expander are done. Saving the loaded WAV inside the patch is
+still to come.
 
 ## Build (Windows, MSYS2 MinGW 64-bit shell)
 

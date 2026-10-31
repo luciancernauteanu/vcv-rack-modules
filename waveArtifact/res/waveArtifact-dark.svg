@@ -1,16 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 36 HP dark panel. Same geometry as waveArtifact.svg; see that file for notes. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="182.88mm" height="128.5mm" viewBox="0 0 182.88 128.5" version="1.1">
+<!-- 42 HP dark panel. Same geometry as waveArtifact.svg; see that file for notes. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="213.36mm" height="128.5mm" viewBox="0 0 213.36 128.5" version="1.1">
   <g id="panel">
-    <rect id="background" x="0" y="0" width="182.88" height="128.5" fill="#23262b"/>
+    <rect id="background" x="0" y="0" width="213.36" height="128.5" fill="#23262b"/>
     <g id="marker-sections" fill="#2d3137">
       <rect x="6" y="11" width="10" height="32.5" rx="2" ry="2"/>
       <rect x="18" y="11" width="48" height="32.5" rx="2" ry="2"/>
       <rect x="68" y="11" width="12" height="32.5" rx="2" ry="2"/>
       <rect x="82" y="11" width="36" height="32.5" rx="2" ry="2"/>
       <rect x="120" y="11" width="18" height="32.5" rx="2" ry="2"/>
-      <rect x="140" y="11" width="12" height="32.5" rx="2" ry="2"/>
-      <rect x="154" y="11" width="22.88" height="32.5" rx="2" ry="2"/>
+      <rect x="140" y="11" width="36.88" height="32.5" rx="2" ry="2"/>
     </g>
     <rect id="screen" x="6" y="46" width="170.88" height="29.5" rx="2" ry="2" fill="#0b0d10"/>
     <rect id="bar-track" x="14" y="64.9" width="154.88" height="1.2" rx="0.6" ry="0.6" fill="#3a3f52"/>
@@ -20,6 +19,8 @@
       <rect x="83" y="77.5" width="65" height="28.5" rx="2" ry="2"/>
     </g>
     <rect id="output-box" x="150" y="77.5" width="26.88" height="28.5" rx="2" ry="2" fill="#e6e6e6"/>
+    <rect id="clock-out-box" x="162.3" y="12.2" width="10.4" height="15.6" rx="1.5" ry="1.5" fill="#e6e6e6"/>
     <rect id="dots-strip" x="6" y="108" width="170.88" height="12" rx="2" ry="2" fill="#0b0d10"/>
+    <rect id="artifact-out-box" x="180.88" y="11" width="26.48" height="109" rx="2" ry="2" fill="#e6e6e6"/>
   </g>
 </svg>

@@ -22,7 +22,7 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_POS_PARAM, NUM_MARKERS),
 		/** Wavetable position 0..1 across the bank (start..end of the sample) */
 		ENUMS(MARKER_WAVE_PARAM, NUM_MARKERS),
-		/** Filter cutoff (was band-pass frequency; same ID). 0 = filter off. */
+		/** Filter cutoff (was band-pass frequency; same ID). 20 Hz .. 20 kHz; the filter is always on. */
 		ENUMS(MARKER_CUTOFF_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_PITCH_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_PAN_PARAM, NUM_MARKERS),
@@ -70,23 +70,36 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_PITCH_FREE_PARAM, NUM_MARKERS),
 		/** Output gain 0..200% (100% = unity), before the output protection */
 		MASTER_GAIN_PARAM,
+		/** Index into wa::PPQN_VALUES: clock pulses per quarter note (right-click menu) */
+		CLOCK_PPQN_PARAM,
+		/** Internal tempo, used while CLOCK is unpatched (20..300 BPM) */
+		INTERNAL_BPM_PARAM,
+		/** Momentary: restart the beat grid and every LFO (same as a RESET gate) */
+		RESTART_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
 		VOCT_INPUT,
 		POS_INPUT,
-		/** 1 pulse per quarter note, for LFO sync */
+		/** Clock for LFO sync; pulses per quarter note set by CLOCK_PPQN_PARAM */
 		CLOCK_INPUT,
 		MASTER_CUTOFF_INPUT,
 		MASTER_RES_INPUT,
 		MASTER_DRIVE_INPUT,
 		MASTER_SPREAD_INPUT,
 		MASTER_FDBK_INPUT,
+		/** Restarts the beat count and every LFO (next clock pulse = start of a bar) */
+		RESET_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
 		LEFT_OUTPUT,
 		RIGHT_OUTPUT,
+		/** Each artifact's own output (its chain alone, before the master). L carries mono when R is unpatched. */
+		ENUMS(ARTIFACT_L_OUTPUT, NUM_MARKERS),
+		ENUMS(ARTIFACT_R_OUTPUT, NUM_MARKERS),
+		/** Beat clock: a 10 V, 5 ms trigger per quarter note from the clock in use (internal or CLOCK) */
+		CLOCK_OUTPUT,
 		OUTPUTS_LEN
 	};
 	enum LightId {
@@ -99,7 +112,15 @@ struct WaveArtifact : Module {
 	std::atomic<wa::WavetableBank*> pendingBank{nullptr};
 	std::atomic<wa::WavetableBank*> activeBank{nullptr};
 	std::atomic<wa::WavetableBank*> retiredBank{nullptr};
+	/** Changes whenever the active bank changes (load, re-analysis, Initialize), so displays that
+	cache something per bank (the wavetable map) know when to rebuild. Never compare bank pointers:
+	a new bank can reuse a freed one's address. */
+	std::atomic<int> bankSerial{0};
 	std::atomic<bool> analyzing{false};
+	/** Bumped by Initialize: an analysis started before it is discarded when it finishes. */
+	std::atomic<int> analysisGeneration{0};
+	/** Held while the worker publishes a bank and while Initialize clears them. */
+	std::mutex publishMutex;
 
 	/** Table auditioned instead of the morph, or -1. Written by the UI, read by process(). Not saved. */
 	std::atomic<int> previewTable{-1};
@@ -109,12 +130,19 @@ struct WaveArtifact : Module {
 	std::atomic<float> shownHeard[NUM_MARKERS];
 	std::atomic<float> shownPosition{0.f};
 	std::atomic<float> shownPreview{0.f};
+	/** An expander is modulating this artifact (shown as a CV tag on the screen) */
+	std::atomic<bool> shownCv[NUM_MARKERS];
 
 	// Audio thread only
 	wa::MorphEngine engine;
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
 	wa::Lfo posLfo;
+	dsp::SchmittTrigger resetTrigger;
+	dsp::PulseGenerator clockOutPulse;
+	bool restartHeld = false;
+	/** Set by the UI (menu) to restart the LFOs on the next sample */
+	std::atomic<bool> restartRequest{false};
 	int displayCounter = 0;
 
 	// UI thread only
