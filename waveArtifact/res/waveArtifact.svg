@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 36 HP light panel. Geometry matches src/Layout.hpp.
+<!-- 42 HP light panel. Geometry matches src/Layout.hpp.
      Labels are drawn at runtime by PanelLabels until they are added here as paths in Inkscape.
      Section boxes group each marker's controls (marker, wave + LFO, gain, filter, pitch, pan,
      arrange/clock) and the global ones (position + position LFO, pitch, master, outputs). -->
-<svg xmlns="http://www.w3.org/2000/svg" width="182.88mm" height="128.5mm" viewBox="0 0 182.88 128.5" version="1.1">
+<svg xmlns="http://www.w3.org/2000/svg" width="213.36mm" height="128.5mm" viewBox="0 0 213.36 128.5" version="1.1">
   <g id="panel">
-    <rect id="background" x="0" y="0" width="182.88" height="128.5" fill="#e9e7e2"/>
+    <rect id="background" x="0" y="0" width="213.36" height="128.5" fill="#e9e7e2"/>
     <g id="marker-sections" fill="#d9d6cf">
       <rect x="6" y="11" width="10" height="32.5" rx="2" ry="2"/>
       <rect x="18" y="11" width="48" height="32.5" rx="2" ry="2"/>
@@ -24,6 +24,7 @@
     </g>
     <rect id="output-box" x="150" y="77.5" width="26.88" height="28.5" rx="2" ry="2" fill="#26282c"/>
     <rect id="dots-strip" x="6" y="108" width="170.88" height="12" rx="2" ry="2" fill="#0f1115"/>
+    <rect id="artifact-out-box" x="180.88" y="11" width="26.48" height="109" rx="2" ry="2" fill="#26282c"/>
   </g>
   <g id="components" style="display:none">
     <circle id="MARKER_BADGE" cx="11" cy="19" r="4" fill="#ffff00"/>
@@ -70,5 +71,9 @@
     <circle id="LEFT_OUTPUT" cx="157.5" cy="97.6" r="4" fill="#0000ff"/>
     <circle id="RIGHT_OUTPUT" cx="169.5" cy="97.6" r="4" fill="#0000ff"/>
     <rect id="DOT_STRIP" x="6" y="108" width="170.88" height="12" fill="#ffff00"/>
+    <circle id="ARTIFACT_L_OUTPUT_0" cx="189.3" cy="28" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_R_OUTPUT_0" cx="200.9" cy="28" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_L_OUTPUT_4" cx="189.3" cy="106" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_R_OUTPUT_4" cx="200.9" cy="106" r="4" fill="#0000ff"/>
   </g>
 </svg>

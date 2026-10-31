@@ -87,6 +87,9 @@ struct WaveArtifact : Module {
 	enum OutputId {
 		LEFT_OUTPUT,
 		RIGHT_OUTPUT,
+		/** Each artifact's own output (its chain alone, before the master). L carries mono when R is unpatched. */
+		ENUMS(ARTIFACT_L_OUTPUT, NUM_MARKERS),
+		ENUMS(ARTIFACT_R_OUTPUT, NUM_MARKERS),
 		OUTPUTS_LEN
 	};
 	enum LightId {

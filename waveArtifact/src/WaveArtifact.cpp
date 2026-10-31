@@ -133,6 +133,11 @@ WaveArtifact::WaveArtifact() {
 	configInput(CLOCK_INPUT, "Clock (1 pulse per quarter note) for LFO sync");
 	configOutput(LEFT_OUTPUT, "Left");
 	configOutput(RIGHT_OUTPUT, "Right");
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		std::string name = "Artifact " + std::to_string(i + 1);
+		configOutput(ARTIFACT_L_OUTPUT + i, name + " left (mono when right is unpatched)");
+		configOutput(ARTIFACT_R_OUTPUT + i, name + " right");
+	}
 
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		shownIndex[i].store(0.f);
@@ -217,6 +222,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		m.cutoff = (cutoff > 0.f) ? clamp(cutoff + modOf(i, wa::MOD_CUTOFF), 1e-4f, 1.f) : 0.f;
 		m.drive = clamp(params[MARKER_DRIVE_PARAM + i].getValue() + modOf(i, wa::MOD_DRIVE), 0.f, 1.f);
 		m.fine = clamp(params[MARKER_FINE_PARAM + i].getValue() + modOf(i, wa::MOD_FINE), -12.f, 12.f);
+		// Expander V/OCT, added to the main V/OCT for this artifact only
+		m.voct = mod->voct[i];
 		m.pan = clamp(params[MARKER_PAN_PARAM + i].getValue() + modOf(i, wa::MOD_PAN), -1.f, 1.f);
 	}
 	// 0..10 V on POS CV sweeps the whole bar.
@@ -238,6 +245,9 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	in.bank = activeBank.load(std::memory_order_relaxed);
 	in.holdSilent = swapWanted;
 	in.previewTable = previewTable.load(std::memory_order_relaxed);
+	// Only artifacts with a patched output are rendered for it.
+	for (int i = 0; i < NUM_MARKERS; i++)
+		in.wantDirect[i] = outputs[ARTIFACT_L_OUTPUT + i].isConnected() || outputs[ARTIFACT_R_OUTPUT + i].isConnected();
 	in.masterMode = (int) std::round(params[MASTER_MODE_PARAM].getValue()) - 1;
 	in.masterCutoff = params[MASTER_CUTOFF_PARAM].getValue();
 	in.masterRes = params[MASTER_RES_PARAM].getValue();
@@ -260,6 +270,13 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	engine.process(in, &l, &r);
 	outputs[LEFT_OUTPUT].setVoltage(5.f * l);
 	outputs[RIGHT_OUTPUT].setVoltage(5.f * r);
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		float dl, dr;
+		engine.getDirect(i, &dl, &dr);
+		bool stereo = outputs[ARTIFACT_R_OUTPUT + i].isConnected();
+		outputs[ARTIFACT_L_OUTPUT + i].setVoltage(5.f * (stereo ? dl : 0.5f * (dl + dr)));
+		outputs[ARTIFACT_R_OUTPUT + i].setVoltage(5.f * dr);
+	}
 
 	// Display values, a few hundred times a second is plenty for a 60 Hz screen.
 	if (++displayCounter >= 64) {
@@ -521,6 +538,29 @@ static ModeButton* createModeButton(Vec mmCenter, Module* module, int paramId, s
 	return b;
 }
 
+/** Numbered dot in an artifact's color, labelling its output pair. */
+struct ArtifactNumber : widget::Widget {
+	int index = 0;
+
+	void draw(const DrawArgs& args) override {
+		Vec c = box.size.div(2.f);
+		float r = std::min(box.size.x, box.size.y) / 2.f;
+		nvgBeginPath(args.vg);
+		nvgCircle(args.vg, c.x, c.y, r);
+		nvgFillColor(args.vg, layout::MARKER_COLORS[index]);
+		nvgFill(args.vg);
+		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/Nunito-Bold.ttf"));
+		if (!font)
+			return;
+		nvgFontFaceId(args.vg, font->handle);
+		nvgFontSize(args.vg, r * 1.4f);
+		nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFillColor(args.vg, nvgRGB(0x16, 0x18, 0x22));
+		std::string label = std::to_string(index + 1);
+		nvgText(args.vg, c.x, c.y + 0.5f, label.c_str(), NULL);
+	}
+};
+
 struct WaveArtifactWidget : ModuleWidget {
 	static const int EDIT_KNOBS = 17;
 	ParamWidget* editKnobs[WaveArtifact::NUM_MARKERS][EDIT_KNOBS] = {};
@@ -575,6 +615,10 @@ struct WaveArtifactWidget : ModuleWidget {
 		labels->add(Vec(MASTER_GAIN_KNOB.x, MASTER_GAIN_LABEL_Y), "GAIN", 6.f, true);
 		labels->add(Vec(LEFT_OUTPUT.x, OUTPUT_LABEL_Y), "L", 6.f, true);
 		labels->add(Vec(RIGHT_OUTPUT.x, OUTPUT_LABEL_Y), "R", 6.f, true);
+		// Artifact outputs column
+		labels->add(Vec(ARTOUT_BOX_POS.x + ARTOUT_BOX_SIZE.x / 2.f, ARTOUT_HEADER_Y), "ARTIFACT OUT", 5.f, true);
+		labels->add(Vec(ARTOUT_L_X, ARTOUT_LR_LABEL_Y), "L", 6.f, true);
+		labels->add(Vec(ARTOUT_R_X, ARTOUT_LR_LABEL_Y), "R", 6.f, true);
 		addChild(labels);
 
 		MarkerBar* bar = createWidget<MarkerBar>(mm2px(SCREEN_POS));
@@ -652,6 +696,16 @@ struct WaveArtifactWidget : ModuleWidget {
 		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(MASTER_GAIN_KNOB), module, WaveArtifact::MASTER_GAIN_PARAM));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(LEFT_OUTPUT), module, WaveArtifact::LEFT_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(RIGHT_OUTPUT), module, WaveArtifact::RIGHT_OUTPUT));
+
+		for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
+			float y = ARTOUT_ROW0_Y + i * ARTOUT_ROW_STEP;
+			ArtifactNumber* num = createWidget<ArtifactNumber>(mm2px(Vec(ARTOUT_BOX_POS.x + ARTOUT_BOX_SIZE.x / 2.f - ARTOUT_BADGE_R, y + ARTOUT_BADGE_DY - ARTOUT_BADGE_R)));
+			num->box.size = mm2px(Vec(2.f * ARTOUT_BADGE_R, 2.f * ARTOUT_BADGE_R));
+			num->index = i;
+			addChild(num);
+			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(ARTOUT_L_X, y)), module, WaveArtifact::ARTIFACT_L_OUTPUT + i));
+			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(ARTOUT_R_X, y)), module, WaveArtifact::ARTIFACT_R_OUTPUT + i));
+		}
 	}
 
 	void step() override {

@@ -25,6 +25,8 @@ struct WaveArtifactExpander : Module {
 	};
 	enum InputId {
 		ENUMS(MOD_INPUT, wa::NUM_MOD_TARGETS),
+		/** Pitch for this artifact only, 1 V/oct, added to the main V/OCT */
+		VOCT_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {

@@ -14,6 +14,7 @@
 // tables (band-limited mip level picked from each marker's frequency) -> crossfade by position
 // -> drive -> multimode filter (its mode mix morphs between the markers) -> declick gain
 // -> equal-power pan -> preview mix -> stereo master filter -> limiter.
+// Each artifact can also have its own output: its chain alone, before the master (renderDirect).
 //
 // The morph is audio-only: pitch is NOT interpolated between markers, so a marker at -12 st and
 // a marker at 0 st crossfade as two separate pitches, never sliding (glide could be a later option).
@@ -60,6 +61,8 @@ struct MarkerInput {
 	float pitch = 0.f;
 	/** Fine tune in semitones (-1..1) */
 	float fine = 0.f;
+	/** Extra octaves for this artifact only (expander V/OCT), on top of the main V/OCT */
+	float voct = 0.f;
 	/** -1 (left) .. 1 (right) */
 	float pan = 0.f;
 };
@@ -75,6 +78,8 @@ struct EngineInput {
 	bool holdSilent = false;
 	/** Table to audition instead of the morph, or -1. Switching crossfades over 20 ms. */
 	int previewTable = -1;
+	/** Render this artifact's own output (see getDirect); only patched outputs cost CPU. */
+	bool wantDirect[NUM_MARKERS] = {};
 
 	// Master section (stereo, on the whole output): drive -> filter. See MasterFilter. The *Mod values
 	// are CV, added after smoothing so they can run at audio rate.
@@ -110,6 +115,10 @@ public:
 			tables[i].smoothTime = -1.f; // recompute glide coefficients for the new rate
 		lfoAmountCoef = 1.f - std::exp(-1.f / (LFO_AMOUNT_SMOOTH_TIME * sr));
 		limiter.setSampleRate(sr);
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			direct[m].limiter.setSampleRate(sr);
+			direct[m].running = false;
+		}
 	}
 
 	float getSampleRate() const {
@@ -150,6 +159,8 @@ public:
 	void process(const EngineInput& in, float* outL, float* outR) {
 		*outL = 0.f;
 		*outR = 0.f;
+		for (int m = 0; m < NUM_MARKERS; m++)
+			rawValid[m] = false;
 
 		// Desired structure: active markers sorted by position. Marker 1 always exists.
 		int ord[NUM_MARKERS];
@@ -296,6 +307,16 @@ public:
 		// (artifact gains, drive, resonance, feedback, master gain) can send more than 10 V out.
 		masterGainS += (std::min(std::max(in.masterGain, 0.f), (float) MAX_MASTER_GAIN) - masterGainS) * smoothCoef;
 		limiter.process(l * masterGainS, r * masterGainS, LIMIT, outL, outR);
+
+		renderDirect(in);
+	}
+
+	/** An artifact's own output (engine units, x5 V), 0 unless `wantDirect` was set for it.
+	It is the artifact's whole chain (oscillator, GAIN, DRIVE, filter, PAN) before the master
+	section, always playing whatever the position, with its own 10 V output protection. */
+	void getDirect(int m, float* l, float* r) const {
+		*l = directL[m];
+		*r = directR[m];
 	}
 
 	/** Output gain reduction of the limiter (1 = not limiting), for a meter */
@@ -336,7 +357,7 @@ private:
 		// pitch stay phase-locked (their tables then blend without cancelling) whenever they meet.
 		float freqs[NUM_MARKERS];
 		for (int m = 0; m < NUM_MARKERS; m++) {
-			float f = FREQ_C4 * std::exp2(in.voct + (in.markers[m].pitch + in.markers[m].fine) / 12.f);
+			float f = FREQ_C4 * std::exp2(in.voct + in.markers[m].voct + (in.markers[m].pitch + in.markers[m].fine) / 12.f);
 			freqs[m] = std::min(std::max(f, 0.01f), 0.45f * sampleRate);
 		}
 
@@ -361,8 +382,17 @@ private:
 			float g = std::min(std::max(in.markers[m].gain, 0.f), (float) MAX_GAIN);
 			gainS[m] += (g - gainS[m]) * smoothCoef;
 		}
-		float va = readMarker(a) * gainS[a];
-		float vb = (b == a) ? va : readMarker(b) * gainS[b];
+		float ra = readMarker(a);
+		float rb = (b == a) ? ra : readMarker(b);
+		float va = ra * gainS[a];
+		float vb = rb * gainS[b];
+		// Artifacts with a patched output are read every sample, heard in the morph or not.
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			if (!in.wantDirect[m])
+				continue;
+			rawRead[m] = (m == a) ? ra : (m == b) ? rb : readMarker(m);
+			rawValid[m] = true;
+		}
 		float dry = va + (vb - va) * w;
 
 		for (int m = 0; m < NUM_MARKERS; m++) {
@@ -403,6 +433,58 @@ private:
 		float angle = (panS + 1.f) * (float) (M_PI_4_F);
 		*outL = out * std::cos(angle) * SQRT2;
 		*outR = out * std::sin(angle) * SQRT2;
+	}
+
+	/** The artifacts' own outputs. Each patched artifact runs its own chain with its own settings
+	(no interpolation with a neighbor): GAIN, DRIVE, filter, PAN, then a safety limiter. It fades
+	(5 ms) when the artifact is switched off, and with the structural declick when the bank changes. */
+	void renderDirect(const EngineInput& in) {
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			DirectChain& d = direct[m];
+			if (!in.wantDirect[m]) {
+				d.running = false;
+				directL[m] = directR[m] = 0.f;
+				continue;
+			}
+			const MarkerInput& M = in.markers[m];
+			bool on = M.cutoff > 0.f;
+			float target[NUM_MIX];
+			modeWeights(on, M.filterMode, target);
+			float cutT = on ? std::min(std::max(M.cutoff, 0.f), 1.f) : d.cutS;
+			float resT = std::min(std::max(M.res, 0.f), 1.f);
+			float driveT = std::min(std::max(M.drive, 0.f), 1.f);
+			float panT = std::min(std::max(M.pan, -1.f), 1.f);
+			if (!d.running) {
+				// Just patched: start from the current settings, silent, with clean filter memory.
+				std::copy(target, target + NUM_MIX, d.mixS);
+				d.cutS = cutT;
+				d.resS = resT;
+				d.driveS = driveT;
+				d.panS = panT;
+				d.env = 0.f;
+				d.drive.reset();
+				d.svf.reset();
+				d.limiter.reset();
+				d.running = true;
+			}
+			for (int k = 0; k < NUM_MIX; k++)
+				d.mixS[k] += (target[k] - d.mixS[k]) * smoothCoef;
+			d.cutS += (cutT - d.cutS) * smoothCoef;
+			d.resS += (resT - d.resS) * smoothCoef;
+			d.driveS += (driveT - d.driveS) * smoothCoef;
+			d.panS += (panT - d.panS) * smoothCoef;
+			d.env += ((M.active ? 1.f : 0.f) - d.env) * smoothCoef;
+
+			float x = rawValid[m] ? rawRead[m] * gainS[m] : 0.f;
+			float y = d.svf.process(d.drive.process(x, d.driveS < 1e-5f ? 0.f : d.driveS), filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
+			if (!std::isfinite(y)) {
+				d.svf.reset();
+				y = 0.f;
+			}
+			y *= d.env * gain;
+			float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
+			d.limiter.process(y * std::cos(angle) * SQRT2, y * std::sin(angle) * SQRT2, LIMIT, &directL[m], &directR[m]);
+		}
 	}
 
 	/** One sample of a fractional table index at `phase`. The band-limited level comes from `freq`:
@@ -502,6 +584,27 @@ private:
 	float gainS[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	SafetyLimiter limiter;
 	float masterGainS = 1.f;
+
+	// Artifact outputs (see renderDirect)
+	struct DirectChain {
+		WarmDrive drive;
+		Svf svf;
+		SafetyLimiter limiter;
+		float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
+		float cutS = 1.f;
+		float resS = 0.f;
+		float driveS = 0.f;
+		float panS = 0.f;
+		/** 0..1: fades the output when the artifact is switched off */
+		float env = 0.f;
+		bool running = false;
+	};
+	DirectChain direct[NUM_MARKERS];
+	float directL[NUM_MARKERS] = {};
+	float directR[NUM_MARKERS] = {};
+	/** This sample's oscillator read of each artifact with a patched output (before GAIN) */
+	float rawRead[NUM_MARKERS] = {};
+	bool rawValid[NUM_MARKERS] = {};
 	/** Declick gain (structural fades) */
 	float gain = 0.f;
 

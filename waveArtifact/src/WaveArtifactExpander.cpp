@@ -41,6 +41,7 @@ WaveArtifactExpander::WaveArtifactExpander() {
 		lfos[k].seed(random::u32());
 		configOutput(LFO_OUTPUT + k, name + " (+-5 V)");
 	}
+	configInput(VOCT_INPUT, "V/OCT for this artifact (1 V/oct, added to the main V/OCT)");
 	configLight(LINK_LIGHT, "Connected to waveArtifact");
 
 	leftExpander.producerMessage = new wa::ToExpanderMessage;
@@ -76,6 +77,8 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		acc = *(const wa::ToMainMessage*) rightExpander.consumerMessage;
 	if (active) {
 		int m = getMarker();
+		if (inputs[VOCT_INPUT].isConnected())
+			acc.voct[m] += inputs[VOCT_INPUT].getVoltage();
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
 			if (!inputs[MOD_INPUT + t].isConnected())
 				continue;
@@ -130,7 +133,9 @@ namespace xlayout {
 static const float W = 50.8f;
 static const Vec MARKER_BUTTON = Vec(17.f, 16.5f);
 static const Vec MARKER_BUTTON_SIZE = Vec(16.f, 6.5f);
-static const Vec LINK_LIGHT_POS = Vec(38.f, 16.5f);
+// V/OCT jack in the header; the LINK light sits next to the title.
+static const Vec VOCT_JACK = Vec(38.f, 17.4f);
+static const Vec LINK_LIGHT_POS = Vec(44.5f, 6.f);
 static const float TOP_LABEL_Y = 22.4f;
 static const float CV_HEADER_Y = 27.4f;
 static const float ROW0_Y = 33.f;
@@ -167,7 +172,7 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->box.size = box.size;
 		labels->add(Vec(W / 2.f, 6.f), "wA EXPANDER", 9.f);
 		labels->add(Vec(MARKER_BUTTON.x, TOP_LABEL_Y), "MARKER", 6.f);
-		labels->add(Vec(LINK_LIGHT_POS.x, TOP_LABEL_Y), "LINK", 6.f);
+		labels->add(Vec(VOCT_JACK.x, TOP_LABEL_Y + 1.f), "V/OCT", 6.f);
 		labels->add(Vec(JACK_X, CV_HEADER_Y), "CV", 6.f);
 		labels->add(Vec(AMT_X, CV_HEADER_Y), "AMT", 6.f);
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++)
@@ -186,7 +191,8 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		marker->labels = {"1", "2", "3", "4", "5"};
 		marker->colors.assign(layout::MARKER_COLORS, layout::MARKER_COLORS + wa::NUM_MARKERS);
 		addParam(marker);
-		addChild(createLightCentered<MediumLight<GreenRedLight>>(mm2px(LINK_LIGHT_POS), module, WaveArtifactExpander::LINK_LIGHT));
+		addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(LINK_LIGHT_POS), module, WaveArtifactExpander::LINK_LIGHT));
+		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(VOCT_JACK), module, WaveArtifactExpander::VOCT_INPUT));
 
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
 			float y = ROW0_Y + t * ROW_STEP;

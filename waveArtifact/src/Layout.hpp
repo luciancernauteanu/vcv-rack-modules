@@ -2,7 +2,7 @@
 #include "plugin.hpp"
 
 // Panel geometry in mm. res/waveArtifact.svg draws the same section boxes, so keep both in sync.
-// 36 HP = 182.88 mm x 128.5 mm.
+// 42 HP = 213.36 mm x 128.5 mm (the right 6 HP column holds the five artifact outputs).
 //
 //  y  11..43.5  per-marker sections: MARKER | WAVE | GAIN | FILTER | PITCH | PAN | ARRANGE + CLOCK
 //  y  46..75.5  screen: marker waveforms, marker bar, file status (click to load)
@@ -11,7 +11,7 @@
 
 namespace layout {
 
-static const float PANEL_W = 182.88f;
+static const float PANEL_W = 213.36f;
 static const float PANEL_H = 128.5f;
 
 struct Section {
@@ -123,6 +123,20 @@ static const float MASTER_GAIN_LABEL_Y = 79.6f;
 static const Vec LEFT_OUTPUT = Vec(157.5f, 97.6f);
 static const Vec RIGHT_OUTPUT = Vec(169.5f, 97.6f);
 static const float OUTPUT_LABEL_Y = 104.1f;
+
+// Right column: each artifact's own output, a stereo pair per row (artifact 1 on top), numbered in
+// the artifact's color, on an inverted background like the main outputs.
+static const Vec ARTOUT_BOX_POS = Vec(180.88f, 11.f);
+static const Vec ARTOUT_BOX_SIZE = Vec(26.48f, 109.f);
+static const float ARTOUT_L_X = 189.3f;
+static const float ARTOUT_R_X = 200.9f;
+static const float ARTOUT_ROW0_Y = 28.f;
+static const float ARTOUT_ROW_STEP = 19.5f;
+/** Number badge above each pair */
+static const float ARTOUT_BADGE_DY = -6.6f;
+static const float ARTOUT_BADGE_R = 2.f;
+static const float ARTOUT_HEADER_Y = 15.f;
+static const float ARTOUT_LR_LABEL_Y = 115.5f;
 
 // Bottom: wavetable dots
 static const Vec DOTS_POS = Vec(6.f, 108.f);

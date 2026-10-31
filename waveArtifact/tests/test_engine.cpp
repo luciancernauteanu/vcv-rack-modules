@@ -1112,7 +1112,161 @@ static void testMasterGainAndProtection() {
 	CHECK(peak <= 2.0001f, "protection failed: %f V", peak * 5.f);
 }
 
+/** Two artifacts: 0 at the left end, 1 at the right end, both on the rig's sine table. */
+static void twoArtifacts(SineRig& rig) {
+	rig.in.markers[0].active = true;
+	rig.in.markers[0].pos = 0.f;
+	rig.in.markers[1].active = true;
+	rig.in.markers[1].pos = 1.f;
+}
+
+/** Renders `seconds`; collects the main L and artifact `m`'s own L over the second half. */
+static void renderBoth(SineRig& rig, int m, float seconds, std::vector<float>* mainL, std::vector<float>* directL, float* directPeak = nullptr) {
+	int n = (int) (seconds * rig.sr);
+	float l, r, dl, dr;
+	for (int i = 0; i < n; i++) {
+		rig.engine.process(rig.in, &l, &r);
+		rig.engine.getDirect(m, &dl, &dr);
+		if (i >= n / 2) {
+			if (mainL)
+				mainL->push_back(l);
+			if (directL)
+				directL->push_back(dl);
+			if (directPeak)
+				*directPeak = std::max(*directPeak, std::max(std::fabs(dl), std::fabs(dr)));
+		}
+	}
+}
+
+static void testArtifactVoct() {
+	std::printf("expander V/OCT: moves only its own artifact, 1 V per octave, on top of the main V/OCT\n");
+	const double c4 = 261.6256;
+	SineRig rig;
+	twoArtifacts(rig);
+	rig.in.markers[0].voct = 1.f;
+	rig.in.voct = 0.5f;
+	// Playhead on artifact 0: it plays at main + 1 octave.
+	rig.in.position = 0.f;
+	std::vector<float> a;
+	renderBoth(rig, 0, 1.f, &a, nullptr);
+	double up = tone(a, c4 * std::pow(2.0, 1.5), rig.sr), base = tone(a, c4 * std::pow(2.0, 0.5), rig.sr);
+	// Playhead on artifact 1: unaffected, at the main V/OCT.
+	rig.in.position = 1.f;
+	std::vector<float> b;
+	renderBoth(rig, 0, 1.f, &b, nullptr);
+	double b0 = tone(b, c4 * std::pow(2.0, 0.5), rig.sr), b1 = tone(b, c4 * std::pow(2.0, 1.5), rig.sr);
+	std::printf("  artifact 0 (+1 V): level at main+1 oct %.3f, at main %.3f | artifact 1: at main %.3f, at main+1 oct %.3f\n", up, base, b0, b1);
+	CHECK(up > 0.4 && base < 0.02, "artifact 0 does not follow its V/OCT");
+	CHECK(b0 > 0.4 && b1 < 0.02, "artifact 1 picked up artifact 0's V/OCT");
+}
+
+static void testDirectOutputs() {
+	std::printf("artifact outputs: own chain before the master, always playing, off when unpatched\n");
+	const double c4 = 261.6256, c5 = 2 * c4;
+	{
+		// Unpatched: silent.
+		SineRig rig;
+		float peak = 0.f;
+		renderBoth(rig, 0, 0.5f, nullptr, nullptr, &peak);
+		std::printf("  unpatched: peak %.6f\n", peak);
+		CHECK(peak == 0.f, "unpatched artifact output is not silent: %f", peak);
+	}
+	{
+		// Patched, playhead on artifact 1: the main mix is artifact 1 (C4), artifact 0's own output
+		// still plays artifact 0 (C5), at full level.
+		SineRig rig;
+		twoArtifacts(rig);
+		rig.in.markers[0].pitch = 12.f;
+		rig.in.position = 1.f;
+		rig.in.wantDirect[0] = true;
+		std::vector<float> mainL, dirL;
+		renderBoth(rig, 0, 1.f, &mainL, &dirL);
+		double mainC4 = tone(mainL, c4, rig.sr), mainC5 = tone(mainL, c5, rig.sr);
+		double dirC5 = tone(dirL, c5, rig.sr), dirC4 = tone(dirL, c4, rig.sr);
+		std::printf("  playhead on artifact 1: main C4 %.3f C5 %.3f | artifact 0 out C5 %.3f C4 %.3f\n", mainC4, mainC5, dirC5, dirC4);
+		CHECK(mainC4 > 0.4 && mainC5 < 0.02, "main mix is not artifact 1");
+		CHECK(dirC5 > 0.45 && dirC4 < 0.02, "artifact 0 output does not play artifact 0 regardless of the playhead");
+	}
+	{
+		// With the playhead on the artifact and the master off, its output matches the main mix level.
+		SineRig rig;
+		rig.in.markers[0].gain = 0.7f;
+		rig.in.markers[0].cutoff = 0.6f;
+		rig.in.markers[0].res = 0.5f;
+		rig.in.markers[0].pan = 0.4f;
+		rig.in.wantDirect[0] = true;
+		std::vector<float> mainL, dirL;
+		renderBoth(rig, 0, 1.f, &mainL, &dirL);
+		double m = tone(mainL, c4, rig.sr), d = tone(dirL, c4, rig.sr);
+		std::printf("  same artifact, master off: main %.4f, artifact output %.4f\n", m, d);
+		CHECK(std::fabs(m - d) < 0.01 * m, "artifact output differs from the main path: %f vs %f", d, m);
+	}
+	{
+		// Switching the artifact off fades its output out (no click), and it stays silent.
+		SineRig rig;
+		rig.in.wantDirect[0] = true;
+		rig.in.markers[1].active = true; // keep something active in the main mix
+		rig.in.markers[1].pos = 1.f;
+		float l, r, dl, dr, prev = 0.f, maxStep = 0.f, late = 0.f;
+		for (int i = 0; i < (int) (1.f * rig.sr); i++) {
+			if (i == (int) (0.5f * rig.sr))
+				rig.in.markers[0].active = false;
+			rig.engine.process(rig.in, &l, &r);
+			rig.engine.getDirect(0, &dl, &dr);
+			if (i > 0)
+				maxStep = std::max(maxStep, std::fabs(dl - prev));
+			prev = dl;
+			if (i > (int) (0.6f * rig.sr))
+				late = std::max(late, std::fabs(dl));
+		}
+		float limit = (float) (2 * PI * c4 / rig.sr * 1.3 + 0.01);
+		std::printf("  artifact switched off: max step %.4f (limit %.4f), level afterwards %.5f\n", maxStep, limit, late);
+		CHECK(maxStep <= limit, "switching the artifact off clicks: %f", maxStep);
+		CHECK(late < 1e-3f, "switched-off artifact still sounds: %f", late);
+	}
+	{
+		// Output protection on every artifact output.
+		SineRig rig;
+		rig.in.markers[0].gain = 4.f;
+		rig.in.markers[0].drive = 1.f;
+		rig.in.markers[0].cutoff = 0.4f;
+		rig.in.markers[0].res = 1.f;
+		rig.in.wantDirect[0] = true;
+		float peak = 0.f;
+		renderBoth(rig, 0, 2.f, nullptr, nullptr, &peak);
+		std::printf("  400%% gain, full drive, resonant filter: artifact output peak %.4f (ceiling 2.0)\n", peak);
+		CHECK(peak <= 2.0001f, "artifact output exceeds 10 V: %f", peak * 5.f);
+	}
+	{
+		// All five patched while the playhead sweeps and artifacts get added and removed: finite.
+		SineRig rig;
+		for (int m = 0; m < 5; m++) {
+			rig.in.markers[m].active = true;
+			rig.in.markers[m].pos = m * 0.25f;
+			rig.in.markers[m].pitch = (float) (m * 3);
+			rig.in.wantDirect[m] = true;
+		}
+		bool finite = true;
+		float l, r, dl, dr;
+		for (int i = 0; i < (int) (2.f * rig.sr); i++) {
+			rig.in.position = 0.5f + 0.5f * (float) std::sin(2 * PI * 2.0 * i / rig.sr);
+			if (i == (int) (0.7f * rig.sr))
+				rig.in.markers[2].active = false;
+			if (i == (int) (1.3f * rig.sr))
+				rig.in.markers[2].active = true;
+			rig.engine.process(rig.in, &l, &r);
+			for (int m = 0; m < 5; m++) {
+				rig.engine.getDirect(m, &dl, &dr);
+				finite = finite && std::isfinite(dl) && std::isfinite(dr);
+			}
+		}
+		CHECK(finite, "artifact outputs went non-finite");
+	}
+}
+
 int main() {
+	testArtifactVoct();
+	testDirectOutputs();
 	testResonanceLevel();
 	testLimiter();
 	testMasterGainAndProtection();
