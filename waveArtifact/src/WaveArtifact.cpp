@@ -126,6 +126,7 @@ WaveArtifact::WaveArtifact() {
 	configInput(RESET_INPUT, "Reset: restarts the LFOs, next clock pulse is the start of a bar");
 	configParam(INTERNAL_BPM_PARAM, 20.f, 300.f, 120.f, "Internal tempo (used while CLOCK is unpatched)", " BPM")->snapEnabled = true;
 	configButton(RESTART_PARAM, "Restart: beat grid and every LFO start again (same as a RESET gate)");
+	configSwitch(STOP_PARAM, 0.f, 1.f, 0.f, "Stop audio (all outputs fade to silence; LFOs and clock keep running)", {"Playing", "Stopped"});
 	configSwitch(CLOCK_PPQN_PARAM, 0.f, wa::NUM_PPQN - 1, 0.f, "Clock resolution", {"1 PPQN (quarter notes)", "2 PPQN (eighths)", "4 PPQN (sixteenths)", "8 PPQN", "12 PPQN", "24 PPQN (MIDI clock)", "48 PPQN"});
 	getParamQuantity(CLOCK_PPQN_PARAM)->randomizeEnabled = false;
 	configOutput(LEFT_OUTPUT, "Left");
@@ -133,8 +134,8 @@ WaveArtifact::WaveArtifact() {
 	configOutput(CLOCK_OUTPUT, "Clock out (one 10 V trigger per beat: internal BPM, or the CLOCK input)");
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		std::string name = "Artifact " + std::to_string(i + 1);
-		configOutput(ARTIFACT_L_OUTPUT + i, name + " left (mono when right is unpatched)");
-		configOutput(ARTIFACT_R_OUTPUT + i, name + " right");
+		configOutput(ARTIFACT_L_OUTPUT + i, name + " left (mono when right is unpatched; patched = leaves the main L/R)");
+		configOutput(ARTIFACT_R_OUTPUT + i, name + " right (patched = leaves the main L/R)");
 	}
 
 	for (int i = 0; i < NUM_MARKERS; i++) {
@@ -279,7 +280,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	in.position = position;
 	in.voct = params[FREQ_PARAM].getValue() + inputs[VOCT_INPUT].getVoltage();
 	in.bank = activeBank.load(std::memory_order_relaxed);
-	in.holdSilent = swapWanted;
+	// STOP uses the same click-free fade as a bank swap (main, artifact outputs and preview).
+	in.holdSilent = swapWanted || params[STOP_PARAM].getValue() > 0.5f;
 	in.previewTable = previewTable.load(std::memory_order_relaxed);
 	// Only artifacts with a patched output are rendered for it.
 	for (int i = 0; i < NUM_MARKERS; i++)
@@ -736,6 +738,7 @@ struct WaveArtifactWidget : ModuleWidget {
 		}
 
 		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(MASTER_GAIN_KNOB), module, WaveArtifact::MASTER_GAIN_PARAM));
+		addParam(createLitToggle(STOP_BUTTON, module, WaveArtifact::STOP_PARAM, "STOP", STOP_COLOR, STOP_BUTTON_SIZE));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(LEFT_OUTPUT), module, WaveArtifact::LEFT_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(RIGHT_OUTPUT), module, WaveArtifact::RIGHT_OUTPUT));
 

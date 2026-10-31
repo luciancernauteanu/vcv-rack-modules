@@ -150,21 +150,22 @@ static const Vec VOCT_JACK = Vec(38.f, 17.4f);
 static const Vec LINK_LIGHT_POS = Vec(44.5f, 6.f);
 static const float TOP_LABEL_Y = 22.4f;
 static const float CV_HEADER_Y = 27.4f;
-static const float ROW0_Y = 33.f;
-static const float ROW_STEP = 9.f;
+static const float ROW0_Y = 32.8f;
+static const float ROW_STEP = 8.6f;
 static const float NAME_X = 11.f;
 static const float JACK_X = 26.f;
 static const float AMT_X = 40.f;
-// Per LFO column: label, shape screen, RATE + AMT side by side (labelled), SYNC / T / D, output
+// Per LFO column, top to bottom: title (+ light), shape screen, SYNC / T / D centered under the
+// screen, RATE + AMT with their labels above (as on the main module), output.
 static const float LFO_X[2] = {14.8f, 36.2f};
-static const float LFO_LABEL_Y = 87.2f;
-static const float LFO_SCREEN_Y = 92.8f;
+static const float LFO_LABEL_Y = 85.f;
+static const float LFO_SCREEN_Y = 90.6f;
 static const Vec LFO_SCREEN_SIZE = Vec(16.f, 6.4f);
-static const float LFO_KNOB_Y = 101.2f;
+static const float LFO_BUTTON_Y = 97.f;
+static const float LFO_KNOB_LABEL_Y = 101.8f;
+static const float LFO_KNOB_Y = 106.2f;
 static const float LFO_KNOB_DX = 5.1f;
-static const float LFO_KNOB_LABEL_Y = 106.6f;
-static const float LFO_BUTTON_Y = 110.2f;
-static const float LFO_OUT_Y = 117.2f;
+static const float LFO_OUT_Y = 116.4f;
 } // namespace xlayout
 
 struct WaveArtifactExpanderWidget : ModuleWidget {
@@ -192,8 +193,8 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		for (int k = 0; k < WaveArtifactExpander::NUM_LFOS; k++)
 		{
 			labels->add(Vec(LFO_X[k], LFO_LABEL_Y), "LFO " + std::to_string(k + 1), 6.f);
-			labels->add(Vec(LFO_X[k] - LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "RATE", 5.f);
-			labels->add(Vec(LFO_X[k] + LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "AMT", 5.f);
+			labels->add(Vec(LFO_X[k] - LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "RATE", 6.f);
+			labels->add(Vec(LFO_X[k] + LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "AMT", 6.f);
 		}
 		addChild(labels);
 
@@ -220,7 +221,7 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 				WaveArtifactExpander::LFO_RATE_PARAM + k, WaveArtifactExpander::LFO_SYNC_PARAM + k,
 				WaveArtifactExpander::LFO_TRIPLET_PARAM + k, WaveArtifactExpander::LFO_DOTTED_PARAM + k));
 			addParam(createParamCentered<Trimpot>(mm2px(Vec(x + LFO_KNOB_DX, LFO_KNOB_Y)), module, WaveArtifactExpander::LFO_AMT_PARAM + k));
-			// SYNC (wide), then the narrow T and D, centered as a group under the knobs.
+			// SYNC (wide), then the narrow T and D, centered as a group under the shape screen.
 			addParam(createLitToggle(Vec(x - 4.7f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_SYNC_PARAM + k, "SYNC", c));
 			addParam(createLitToggle(Vec(x + 1.3f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_TRIPLET_PARAM + k, "T", c, layout::LFO_TOGGLE_SMALL));
 			addParam(createLitToggle(Vec(x + 6.f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_DOTTED_PARAM + k, "D", c, layout::LFO_TOGGLE_SMALL));

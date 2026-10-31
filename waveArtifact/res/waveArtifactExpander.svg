@@ -6,31 +6,31 @@
     <rect id="background" x="0" y="0" width="50.8" height="128.5" fill="#e9e7e2"/>
     <g id="sections" fill="#d9d6cf">
       <rect x="4" y="11" width="42.8" height="13.8" rx="2" ry="2"/>
-      <rect x="4" y="26" width="42.8" height="57" rx="2" ry="2"/>
-      <rect x="4" y="85" width="42.8" height="37" rx="2" ry="2"/>
+      <rect x="4" y="26" width="42.8" height="55" rx="2" ry="2"/>
+      <rect x="4" y="82.2" width="42.8" height="40.3" rx="2" ry="2"/>
     </g>
-    <rect id="lfo1-out" x="7.8" y="112.6" width="14" height="9.2" rx="1.5" ry="1.5" fill="#26282c"/>
-    <rect id="lfo2-out" x="29.2" y="112.6" width="14" height="9.2" rx="1.5" ry="1.5" fill="#26282c"/>
+    <rect id="lfo1-out" x="7.8" y="111.6" width="14" height="9.6" rx="1.5" ry="1.5" fill="#26282c"/>
+    <rect id="lfo2-out" x="29.2" y="111.6" width="14" height="9.6" rx="1.5" ry="1.5" fill="#26282c"/>
   </g>
   <g id="components" style="display:none">
     <rect id="MARKER_PARAM" x="9" y="13.25" width="16" height="6.5" fill="#ff0000"/>
     <circle id="LINK_LIGHT" cx="44.5" cy="6" r="1" fill="#ff00ff"/>
     <circle id="VOCT_INPUT" cx="38" cy="17.4" r="4" fill="#00ff00"/>
-    <circle id="MOD_INPUT_0" cx="26" cy="33" r="4" fill="#00ff00"/>
-    <circle id="AMT_PARAM_0" cx="40" cy="33" r="3" fill="#ff0000"/>
-    <rect id="LFO_SHAPE_PARAM_0" x="6.8" y="89.6" width="16" height="6.4" fill="#ff0000"/>
-    <circle id="LFO_RATE_PARAM_0" cx="9.7" cy="101.2" r="4" fill="#ff0000"/>
-    <circle id="LFO_AMT_PARAM_0" cx="19.9" cy="101.2" r="3" fill="#ff0000"/>
-    <rect id="LFO_SYNC_PARAM_0" x="6.7" y="108" width="6.8" height="4.4" fill="#ff0000"/>
-    <rect id="LFO_TRIPLET_PARAM_0" x="14" y="108" width="4.2" height="4.4" fill="#ff0000"/>
-    <rect id="LFO_DOTTED_PARAM_0" x="18.7" y="108" width="4.2" height="4.4" fill="#ff0000"/>
-    <circle id="LFO_OUTPUT_0" cx="14.8" cy="117.2" r="4" fill="#0000ff"/>
-    <rect id="LFO_SHAPE_PARAM_1" x="28.2" y="89.6" width="16" height="6.4" fill="#ff0000"/>
-    <circle id="LFO_RATE_PARAM_1" cx="31.1" cy="101.2" r="4" fill="#ff0000"/>
-    <circle id="LFO_AMT_PARAM_1" cx="41.3" cy="101.2" r="3" fill="#ff0000"/>
-    <rect id="LFO_SYNC_PARAM_1" x="28.1" y="108" width="6.8" height="4.4" fill="#ff0000"/>
-    <rect id="LFO_TRIPLET_PARAM_1" x="35.4" y="108" width="4.2" height="4.4" fill="#ff0000"/>
-    <rect id="LFO_DOTTED_PARAM_1" x="40.1" y="108" width="4.2" height="4.4" fill="#ff0000"/>
-    <circle id="LFO_OUTPUT_1" cx="36.2" cy="117.2" r="4" fill="#0000ff"/>
+    <circle id="MOD_INPUT_0" cx="26" cy="32.8" r="4" fill="#00ff00"/>
+    <circle id="AMT_PARAM_0" cx="40" cy="32.8" r="3" fill="#ff0000"/>
+    <rect id="LFO_SHAPE_PARAM_0" x="6.8" y="87.4" width="16" height="6.4" fill="#ff0000"/>
+    <circle id="LFO_RATE_PARAM_0" cx="9.7" cy="106.2" r="4" fill="#ff0000"/>
+    <circle id="LFO_AMT_PARAM_0" cx="19.9" cy="106.2" r="3" fill="#ff0000"/>
+    <rect id="LFO_SYNC_PARAM_0" x="6.7" y="94.8" width="6.8" height="4.4" fill="#ff0000"/>
+    <rect id="LFO_TRIPLET_PARAM_0" x="14" y="94.8" width="4.2" height="4.4" fill="#ff0000"/>
+    <rect id="LFO_DOTTED_PARAM_0" x="18.7" y="94.8" width="4.2" height="4.4" fill="#ff0000"/>
+    <circle id="LFO_OUTPUT_0" cx="14.8" cy="116.4" r="4" fill="#0000ff"/>
+    <rect id="LFO_SHAPE_PARAM_1" x="28.2" y="87.4" width="16" height="6.4" fill="#ff0000"/>
+    <circle id="LFO_RATE_PARAM_1" cx="31.1" cy="106.2" r="4" fill="#ff0000"/>
+    <circle id="LFO_AMT_PARAM_1" cx="41.3" cy="106.2" r="3" fill="#ff0000"/>
+    <rect id="LFO_SYNC_PARAM_1" x="28.1" y="94.8" width="6.8" height="4.4" fill="#ff0000"/>
+    <rect id="LFO_TRIPLET_PARAM_1" x="35.4" y="94.8" width="4.2" height="4.4" fill="#ff0000"/>
+    <rect id="LFO_DOTTED_PARAM_1" x="40.1" y="94.8" width="4.2" height="4.4" fill="#ff0000"/>
+    <circle id="LFO_OUTPUT_1" cx="36.2" cy="116.4" r="4" fill="#0000ff"/>
   </g>
 </svg>

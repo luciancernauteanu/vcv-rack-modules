@@ -33,9 +33,9 @@
     <rect id="MARKER_LFO_SHAPE_PARAM" x="36.5" y="14" width="16" height="9" fill="#ff0000"/>
     <circle id="MARKER_LFO_RATE_PARAM" cx="59" cy="19" r="3" fill="#ff0000"/>
     <circle id="MARKER_LFO_AMT_PARAM" cx="60.5" cy="34" r="3" fill="#ff0000"/>
-    <rect id="MARKER_LFO_SYNC_PARAM" x="37.1" y="31.8" width="6.8" height="4.4" fill="#ff0000"/>
-    <rect id="MARKER_LFO_TRIPLET_PARAM" x="44.3" y="31.8" width="4.2" height="4.4" fill="#ff0000"/>
-    <rect id="MARKER_LFO_DOTTED_PARAM" x="49.1" y="31.8" width="4.2" height="4.4" fill="#ff0000"/>
+    <rect id="MARKER_LFO_SYNC_PARAM" x="36.4" y="31.8" width="6.8" height="4.4" fill="#ff0000"/>
+    <rect id="MARKER_LFO_TRIPLET_PARAM" x="43.6" y="31.8" width="4.2" height="4.4" fill="#ff0000"/>
+    <rect id="MARKER_LFO_DOTTED_PARAM" x="48.4" y="31.8" width="4.2" height="4.4" fill="#ff0000"/>
     <circle id="MARKER_GAIN_PARAM" cx="74" cy="19" r="4" fill="#ff0000"/>
     <circle id="MARKER_CUTOFF_PARAM" cx="92" cy="19" r="4" fill="#ff0000"/>
     <circle id="MARKER_DRIVE_PARAM" cx="108" cy="19" r="4" fill="#ff0000"/>
@@ -56,9 +56,9 @@
     <circle id="POS_ATTEN_PARAM" cx="27" cy="83.4" r="3" fill="#ff0000"/>
     <circle id="POS_INPUT" cx="27" cy="94.6" r="4" fill="#00ff00"/>
     <rect id="POS_LFO_SHAPE_PARAM" x="36" y="81.7" width="17" height="7" fill="#ff0000"/>
-    <rect id="POS_LFO_SYNC_PARAM" x="35.2" y="90.2" width="6.8" height="4.4" fill="#ff0000"/>
-    <rect id="POS_LFO_TRIPLET_PARAM" x="42.9" y="90.2" width="4.2" height="4.4" fill="#ff0000"/>
-    <rect id="POS_LFO_DOTTED_PARAM" x="47.8" y="90.2" width="4.2" height="4.4" fill="#ff0000"/>
+    <rect id="POS_LFO_SYNC_PARAM" x="36.1" y="90.2" width="6.8" height="4.4" fill="#ff0000"/>
+    <rect id="POS_LFO_TRIPLET_PARAM" x="43.8" y="90.2" width="4.2" height="4.4" fill="#ff0000"/>
+    <rect id="POS_LFO_DOTTED_PARAM" x="48.7" y="90.2" width="4.2" height="4.4" fill="#ff0000"/>
     <circle id="POS_LFO_RATE_PARAM" cx="38.5" cy="98.8" r="3" fill="#ff0000"/>
     <circle id="POS_LFO_AMT_PARAM" cx="51" cy="98.8" r="3" fill="#ff0000"/>
     <circle id="FREQ_PARAM" cx="64.5" cy="90.5" r="4" fill="#ff0000"/>
@@ -71,7 +71,8 @@
     <circle id="MASTER_DRIVE_PARAM" cx="122.3" cy="84.8" r="3.5" fill="#ff0000"/>
     <circle id="MASTER_SPREAD_PARAM" cx="132.7" cy="84.8" r="3.5" fill="#ff0000"/>
     <circle id="MASTER_FDBK_PARAM" cx="143.1" cy="84.8" r="3.5" fill="#ff0000"/>
-    <circle id="MASTER_GAIN_PARAM" cx="163.44" cy="85.4" r="3.5" fill="#ff0000"/>
+    <circle id="MASTER_GAIN_PARAM" cx="157.5" cy="85.4" r="3.5" fill="#ff0000"/>
+    <rect id="STOP_PARAM" x="164.8" y="82.6" width="9.4" height="5.6" fill="#ff0000"/>
     <circle id="LEFT_OUTPUT" cx="157.5" cy="97.6" r="4" fill="#0000ff"/>
     <circle id="RIGHT_OUTPUT" cx="169.5" cy="97.6" r="4" fill="#0000ff"/>
     <rect id="DOT_STRIP" x="6" y="108" width="170.88" height="12" fill="#ffff00"/>
