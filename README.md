@@ -11,3 +11,4 @@ A collection of plugins for [VCV Rack](https://vcvrack.com/), the open-source mo
 ## License
 
 See the license file in each plugin's directory.
+# vcv-rack-modules
