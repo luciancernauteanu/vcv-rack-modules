@@ -42,9 +42,9 @@ inline void modeWeights(bool on, int mode, float out[NUM_MIX]) {
 
 /** Trapezoidal state-variable filter (Cytomic/Simper form), stable under fast cutoff and Q
 modulation. Gives all modes at once; `mix` blends them:
-- LP / HP: resonant peak; the level is tilted down by (Q/0.7)^-0.3 so high RES rings without
-  jumping 26 dB (the passband drops a little as RES rises, as in many analog designs).
-- BP: unity at the center at the lowest RES, rising to sqrt(Q/0.7) at full RES.
+- LP / HP: unity passband at any RES (resonance adds a peak at the cutoff; it never takes level away).
+- BP: unity at the center at the lowest RES, rising to sqrt(Q/0.7) at full RES (keeps broadband
+  loudness roughly constant as the band narrows).
 - Notch: unity passband, a dip at the cutoff that narrows as RES rises.
 */
 struct Svf {
@@ -57,7 +57,23 @@ struct Svf {
 		ic1 = ic2 = lastBp = 0.f;
 	}
 
-	float process(float x, float fc, float q, float sampleRate, const float mix[NUM_MIX]) {
+	/** Exactly linear up to 40% of `lim`, then a tanh knee that approaches `lim`. The linear part
+	matters: a state clipper that bends even slightly at low levels acts like a leak on every
+	sample and dulls the whole filter. */
+	static float softLimit(float x, float lim) {
+		float knee = 0.4f * lim;
+		float a = std::fabs(x);
+		if (a <= knee)
+			return x;
+		float room = lim - knee;
+		float y = knee + room * std::tanh((a - knee) / room);
+		return (x < 0.f) ? -y : y;
+	}
+
+	/** `stateLimit` > 0 makes the integrators saturate softly above 40% of that level, like capacitors
+	running into the supply rails of an analog filter: normal signals stay linear, loud or resonant
+	ones compress and gain odd harmonics instead of ringing without bound. 0 = ideal (clean). */
+	float process(float x, float fc, float q, float sampleRate, const float mix[NUM_MIX], float stateLimit = 0.f) {
 		fc = std::min(std::max(fc, 5.f), 0.45f * sampleRate);
 		float k = 1.f / q;
 		float g = std::tan(3.141592654f * fc / sampleRate);
@@ -69,13 +85,16 @@ struct Svf {
 		float v2 = ic2 + a2 * ic1 + a3 * v3;
 		ic1 = 2.f * v1 - ic1;
 		ic2 = 2.f * v2 - ic2;
+		if (stateLimit > 0.f) {
+			ic1 = softLimit(ic1, stateLimit);
+			ic2 = softLimit(ic2, stateLimit);
+		}
 		float lp = v2;
 		float bp = k * v1; // unity gain at the center
 		float hp = x - bp - lp;
 		lastBp = bp;
-		float tilt = std::pow(q / FILTER_Q_MIN, -0.3f);
 		float bpGain = std::sqrt(q / FILTER_Q_MIN);
-		return mix[0] * x + (mix[1] * lp + mix[3] * hp) * tilt + mix[2] * bp * bpGain + mix[4] * (x - bp);
+		return mix[0] * x + mix[1] * lp + mix[3] * hp + mix[2] * bp * bpGain + mix[4] * (x - bp);
 	}
 };
 
@@ -102,7 +121,7 @@ struct Halfband {
 
 /** Soft-clip drive: tanh with first-order antiderivative anti-aliasing (ADAA), run at 2x
 oversampling. Heavy drive adds harmonics without fold-back hash.
-DRIVE 0..1: input gain 1..25 (0..28 dB). Output is scaled so a full-scale input stays near full
+DRIVE 0..1: input gain 1..3 (0..9.5 dB), a warm saturation rather than a fuzz. Output is scaled so a full-scale input stays near full
 scale. The first quarter of the knob fades the drive in, so 0 is clean. The path is always
 oversampled (constant 31-sample latency), so turning DRIVE never jumps in time. */
 struct Drive {
@@ -126,21 +145,26 @@ struct Drive {
 		u1 = 0.f;
 	}
 
-	float shape(float x, float g, float norm, float blend) {
+	float shape(float x, float g, float bias, float norm, float blend) {
 		float u0 = u1, u = g * x;
 		u1 = u;
 		if (blend <= 0.f)
 			return x;
-		float sat = (std::fabs(u - u0) > 1e-4f) ? (logCosh(u) - logCosh(u0)) / (u - u0) : std::tanh(0.5f * (u0 + u));
-		sat *= norm;
+		float sat = (std::fabs(u - u0) > 1e-4f) ? (logCosh(u + bias) - logCosh(u0 + bias)) / (u - u0) : std::tanh(0.5f * (u0 + u) + bias);
+		sat = (sat - std::tanh(bias)) * norm;
 		return x + (sat - x) * blend;
 	}
 
-	float process(float x, float drive) {
+	float process(float x, float drive, float bias = 0.f) {
 		const Halfband& hb = fir();
 		drive = std::min(std::max(drive, 0.f), 1.f);
-		float g = std::exp(drive * 3.218875825f); // ln(25)
-		float norm = 1.f / std::tanh(g);
+		float g = std::exp(drive * 1.098612289f); // ln(3)
+		// `bias` is a DC offset in input units; scaled by the gain and capped, so it tilts the clipping
+		// (even harmonics) without pushing one side flat. Normalized by the larger peak.
+		bias = std::min(bias * g, 0.8f);
+		float pos = std::tanh(g + bias) - std::tanh(bias);
+		float neg = std::tanh(g - bias) + std::tanh(bias);
+		float norm = 1.f / std::max(pos, neg);
 		float blend = std::min(1.f, 4.f * drive);
 
 		// Upsample: zero-stuffing + halfband, as two polyphase branches (gain 2 restores the level).
@@ -158,7 +182,7 @@ struct Drive {
 		for (int p = 0; p < 2; p++) {
 			for (int i = Halfband::TAPS - 1; i > 0; i--)
 				up[i] = up[i - 1];
-			up[0] = shape(s[p], g, norm, blend);
+			up[0] = shape(s[p], g, bias, norm, blend);
 		}
 		float y = 0.f;
 		for (int i = 0; i < Halfband::TAPS; i++)
@@ -167,54 +191,129 @@ struct Drive {
 	}
 };
 
-/** Stereo master filter: mode (off/LP/BP/HP/notch, crossfaded), cutoff, resonance, SPREAD
-(left/right cutoff apart, +-2 octaves: half down on the left, half up on the right) and FDBK
-(band-pass fed back into the input through a soft clip; above ~75% it self-oscillates, and the
-clip keeps the oscillation bounded). */
+
+/** The drive used everywhere (each artifact, and the master): `Drive` with a small bias for even
+harmonics, a DC blocker for the offset the bias creates, and make-up gain so turning DRIVE up adds
+character, not level. Always in the path (constant latency). */
+struct WarmDrive {
+	Drive drive;
+	float dcX = 0.f;
+	float dcY = 0.f;
+
+	/** Bias at full drive, in input units (scaled by the drive gain inside Drive) */
+	static constexpr float BIAS = 0.2f;
+	static constexpr float DC_BLOCK = 0.9995f;
+	/** Level given back as DRIVE rises, so full drive is about as loud as drive 0 */
+	static constexpr float MAKEUP = 0.35f;
+
+	void reset() {
+		drive.reset();
+		dcX = dcY = 0.f;
+	}
+
+	float process(float x, float amount) {
+		amount = std::min(std::max(amount, 0.f), 1.f);
+		float y = drive.process(x, amount, BIAS * amount);
+		float out = y - dcX + DC_BLOCK * dcY;
+		dcX = y;
+		dcY = out;
+		out *= 1.f + MAKEUP * amount;
+		return std::isfinite(out) ? out : 0.f;
+	}
+};
+
+/** Master filter settings. Knob values are smoothed by the filter; the *Mod values (CV) are added
+after the smoothing, so they can run at audio rate. */
+struct MasterParams {
+	/** -1 = off, else FilterMode */
+	int mode = -1;
+	float cutoff = 0.7f;
+	float res = 0.f;
+	/** -1..1 = -2..+2 octaves between left and right */
+	float spread = 0.f;
+	float fdbk = 0.f;
+	float drive = 0.f;
+	float cutoffMod = 0.f;
+	float resMod = 0.f;
+	float spreadMod = 0.f;
+	float fdbkMod = 0.f;
+	float driveMod = 0.f;
+};
+
+/** Stereo master section: drive -> multimode filter.
+Warmth comes from three analog habits, all gentle at low settings:
+- DRIVE is an asymmetric soft clip (a small bias before the tanh), which adds even harmonics (the
+  "tube" 2nd) next to the odd ones, then a DC blocker removes the offset the bias creates. It runs
+  oversampled with ADAA, so it stays smooth up top.
+- The filter's integrators saturate softly (STATE_LIMIT), so resonance and loud signals compress
+  and thicken instead of ringing like a perfect digital filter.
+- The band-pass feedback goes through a tanh, and the oscillation it makes is bounded by the
+  integrators, so FDBK sings warmly instead of screaming.
+With DRIVE at 0 and the filter off, only the drive's oversampling path remains (flat to ~0.2 dB at
+15 kHz, 31 samples of delay). */
 struct MasterFilter {
 	Svf svf[2];
-	float mixS[NUM_MIX] = {1.f, 0.f, 0.f, 0.f, 0.f};
-	float cutoffS = 0.7f;
+	WarmDrive drive[2];
+	// Starts as the panel default: low-pass, wide open (20 kHz), so there is no sweep at start-up.
+	float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
+	float cutoffS = 1.f;
 	float resS = 0.f;
 	float spreadS = 0.f;
 	float fdbkS = 0.f;
+	float driveS = 0.f;
 
 	static constexpr float FDBK_GAIN = 1.3f;
+	/** Integrator ceiling in engine units (1 = a full-scale input) */
+	static constexpr float STATE_LIMIT = 2.5f;
 
+	/** Clears all filter and drive memory (not the smoothed settings). */
 	void reset() {
 		svf[0].reset();
 		svf[1].reset();
+		drive[0].reset();
+		drive[1].reset();
 	}
 
-	/** mode: -1 = off, else FilterMode. cutoff 0..1, res 0..1, spread -1..1 (x2 octaves), fdbk 0..1.
-	`coef` is the parameter smoothing coefficient per sample. */
-	void process(float* l, float* r, int mode, float cutoff, float res, float spread, float fdbk, float coef, float sampleRate) {
+	void process(float* l, float* r, const MasterParams& p, float coef, float sampleRate) {
 		float target[NUM_MIX];
-		modeWeights(mode >= 0, mode, target);
+		modeWeights(p.mode >= 0, p.mode, target);
 		for (int k = 0; k < NUM_MIX; k++)
 			mixS[k] += (target[k] - mixS[k]) * coef;
-		cutoffS += (std::min(std::max(cutoff, 0.f), 1.f) - cutoffS) * coef;
-		resS += (std::min(std::max(res, 0.f), 1.f) - resS) * coef;
-		spreadS += (std::min(std::max(spread, -1.f), 1.f) - spreadS) * coef;
-		fdbkS += (std::min(std::max(fdbk, 0.f), 1.f) - fdbkS) * coef;
+		cutoffS += (std::min(std::max(p.cutoff, 0.f), 1.f) - cutoffS) * coef;
+		resS += (std::min(std::max(p.res, 0.f), 1.f) - resS) * coef;
+		spreadS += (std::min(std::max(p.spread, -1.f), 1.f) - spreadS) * coef;
+		fdbkS += (std::min(std::max(p.fdbk, 0.f), 1.f) - fdbkS) * coef;
+		driveS += (std::min(std::max(p.drive, 0.f), 1.f) - driveS) * coef;
+
+		auto clamp01 = [](float v) {
+			return std::min(std::max(v, 0.f), 1.f);
+		};
+		float* io[2] = {l, r};
+
+		// Drive (always in the path, so turning it never shifts timing).
+		float dr = clamp01(driveS + p.driveMod);
+		for (int c = 0; c < 2; c++)
+			*io[c] = drive[c].process(*io[c], dr);
 
 		if (mixS[0] > 0.99999f) {
-			// Fully off: pass through and let the filter rest.
-			reset();
+			// Filter fully off: let it rest.
+			svf[0].reset();
+			svf[1].reset();
 			return;
 		}
-		float fc = filterHz(cutoffS);
-		float q = filterQ(resS);
-		float oct = spreadS * 2.f; // +-2 octaves between the channels
+		float fc = filterHz(clamp01(cutoffS + p.cutoffMod));
+		float q = filterQ(clamp01(resS + p.resMod));
+		float fdbk = clamp01(fdbkS + p.fdbkMod);
+		float spread = std::min(std::max(spreadS + p.spreadMod, -1.f), 1.f);
+		float oct = spread * 2.f; // +-2 octaves between the channels
 		float fcs[2] = {fc * std::exp2(-0.5f * oct), fc * std::exp2(0.5f * oct)};
-		float* io[2] = {l, r};
 		float onAmount = 1.f - mixS[0];
 		for (int c = 0; c < 2; c++) {
 			float x = *io[c];
-			float fb = onAmount * fdbkS * FDBK_GAIN * std::tanh(svf[c].lastBp);
+			float fb = onAmount * fdbk * FDBK_GAIN * std::tanh(svf[c].lastBp);
 			// The dry share must stay the clean input, so the feedback only enters the filter core.
 			float mixNoDry[NUM_MIX] = {0.f, mixS[1], mixS[2], mixS[3], mixS[4]};
-			float y = svf[c].process(x + fb, fcs[c], q, sampleRate, mixNoDry);
+			float y = svf[c].process(x + fb, fcs[c], q, sampleRate, mixNoDry, STATE_LIMIT);
 			// The notch's own dry part (x - bp) carries the feedback too; take it back out.
 			y -= mixS[4] * fb;
 			y += mixS[0] * x;

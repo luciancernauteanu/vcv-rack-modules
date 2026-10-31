@@ -19,3 +19,5 @@ waveArtifact/tests/test_engine
 waveArtifact/tests/test_engine.exe
 waveArtifact/tests/test_lfo
 waveArtifact/tests/test_lfo.exe
+waveArtifact/tests/test_sound
+waveArtifact/tests/test_sound.exe

@@ -1,6 +1,7 @@
 #include "WaveArtifactExpander.hpp"
 #include "Layout.hpp"
 #include "widgets/LfoControls.hpp"
+#include "widgets/LfoWidgets.hpp"
 #include "widgets/ModeButton.hpp"
 #include "widgets/PanelLabels.hpp"
 
@@ -18,7 +19,8 @@ WaveArtifactExpander::WaveArtifactExpander() {
 	getParamQuantity(MARKER_PARAM)->randomizeEnabled = false;
 	for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
 		std::string name = wa::MOD_TARGET_NAMES[t];
-		configParam(AMT_PARAM + t, -1.f, 1.f, 1.f, name + " CV amount", "%", 0.f, 100.f);
+		// GAIN is a VCA, so its amount is 0..100%. All amounts start at 0 (double-click resets to 0).
+		configParam(AMT_PARAM + t, (t == wa::MOD_GAIN) ? 0.f : -1.f, 1.f, 0.f, name + ((t == wa::MOD_GAIN) ? " VCA amount (100% = silent at 0 V)" : " CV amount"), "%", 0.f, 100.f);
 		configInput(MOD_INPUT + t, name + " CV");
 	}
 	// LFO 1 defaults to 1 Hz, LFO 2 to 0.2 Hz.
@@ -31,7 +33,13 @@ WaveArtifactExpander::WaveArtifactExpander() {
 		configSwitch(LFO_DOTTED_PARAM + k, 0.f, 1.f, 0.f, name + " dotted", {"Off", "On"});
 		for (int id : {LFO_SYNC_PARAM, LFO_TRIPLET_PARAM, LFO_DOTTED_PARAM})
 			getParamQuantity(id + k)->randomizeEnabled = false;
-		configOutput(LFO_OUTPUT + k, name + " (+-5 V sine)");
+		configSwitch(LFO_SHAPE_PARAM + k, 0.f, wa::NUM_LFO_SHAPES - 1, 0.f, name + " shape", std::vector<std::string>(wa::LFO_SHAPE_NAMES, wa::LFO_SHAPE_NAMES + wa::NUM_LFO_SHAPES));
+		getParamQuantity(LFO_SHAPE_PARAM + k)->randomizeEnabled = false;
+		// The output level. Unlike the CV amounts (which start at 0 so nothing is modulated until you ask),
+		// this starts at 100%: an LFO output that starts silent would look broken.
+		configParam(LFO_AMT_PARAM + k, 0.f, 1.f, 1.f, name + " amount (output level)", "%", 0.f, 100.f);
+		lfos[k].seed(random::u32());
+		configOutput(LFO_OUTPUT + k, name + " (+-5 V)");
 	}
 	configLight(LINK_LIGHT, "Connected to waveArtifact");
 
@@ -69,8 +77,14 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 	if (active) {
 		int m = getMarker();
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
-			if (inputs[MOD_INPUT + t].isConnected())
-				acc.mod[m][t] += params[AMT_PARAM + t].getValue() * inputs[MOD_INPUT + t].getVoltage();
+			if (!inputs[MOD_INPUT + t].isConnected())
+				continue;
+			float amt = params[AMT_PARAM + t].getValue();
+			float v = inputs[MOD_INPUT + t].getVoltage();
+			if (t == wa::MOD_GAIN)
+				acc.gainMul[m] *= wa::vcaLevel(amt, v);
+			else
+				acc.mod[m][t] += amt * v;
 		}
 	}
 	if (leftOk) {
@@ -92,7 +106,9 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		bool sync = params[LFO_SYNC_PARAM + k].getValue() > 0.5f;
 		bool triplets = params[LFO_TRIPLET_PARAM + k].getValue() > 0.5f;
 		bool dotted = params[LFO_DOTTED_PARAM + k].getValue() > 0.5f;
-		lfoOut[k] = lfos[k].process(sync, params[LFO_RATE_PARAM + k].getValue(), triplets, dotted, clock, args.sampleTime);
+		int shape = (int) std::round(params[LFO_SHAPE_PARAM + k].getValue());
+		lfoOut[k] = lfos[k].process(shape, sync, params[LFO_RATE_PARAM + k].getValue(), triplets, dotted, clock, args.sampleTime);
+		lfoOut[k] *= params[LFO_AMT_PARAM + k].getValue();
 		outputs[LFO_OUTPUT + k].setVoltage(5.f * lfoOut[k]);
 	}
 
@@ -112,19 +128,26 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 // Panel: 10 HP. Geometry matches res/waveArtifactExpander.svg.
 namespace xlayout {
 static const float W = 50.8f;
-static const Vec MARKER_BUTTON = Vec(17.f, 17.f);
-static const Vec MARKER_BUTTON_SIZE = Vec(16.f, 7.f);
-static const Vec LINK_LIGHT_POS = Vec(38.f, 17.f);
-static const float TOP_LABEL_Y = 23.2f;
-static const float ROW0_Y = 32.5f;
-static const float ROW_STEP = 11.f;
+static const Vec MARKER_BUTTON = Vec(17.f, 16.5f);
+static const Vec MARKER_BUTTON_SIZE = Vec(16.f, 6.5f);
+static const Vec LINK_LIGHT_POS = Vec(38.f, 16.5f);
+static const float TOP_LABEL_Y = 22.4f;
+static const float CV_HEADER_Y = 27.4f;
+static const float ROW0_Y = 33.f;
+static const float ROW_STEP = 9.f;
 static const float NAME_X = 11.f;
 static const float JACK_X = 26.f;
 static const float AMT_X = 40.f;
-static const float LFO_X[2] = {14.f, 37.f};
-static const float LFO_RATE_Y = 101.5f;
-static const float LFO_LABEL_Y = 106.9f;
-static const float LFO_OUT_Y = 113.5f;
+// Per LFO column: label, shape screen, RATE + AMT side by side (labelled), SYNC / T / D, output
+static const float LFO_X[2] = {14.8f, 36.2f};
+static const float LFO_LABEL_Y = 87.2f;
+static const float LFO_SCREEN_Y = 92.8f;
+static const Vec LFO_SCREEN_SIZE = Vec(16.f, 6.4f);
+static const float LFO_KNOB_Y = 101.2f;
+static const float LFO_KNOB_DX = 5.1f;
+static const float LFO_KNOB_LABEL_Y = 106.6f;
+static const float LFO_BUTTON_Y = 110.2f;
+static const float LFO_OUT_Y = 117.2f;
 } // namespace xlayout
 
 struct WaveArtifactExpanderWidget : ModuleWidget {
@@ -145,12 +168,16 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->add(Vec(W / 2.f, 6.f), "wA EXPANDER", 9.f);
 		labels->add(Vec(MARKER_BUTTON.x, TOP_LABEL_Y), "MARKER", 6.f);
 		labels->add(Vec(LINK_LIGHT_POS.x, TOP_LABEL_Y), "LINK", 6.f);
-		labels->add(Vec(JACK_X, ROW0_Y - 5.6f), "CV", 6.f);
-		labels->add(Vec(AMT_X, ROW0_Y - 5.6f), "AMT", 6.f);
+		labels->add(Vec(JACK_X, CV_HEADER_Y), "CV", 6.f);
+		labels->add(Vec(AMT_X, CV_HEADER_Y), "AMT", 6.f);
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++)
 			labels->add(Vec(NAME_X, ROW0_Y + t * ROW_STEP), wa::MOD_TARGET_NAMES[t], 6.f);
 		for (int k = 0; k < WaveArtifactExpander::NUM_LFOS; k++)
+		{
 			labels->add(Vec(LFO_X[k], LFO_LABEL_Y), "LFO " + std::to_string(k + 1), 6.f);
+			labels->add(Vec(LFO_X[k] - LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "RATE", 5.f);
+			labels->add(Vec(LFO_X[k] + LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "AMT", 5.f);
+		}
 		addChild(labels);
 
 		ModeButton* marker = createParam<ModeButton>(Vec(0, 0), module, WaveArtifactExpander::MARKER_PARAM);
@@ -168,11 +195,19 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		}
 
 		for (int k = 0; k < WaveArtifactExpander::NUM_LFOS; k++) {
-			addParam(createLfoRateKnob<LfoRateKnobT<RoundSmallBlackKnob>>(Vec(LFO_X[k], LFO_RATE_Y), module,
+			float x = LFO_X[k];
+			NVGcolor c = layout::SCREEN_TEXT;
+			addParam(createLfoShapeScreen(Vec(x, LFO_SCREEN_Y), LFO_SCREEN_SIZE, module, WaveArtifactExpander::LFO_SHAPE_PARAM + k, c));
+			addParam(createLfoRateKnob<LfoRateKnobT<RoundSmallBlackKnob>>(Vec(x - LFO_KNOB_DX, LFO_KNOB_Y), module,
 				WaveArtifactExpander::LFO_RATE_PARAM + k, WaveArtifactExpander::LFO_SYNC_PARAM + k,
 				WaveArtifactExpander::LFO_TRIPLET_PARAM + k, WaveArtifactExpander::LFO_DOTTED_PARAM + k));
-			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(LFO_X[k], LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + k));
-			addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(LFO_X[k] + 6.5f, LFO_RATE_Y - 3.5f)), module, WaveArtifactExpander::LFO_LIGHT + 2 * k));
+			addParam(createParamCentered<Trimpot>(mm2px(Vec(x + LFO_KNOB_DX, LFO_KNOB_Y)), module, WaveArtifactExpander::LFO_AMT_PARAM + k));
+			// SYNC (wide), then the narrow T and D, centered as a group under the knobs.
+			addParam(createLitToggle(Vec(x - 4.7f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_SYNC_PARAM + k, "SYNC", c));
+			addParam(createLitToggle(Vec(x + 1.3f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_TRIPLET_PARAM + k, "T", c, layout::LFO_TOGGLE_SMALL));
+			addParam(createLitToggle(Vec(x + 6.f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_DOTTED_PARAM + k, "D", c, layout::LFO_TOGGLE_SMALL));
+			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(x, LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + k));
+			addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(x + 8.6f, LFO_LABEL_Y)), module, WaveArtifactExpander::LFO_LIGHT + 2 * k));
 		}
 	}
 };

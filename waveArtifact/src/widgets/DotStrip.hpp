@@ -3,7 +3,7 @@
 #include "../WaveArtifact.hpp"
 #include "WaveDraw.hpp"
 
-/** One dot per extracted wavetable, in two rows: the wavetable playground.
+/** One dot per extracted wavetable, called an artifact, in two rows: the artifact playground.
 Color follows the table's brightness (spectral centroid). Hollow dots are tables where no
 fundamental was found. Each active marker rings the dot it is playing, in its color.
 Click a dot: give it to the marker being edited. Right-click: preview it (replaces the output until
@@ -51,7 +51,7 @@ struct DotStrip : widget::Widget {
 		const wa::WavetableBank* b = bank();
 		if (!b || hovered < 0 || hovered >= b->numTables)
 			return "";
-		std::string s = string::f("Wavetable %d / %d", hovered + 1, b->numTables);
+		std::string s = string::f("Artifact %d / %d", hovered + 1, b->numTables);
 		if (!b->pitched[hovered])
 			s += " (no pitch found)";
 		s += string::f("\nClick: give to marker %d\nRight-click: preview, or assign to a marker", module->selectedMarker + 1);
@@ -117,7 +117,7 @@ struct DotStrip : widget::Widget {
 		WaveArtifact* m = module;
 		const wa::WavetableBank* b = bank();
 		ui::Menu* menu = createMenu();
-		menu->addChild(createMenuLabel(string::f("Wavetable %d / %d", t + 1, b->numTables)));
+		menu->addChild(createMenuLabel(string::f("Artifact %d / %d", t + 1, b->numTables)));
 		menu->addChild(createCheckMenuItem("Preview (replaces the output)", "",
 			[=]() {
 				return m->previewTable.load() == t;
