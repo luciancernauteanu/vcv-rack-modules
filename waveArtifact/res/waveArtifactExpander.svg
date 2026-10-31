@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 10 HP light panel for the waveArtifact expander. Geometry matches xlayout in
+     src/WaveArtifactExpander.cpp. Labels are drawn at runtime by PanelLabels. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="50.8mm" height="128.5mm" viewBox="0 0 50.8 128.5" version="1.1">
+  <g id="panel">
+    <rect id="background" x="0" y="0" width="50.8" height="128.5" fill="#e9e7e2"/>
+    <g id="sections" fill="#d9d6cf">
+      <rect x="4" y="11" width="42.8" height="14.5" rx="2" ry="2"/>
+      <rect x="4" y="27.5" width="42.8" height="65.5" rx="2" ry="2"/>
+      <rect x="4" y="95" width="42.8" height="25" rx="2" ry="2"/>
+    </g>
+    <rect id="lfo1-out" x="7.5" y="108.4" width="13" height="11" rx="1.5" ry="1.5" fill="#26282c"/>
+    <rect id="lfo2-out" x="30.5" y="108.4" width="13" height="11" rx="1.5" ry="1.5" fill="#26282c"/>
+  </g>
+  <g id="components" style="display:none">
+    <rect id="MARKER_PARAM" x="9" y="13.5" width="16" height="7" fill="#ff0000"/>
+    <circle id="LINK_LIGHT" cx="38" cy="17" r="1.5" fill="#ff00ff"/>
+    <circle id="MOD_INPUT_0" cx="26" cy="32.5" r="4" fill="#00ff00"/>
+    <circle id="AMT_PARAM_0" cx="40" cy="32.5" r="3" fill="#ff0000"/>
+    <circle id="LFO_RATE_PARAM_0" cx="14" cy="101.5" r="4" fill="#ff0000"/>
+    <circle id="LFO_OUTPUT_0" cx="14" cy="113.5" r="4" fill="#0000ff"/>
+    <circle id="LFO_RATE_PARAM_1" cx="37" cy="101.5" r="4" fill="#ff0000"/>
+    <circle id="LFO_OUTPUT_1" cx="37" cy="113.5" r="4" fill="#0000ff"/>
+  </g>
+</svg>
