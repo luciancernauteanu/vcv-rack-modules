@@ -164,6 +164,27 @@ struct LitToggle : app::ParamWidget {
 	}
 };
 
+/** Momentary version of LitToggle: lit and 1 while held, 0 on release (e.g. RESTART). No undo entry:
+it is an action, not a setting. */
+struct MomentaryLitButton : LitToggle {
+	void onButton(const ButtonEvent& e) override {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == 0) {
+			engine::ParamQuantity* pq = getParamQuantity();
+			if (pq)
+				pq->setValue(1.f);
+			e.consume(this);
+			return;
+		}
+		ParamWidget::onButton(e);
+	}
+	void onDragEnd(const DragEndEvent& e) override {
+		engine::ParamQuantity* pq = getParamQuantity();
+		if (pq)
+			pq->setValue(0.f);
+		ParamWidget::onDragEnd(e);
+	}
+};
+
 inline LfoShapeScreen* createLfoShapeScreen(Vec mmCenter, Vec mmSize, Module* module, int paramId, NVGcolor color) {
 	LfoShapeScreen* s = createParam<LfoShapeScreen>(Vec(0, 0), module, paramId);
 	s->box.size = mm2px(mmSize);
@@ -172,8 +193,9 @@ inline LfoShapeScreen* createLfoShapeScreen(Vec mmCenter, Vec mmSize, Module* mo
 	return s;
 }
 
-inline LitToggle* createLitToggle(Vec mmCenter, Module* module, int paramId, const std::string& label, NVGcolor color, Vec mmSize = layout::LFO_TOGGLE_SIZE) {
-	LitToggle* t = createParam<LitToggle>(Vec(0, 0), module, paramId);
+template <class T = LitToggle>
+T* createLitToggle(Vec mmCenter, Module* module, int paramId, const std::string& label, NVGcolor color, Vec mmSize = layout::LFO_TOGGLE_SIZE) {
+	T* t = createParam<T>(Vec(0, 0), module, paramId);
 	t->box.size = mm2px(mmSize);
 	t->box.pos = mm2px(mmCenter).minus(t->box.size.div(2.f));
 	t->label = label;

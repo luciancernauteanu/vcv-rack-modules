@@ -91,11 +91,51 @@ static const int PPQN_VALUES[NUM_PPQN] = {1, 2, 4, 8, 12, 24, 48};
 changes within one pulse), and a beat edge is reported on every `ppqn`-th pulse. */
 class ClockTracker {
 public:
+	/** Internal clock: call once per sample instead of process() while no clock cable is patched.
+	Produces beats at `bpm` exactly like an external clock (same edges, beat count and period), so
+	everything that syncs to this tracker cannot tell the difference. Beat phase is kept in double
+	precision, so the tempo is exact at any BPM (no rounding to whole samples). */
+	void processInternal(float bpm, float sampleRate) {
+		edge = false;
+		this->sampleRate = sampleRate;
+		// (float) copies: std::min/max take references, and C++11 has no inline constexpr members.
+		bpm = std::min(std::max(bpm, (float) MIN_BPM), (float) MAX_BPM);
+		internalPeriod = 60.0 * sampleRate / bpm;
+		if (!internal) {
+			// Just switched from an external clock (or started): a new beat starts now.
+			internal = true;
+			beatPhase = 1.0;
+		}
+		if (beatPhase >= 1.0) {
+			// A beat was requested (start, switch from a cable, restart): it starts on this sample,
+			// and the next one comes exactly one period later.
+			beatPhase = 0.0;
+			edge = true;
+			beatCount++;
+		}
+		else {
+			beatPhase += 1.0 / internalPeriod;
+			if (beatPhase >= 1.0) {
+				beatPhase -= 1.0;
+				edge = true;
+				beatCount++;
+			}
+		}
+		running = true;
+	}
+
 	/** Call once per sample. */
 	void process(float voltage, bool connected, float sampleRate, int ppqn = 1) {
 		edge = false;
 		this->sampleRate = sampleRate;
 		ppqn = std::max(ppqn, 1);
+		if (internal) {
+			// Just switched from the internal clock to a cable: keep its tempo until two pulses
+			// have been measured.
+			internal = false;
+			periodSamples = (long) std::lround(internalPeriod);
+			havePrev = false;
+		}
 		if (!connected) {
 			running = false;
 			havePrev = false;
@@ -127,16 +167,29 @@ public:
 		running = periodSamples > 0 && samplesSince * ppqn < 4 * periodSamples;
 	}
 
-	/** RESET: the next pulse is beat 0 (the start of a bar), as on the sequencer. The tempo is kept. */
+	/** RESET / restart. External clock: the next pulse is beat 0 (the start of a bar), as on the
+	sequencer. Internal clock: beat 0 happens on the very next sample, so everything restarts at
+	once. The tempo is kept. */
 	void reset() {
 		pulseCount = -1;
 		beatCount = -1;
+		beatPhase = 1.0;
 	}
 
-	/** Seconds per quarter note: measured, or 120 BPM until two pulses have arrived. */
+	/** Seconds per quarter note: internal tempo, measured external tempo, or 120 BPM until two
+	pulses have arrived. */
 	double beatPeriod() const {
+		if (internal)
+			return internalPeriod / sampleRate;
 		return (periodSamples > 0) ? (double) periodSamples / sampleRate : 0.5;
 	}
+
+	bool isInternal() const {
+		return internal;
+	}
+
+	static constexpr float MIN_BPM = 20.f;
+	static constexpr float MAX_BPM = 300.f;
 	bool isRunning() const {
 		return running;
 	}
@@ -159,6 +212,11 @@ private:
 	long periodSamples = 0;
 	long beatCount = -1;
 	long pulseCount = -1;
+	// Internal clock
+	bool internal = false;
+	double internalPeriod = 24000.0;
+	/** Fraction of the current beat; >= 1 means "start a beat on the next sample" */
+	double beatPhase = 1.0;
 };
 
 enum LfoShape {

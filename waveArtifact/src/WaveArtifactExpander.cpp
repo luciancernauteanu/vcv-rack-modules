@@ -19,8 +19,10 @@ WaveArtifactExpander::WaveArtifactExpander() {
 	getParamQuantity(MARKER_PARAM)->randomizeEnabled = false;
 	for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
 		std::string name = wa::MOD_TARGET_NAMES[t];
-		// GAIN is a VCA, so its amount is 0..100%. All amounts start at 0 (double-click resets to 0).
-		configParam(AMT_PARAM + t, (t == wa::MOD_GAIN) ? 0.f : -1.f, 1.f, 0.f, name + ((t == wa::MOD_GAIN) ? " VCA amount (100% = silent at 0 V)" : " CV amount"), "%", 0.f, 100.f);
+		// GAIN (a VCA), CUTOFF and DRIVE are unipolar: 0..100%. WAVE, FINE and PAN are
+		// attenuverters. All amounts start at 0 (double-click resets to 0).
+		bool unipolar = (t == wa::MOD_GAIN || t == wa::MOD_CUTOFF || t == wa::MOD_DRIVE);
+		configParam(AMT_PARAM + t, unipolar ? 0.f : -1.f, 1.f, 0.f, name + ((t == wa::MOD_GAIN) ? " VCA amount (100% = silent at 0 V)" : " CV amount"), "%", 0.f, 100.f);
 		configInput(MOD_INPUT + t, name + " CV");
 	}
 	// LFO 1 defaults to 1 Hz, LFO 2 to 0.2 Hz.
@@ -28,7 +30,7 @@ WaveArtifactExpander::WaveArtifactExpander() {
 	for (int k = 0; k < NUM_LFOS; k++) {
 		std::string name = "LFO " + std::to_string(k + 1);
 		configLfoRate(this, LFO_RATE_PARAM + k, LFO_SYNC_PARAM + k, LFO_TRIPLET_PARAM + k, LFO_DOTTED_PARAM + k, name + " rate", defaultRate[k]);
-		configSwitch(LFO_SYNC_PARAM + k, 0.f, 1.f, 0.f, name + " sync", {"Free (Hz)", "Clock sync"});
+		configSwitch(LFO_SYNC_PARAM + k, 0.f, 1.f, 1.f, name + " sync", {"Free (Hz)", "Tempo sync (BPM / CLOCK)"});
 		configSwitch(LFO_TRIPLET_PARAM + k, 0.f, 1.f, 0.f, name + " triplets", {"Off", "On"});
 		configSwitch(LFO_DOTTED_PARAM + k, 0.f, 1.f, 0.f, name + " dotted", {"Off", "On"});
 		for (int id : {LFO_SYNC_PARAM, LFO_TRIPLET_PARAM, LFO_DOTTED_PARAM})
@@ -42,7 +44,7 @@ WaveArtifactExpander::WaveArtifactExpander() {
 		configOutput(LFO_OUTPUT + k, name + " (+-5 V)");
 	}
 	configInput(VOCT_INPUT, "V/OCT for this artifact (1 V/oct, added to the main V/OCT)");
-	configLight(LINK_LIGHT, "Connected to waveArtifact");
+	configLight(LINK_LIGHT, "Connected to Wave Artifacts");
 
 	leftExpander.producerMessage = new wa::ToExpanderMessage;
 	leftExpander.consumerMessage = new wa::ToExpanderMessage;
@@ -77,12 +79,16 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		acc = *(const wa::ToMainMessage*) rightExpander.consumerMessage;
 	if (active) {
 		int m = getMarker();
-		if (inputs[VOCT_INPUT].isConnected())
+		if (inputs[VOCT_INPUT].isConnected()) {
 			acc.voct[m] += inputs[VOCT_INPUT].getVoltage();
+			acc.modulated[m] = true;
+		}
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
 			if (!inputs[MOD_INPUT + t].isConnected())
 				continue;
 			float amt = params[AMT_PARAM + t].getValue();
+			if (amt != 0.f)
+				acc.modulated[m] = true;
 			float v = inputs[MOD_INPUT + t].getVoltage();
 			if (t == wa::MOD_GAIN)
 				acc.gainMul[m] *= wa::vcaLevel(amt, v);

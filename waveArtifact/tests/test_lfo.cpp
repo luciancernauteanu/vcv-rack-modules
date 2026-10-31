@@ -386,7 +386,114 @@ static void testReset() {
 	CHECK(lfo.getPhase() == 0.0, "reset does not restart the phase");
 }
 
+static void testInternalClock() {
+	std::printf("internal clock: synced LFOs run at the BPM and stay locked to one grid without a cable\n");
+	// Tempo: a 1/4 LFO at 90 BPM (1.5 Hz) and 137 BPM (2.2833 Hz, a period that is not a whole
+	// number of samples).
+	for (float bpm : {90.f, 137.f}) {
+		wa::ClockTracker clock;
+		wa::Lfo lfo;
+		float prev = 0.f;
+		int cycles = 0;
+		const float secs = 20.f;
+		for (int n = 0; n < (int) (secs * SR); n++) {
+			clock.processInternal(bpm, SR);
+			float out = lfo.process(true, knobFor("1/4"), false, false, clock, 1.f / SR);
+			if (n > 0 && prev < 0.f && out >= 0.f)
+				cycles++;
+			prev = out;
+		}
+		double expect = bpm / 60.0 * secs;
+		std::printf("  %3.0f BPM: 1/4 made %d cycles in %.0f s (expect %.1f)\n", bpm, cycles, secs, expect);
+		CHECK(std::fabs(cycles - expect) <= 1.0, "internal tempo off at %f BPM: %d vs %f", bpm, cycles, expect);
+	}
+	// Locking: LFOs with different rates, one of them knocked out of phase (a rate change mid-way),
+	// all sit on the shared grid again: a 1/4, a 1/1 and a 1/8T are at phase 0 on every bar start.
+	wa::ClockTracker clock;
+	wa::Lfo a, b, c;
+	int beatLen = (int) (SR * 0.5f); // 120 BPM
+	double worst = 0.0;
+	for (int n = 0; n < (int) (12.f * SR); n++) {
+		clock.processInternal(120.f, SR);
+		// b runs at a different division for a while (as if the user turned the knob), then back.
+		const char* bdiv = (n > 2 * SR && n < 3.3f * SR) ? "1/16" : "1/1";
+		a.process(true, knobFor("1/4"), true, true, clock, 1.f / SR);
+		b.process(true, knobFor(bdiv), true, true, clock, 1.f / SR);
+		c.process(true, knobFor("1/8T"), true, true, clock, 1.f / SR);
+		// Bar starts after things have settled (from 6 s): every 4 beats.
+		if (n > 6 * SR && clock.isEdge() && clock.getBeatCount() % 4 == 0) {
+			for (wa::Lfo* l : {&a, &b, &c}) {
+				double p = l->getPhase();
+				worst = std::max(worst, std::min(p, 1.0 - p));
+			}
+		}
+	}
+	(void) beatLen;
+	std::printf("  1/4, 1/1 (knocked off for 1.3 s) and 1/8T at bar starts: worst phase %.5f cycles from 0\n", worst);
+	CHECK(worst < 0.002, "LFOs are not locked to the internal grid: %f", worst);
+}
+
+static void testRestartInternal() {
+	std::printf("restart with the internal clock: beat 0 and every LFO start on the same sample\n");
+	wa::ClockTracker clock;
+	wa::Lfo a, b;
+	long restartAt = (long) (3.37 * SR); // mid-beat
+	long beat0Sample = -1;
+	double phaseA = -1, phaseB = -1, barPhaseB = -1;
+	for (long n = 0; n < (long) (8 * SR); n++) {
+		if (n == restartAt) {
+			clock.reset();
+			a.reset();
+			b.reset();
+		}
+		clock.processInternal(120.f, SR);
+		a.process(true, knobFor("1/4"), false, false, clock, 1.f / SR);
+		b.process(true, knobFor("1/1"), false, false, clock, 1.f / SR);
+		if (clock.isEdge() && clock.getBeatCount() == 0 && n >= restartAt) {
+			beat0Sample = n;
+			phaseA = a.getPhase();
+			phaseB = b.getPhase();
+		}
+		// One bar (4 beats = 2 s) after the restart, the 1/1 LFO is back at 0.
+		if (n == restartAt + (long) (2 * SR) + 1)
+			barPhaseB = b.getPhase();
+	}
+	double barErr = std::min(barPhaseB, 1.0 - barPhaseB);
+	std::printf("  restart at %.3f s: beat 0 %ld samples later, LFO phases %.5f / %.5f, one bar later %.5f\n",
+		restartAt / SR, beat0Sample - restartAt, phaseA, phaseB, barErr);
+	CHECK(beat0Sample == restartAt, "internal beat 0 does not start on the restart sample: %ld", beat0Sample - restartAt);
+	CHECK(phaseA < 0.001 && phaseB < 0.001, "LFOs did not restart at phase 0");
+	CHECK(barErr < 0.002, "the bar is not counted from the restart: %f", barErr);
+}
+
+static void testClockHandover() {
+	std::printf("plugging a clock in and out: tempo carries over, no jump\n");
+	wa::ClockTracker clock;
+	wa::Lfo lfo;
+	float prev = 0.f, maxStep = 0.f;
+	int period = (int) (SR * 60.f / 100.f); // external clock at 100 BPM
+	for (int n = 0; n < (int) (10 * SR); n++) {
+		bool cable = n > 3 * SR && n < 7 * SR;
+		if (cable)
+			clock.process((n % period) < (int) (0.001f * SR) ? 10.f : 0.f, true, SR);
+		else
+			clock.processInternal(120.f, SR);
+		float out = lfo.process(true, knobFor("1/4"), false, false, clock, 1.f / SR);
+		if (n > 0)
+			maxStep = std::max(maxStep, std::fabs(out - prev));
+		prev = out;
+	}
+	// 1/4 at 120 BPM = 2 Hz. A clock change can leave a phase error of up to half a cycle, which the
+	// lock pulls in over ~20 ms: at most ~0.5 cycle / 20 ms extra speed (25 Hz). A snap would be ~2.0.
+	float limit = (float) (2 * 3.14159265 * (2.0 + 0.5 / 0.02) / SR);
+	std::printf("  internal 120 -> cable 100 BPM -> internal: max LFO step %.5f (limit %.5f)\n", maxStep, limit);
+	CHECK(maxStep <= limit, "switching clocks makes the LFO jump: %f", maxStep);
+}
+
 int main() {
+	testInternalClock();
+	testRestartInternal();
+	testClockHandover();
 	testDivisionOptions();
 	testFree();
 	testSync();

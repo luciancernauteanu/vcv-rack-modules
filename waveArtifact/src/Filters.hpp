@@ -247,8 +247,12 @@ Warmth comes from three analog habits, all gentle at low settings:
   oversampled with ADAA, so it stays smooth up top.
 - The filter's integrators saturate softly (STATE_LIMIT), so resonance and loud signals compress
   and thicken instead of ringing like a perfect digital filter.
-- The band-pass feedback goes through a tanh, and the oscillation it makes is bounded by the
-  integrators, so FDBK sings warmly instead of screaming.
+- FDBK feeds the band-pass back through its own soft clip (zero delay). Loop gain at 100% is just
+  above 1, so most of the knob is ringing resonance and only the top ~8% self-oscillates, at a
+  moderate level (~2 V, was 5.7 V). Feedback eases off at high cutoffs, so it cannot whistle above
+  ~4 kHz. DRIVE also drives this feedback clip (harder clip, a little more loop gain): more drive =
+  grittier, more compressed feedback, not louder. The oversampled drive itself stays outside the
+  loop: its ~0.7 ms delay inside a feedback loop would detune and smear the resonance.
 With DRIVE at 0 and the filter off, only the drive's oversampling path remains (flat to ~0.2 dB at
 15 kHz, 31 samples of delay). */
 struct MasterFilter {
@@ -262,7 +266,15 @@ struct MasterFilter {
 	float fdbkS = 0.f;
 	float driveS = 0.f;
 
-	static constexpr float FDBK_GAIN = 1.3f;
+	/** Loop gain at FDBK 100% (self-oscillation starts at 1/FDBK_GAIN of the knob's effect) */
+	static constexpr float FDBK_GAIN = 1.12f;
+	/** Feedback clip: tanh(k * bp) / k. Larger k = clips earlier = quieter, grittier oscillation. */
+	static constexpr float FDBK_CLIP = 1.3f;
+	/** DRIVE pushes the feedback clip harder (k x (1 + this)) and raises loop gain a little. */
+	static constexpr float FDBK_CLIP_DRIVE = 1.5f;
+	static constexpr float FDBK_GAIN_DRIVE = 0.15f;
+	/** Above this cutoff the feedback eases off (1 / (1 + (fc / corner)^2)) */
+	static constexpr float FDBK_HF_CORNER = 12000.f;
 	/** Integrator ceiling in engine units (1 = a full-scale input) */
 	static constexpr float STATE_LIMIT = 2.5f;
 
@@ -308,9 +320,13 @@ struct MasterFilter {
 		float oct = spread * 2.f; // +-2 octaves between the channels
 		float fcs[2] = {fc * std::exp2(-0.5f * oct), fc * std::exp2(0.5f * oct)};
 		float onAmount = 1.f - mixS[0];
+		// Feedback clip and loop gain, shaped by DRIVE (see the struct notes).
+		float clipK = FDBK_CLIP * (1.f + FDBK_CLIP_DRIVE * dr);
+		float loopGain = onAmount * fdbk * FDBK_GAIN * (1.f + FDBK_GAIN_DRIVE * dr);
 		for (int c = 0; c < 2; c++) {
 			float x = *io[c];
-			float fb = onAmount * fdbk * FDBK_GAIN * std::tanh(svf[c].lastBp);
+			float hf = fcs[c] / FDBK_HF_CORNER;
+			float fb = loopGain / (1.f + hf * hf) * std::tanh(clipK * svf[c].lastBp) / clipK;
 			// The dry share must stay the clean input, so the feedback only enters the filter core.
 			float mixNoDry[NUM_MIX] = {0.f, mixS[1], mixS[2], mixS[3], mixS[4]};
 			float y = svf[c].process(x + fb, fcs[c], q, sampleRate, mixNoDry, STATE_LIMIT);
@@ -321,9 +337,45 @@ struct MasterFilter {
 				svf[c].reset();
 				y = x;
 			}
-			*io[c] = y;
+			ys[c] = y;
+			// Energy in and out of each channel's filter (slow), for the spread balance.
+			energyIn[c] += (x * x - energyIn[c]) * balanceCoef;
+			energyOut[c] += (y * y - energyOut[c]) * balanceCoef;
 		}
+
+		// Balanced spread: SPREAD gives each channel a different cutoff, so with a low cutoff the
+		// darker side loses most of the sound and the image leans to the brighter side. Even out
+		// the filters' own losses (output/input energy per channel, not the input's balance, so
+		// panning is kept): spread then changes tone between the sides, not their level. Fades in
+		// over the first 10% of SPREAD (so 0 is untouched), then corrects fully; limited to +-6 dB.
+		float amount = std::min(1.f, 10.f * std::fabs(spread));
+		// Only when both channels carry signal (a hard-panned input has nothing to balance against).
+		const float quiet = 1e-6f;
+		if (amount > 1e-3f && energyIn[0] > quiet && energyIn[1] > quiet) {
+			const float eps = 1e-9f;
+			float loss[2] = {(energyOut[0] + eps) / (energyIn[0] + eps), (energyOut[1] + eps) / (energyIn[1] + eps)};
+			float mean = std::sqrt(loss[0] * loss[1]);
+			for (int c = 0; c < 2; c++) {
+				float g = std::sqrt(mean / loss[c]);
+				g = std::min(std::max(g, 0.5f), 2.f);
+				ys[c] *= std::pow(g, amount);
+			}
+		}
+		*l = ys[0];
+		*r = ys[1];
 	}
+
+	void setSampleRate(float sr) {
+		balanceCoef = 1.f - std::exp(-1.f / (BALANCE_TIME * sr));
+	}
+
+private:
+	/** Time constant of the spread balance's level tracking */
+	static constexpr float BALANCE_TIME = 0.15f;
+	float balanceCoef = 1.f - std::exp(-1.f / (0.15f * 44100.f));
+	float energyIn[2] = {};
+	float energyOut[2] = {};
+	float ys[2] = {};
 };
 
 } // namespace wa

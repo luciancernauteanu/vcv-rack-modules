@@ -4,7 +4,7 @@
 // Panel geometry in mm. res/waveArtifact.svg draws the same section boxes, so keep both in sync.
 // 42 HP = 213.36 mm x 128.5 mm (the right 6 HP column holds the five artifact outputs).
 //
-//  y  11..43.5  per-marker sections: MARKER | WAVE | GAIN | FILTER | PITCH | PAN | ARRANGE + CLOCK
+//  y  11..43.5  per-artifact sections: ARTIFACT | WAVE | GAIN | FILTER | PITCH | PAN | tempo: BPM, CLOCK, RESET
 //  y  46..75.5  screen: marker waveforms, marker bar, file status (click to load)
 //  y  77.5..106 POSITION | FREQ + V/OCT | MASTER (type, cutoff, res, drive, spread, fdbk, each with CV) | outputs
 //  y 108..120   wavetable dots
@@ -28,11 +28,10 @@ static const float ROW2_LABEL_Y = 40.5f;
 static const Section TOP_SECTIONS[] = {
 	{6.f, 16.f},      // ARTIFACT badge
 	{18.f, 66.f},     // WAVE, SMOOTH | LFO: shape screen, RATE, AMT, SYNC / T / D
-	{68.f, 80.f},     // GAIN
+	{68.f, 80.f},     // GAIN, PAN
 	{82.f, 118.f},    // FILTER: cutoff, drive, res, type
 	{120.f, 138.f},   // PITCH, FINE, FREE
-	{140.f, 152.f},   // PAN
-	{154.f, 176.88f}, // ARRANGE, CLOCK
+	{140.f, 176.88f}, // tempo: BPM, CLK OUT, CLOCK, RESET (Auto arrange is in the right-click menu)
 };
 static const Vec MARKER_BADGE = Vec(11.f, ROW1_Y);
 static const Vec WAVE_KNOB = Vec(27.f, ROW1_Y);
@@ -54,10 +53,19 @@ static const Vec FILTER_MODE_BUTTON = Vec(108.f, ROW2_Y);
 static const Vec PITCH_KNOB = Vec(129.f, ROW1_Y);
 static const Vec FINE_KNOB = Vec(124.2f, ROW2_Y);
 static const Vec PITCH_FREE_BUTTON = Vec(132.9f, ROW2_Y);
-static const Vec PAN_KNOB = Vec(146.f, ROW1_Y);
-static const Vec ARRANGE_BUTTON = Vec(165.44f, ROW1_Y);
-static const Vec CLOCK_INPUT = Vec(159.5f, ROW2_Y);
-static const Vec RESET_INPUT = Vec(171.4f, ROW2_Y);
+// PAN sits under GAIN (one "level and place" section).
+static const Vec PAN_KNOB = Vec(74.f, ROW2_Y);
+// Internal tempo on top; CLOCK and RESET below. The RESET jack's label is a
+// button that restarts the beat grid and the LFOs (same as a gate).
+static const Vec BPM_KNOB = Vec(149.5f, ROW1_Y);
+/** Beat clock out (internal or external tempo), on an inverted box with its label */
+static const Vec CLOCK_OUTPUT = Vec(167.5f, 18.4f);
+static const Vec CLOCK_OUT_BOX_POS = Vec(162.3f, 12.2f);
+static const Vec CLOCK_OUT_BOX_SIZE = Vec(10.4f, 15.6f);
+static const Vec CLOCK_INPUT = Vec(149.5f, ROW2_Y);
+static const Vec RESET_INPUT = Vec(167.5f, ROW2_Y);
+static const Vec RESTART_BUTTON = Vec(167.5f, 40.6f);
+static const Vec RESTART_BUTTON_SIZE = Vec(8.6f, 4.2f);
 
 /** Size of the click-to-cycle filter type buttons */
 static const Vec MODE_BUTTON_SIZE = Vec(10.f, 5.f);
@@ -91,9 +99,13 @@ static const Section CTRL_SECTIONS[] = {
 	{83.f, 148.f},  // master: TYPE, then CUTOFF RES DRIVE SPREAD FDBK
 };
 static const Vec POSITION_KNOB = Vec(14.f, CONTROL_Y);
-static const float POS_CV_LABEL_Y = 79.9f;
-static const Vec POS_ATTEN = Vec(27.f, 85.f);
-static const Vec POS_INPUT = Vec(27.f, 96.2f);
+// CV column next to the knob: amount trimpot, its label, then the jack and its label (aligned
+// with the POSITION label).
+static const float POS_CV_LABEL_Y = 88.6f;
+/** Title above the position LFO's shape screen */
+static const float POS_LFO_LABEL_Y = 79.9f;
+static const Vec POS_ATTEN = Vec(27.f, 83.4f);
+static const Vec POS_INPUT = Vec(27.f, 94.6f);
 // The position LFO (same controls as a marker's): shape screen, SYNC / T / D, RATE and AMT. Its
 // amount is also in RATE's right-click menu.
 static const Vec POS_LFO_SHAPE_SCREEN = Vec(44.5f, 85.2f);
@@ -108,10 +120,11 @@ static const Vec FREQ_KNOB = Vec(64.5f, CONTROL_Y);
 static const Vec VOCT_INPUT = Vec(75.5f, CONTROL_Y);
 
 // Master section. Each of the five knobs has its CV amount trimpot and CV jack stacked under it.
-static const float MASTER_LABEL_Y = 79.9f;
-static const float MASTER_KNOB_Y = 85.2f;
-static const float MASTER_AMT_Y = 92.4f;
-static const float MASTER_CV_Y = 100.f;
+static const float MASTER_LABEL_Y = 79.6f;
+static const float MASTER_KNOB_Y = 84.8f;
+// ~1.5 mm between each knob (7.7 mm) and its amount trimpot (6 mm), then the jack (8 mm)
+static const float MASTER_AMT_Y = 93.2f;
+static const float MASTER_CV_Y = 101.f;
 static const Vec MASTER_MODE_BUTTON = Vec(89.f, MASTER_KNOB_Y);
 static const float MASTER_COL_X[5] = {101.5f, 111.9f, 122.3f, 132.7f, 143.1f}; // cutoff, res, drive, spread, fdbk
 

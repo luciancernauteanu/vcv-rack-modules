@@ -198,8 +198,8 @@ static void testRejects() {
 	std::printf("rejects\n");
 	std::string err;
 	std::vector<uint8_t> big(wa::MAX_FILE_BYTES + 1, 0);
-	CHECK(!wa::analyzeWav(big.data(), big.size(), wa::TABLES_AUTO, &err), "accepted > 2 MB");
-	CHECK(err == "File larger than 2 MB", "wrong error: %s", err.c_str());
+	CHECK(!wa::analyzeWav(big.data(), big.size(), wa::TABLES_AUTO, &err), "accepted a file over the size limit");
+	CHECK(err == "File larger than " + std::to_string(wa::MAX_FILE_MB) + " MB", "wrong error: %s", err.c_str());
 
 	std::vector<uint8_t> junk(1000, 0x5a);
 	CHECK(!wa::analyzeWav(junk.data(), junk.size(), wa::TABLES_AUTO, &err), "accepted junk");

@@ -56,6 +56,8 @@ struct ToMainMessage {
 	float gainMul[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	/** Volts on the expanders' V/OCT inputs, summed per artifact (added to the main V/OCT) */
 	float voct[NUM_MARKERS] = {};
+	/** A linked expander is actively modulating this artifact (a CV with a non-zero amount, or V/OCT) */
+	bool modulated[NUM_MARKERS] = {};
 };
 
 } // namespace wa

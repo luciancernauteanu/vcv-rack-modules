@@ -138,7 +138,7 @@ static void testClickFree() {
 		if (n == (int) (1.0f * sr)) in.markers[2].active = true;
 		if (n == (int) (1.5f * sr)) pending = bankB.get();
 		if (n == (int) (2.6f * sr)) in.markers[2].active = false;
-		if (n == (int) (3.0f * sr)) in.markers[1].cutoff = 0.f;   // filter on -> off
+		if (n == (int) (3.0f * sr)) in.markers[1].cutoff = 0.f;   // cutoff jump to fully left (20 Hz)
 		if (n == (int) (3.2f * sr)) in.markers[0].pan = -1.f; // hard pan
 		// Turning WAVE: the knob value arrives in UI-frame steps (60 Hz), 0 -> 1 in 0.25 s.
 		if (t >= 3.4f && t < 3.65f && n % (int) (sr / 60.f) == 0)
@@ -609,6 +609,9 @@ static void testFilterModes() {
 	} cases[] = {
 		{"LP @ 2 kHz (passes)", wa::MODE_LP, 2000.f, 0.9f, 1.1f},
 		{"LP @ 40 Hz (blocks)", wa::MODE_LP, 40.f, 0.f, 0.05f},
+		// Fully left is a real 20 Hz filter, not a bypass: a C4 tone is almost gone.
+		{"LP fully left (20 Hz)", wa::MODE_LP, 20.f, 0.f, 0.02f},
+		{"HP fully left (20 Hz)", wa::MODE_HP, 20.f, 0.95f, 1.05f},
 		{"HP @ 2 kHz (blocks)", wa::MODE_HP, 2000.f, 0.f, 0.05f},
 		{"HP @ 40 Hz (passes)", wa::MODE_HP, 40.f, 0.9f, 1.1f},
 		{"BP @ 261 Hz (center)", wa::MODE_BP, 261.6f, 0.9f, 1.1f},
@@ -801,22 +804,48 @@ static void testMasterFilter() {
 		CHECK(maxDiff < 1e-4f, "master off is not transparent: %f", maxDiff);
 	}
 	{
-		// LP at C4 with SPREAD +100% (+-1 octave): left cutoff 131 Hz, right 523 Hz.
+		// Balanced spread. LP at C4, SPREAD +50% (+-1 octave): left cutoff 131 Hz, right 523 Hz.
+		// Without balance the right side was twice as loud (0.444 vs 0.887): the sound leaned right.
+		// Now both sides stay level while their filtering differs (here: phase); SPREAD 0 is untouched.
+		for (float spread : {0.f, 0.5f, 1.f}) {
+			SineRig rig;
+			rig.in.masterMode = wa::MODE_LP;
+			rig.in.masterCutoff = cutoffFor(261.6f);
+			rig.in.masterSpread = spread;
+			int n = (int) (2.f * rig.sr);
+			float l, r, pl = 0.f, pr = 0.f, diff = 0.f;
+			for (int i = 0; i < n; i++) {
+				rig.engine.process(rig.in, &l, &r);
+				if (i > n / 2) {
+					pl = std::max(pl, std::fabs(l));
+					pr = std::max(pr, std::fabs(r));
+					diff = std::max(diff, std::fabs(l - r));
+				}
+			}
+			double db = 20 * std::log10(pr / pl);
+			std::printf("  spread %3.0f%%: left %.3f, right %.3f (%.1f dB apart), L-R difference %.3f\n", spread * 100, pl, pr, db, diff);
+			CHECK(std::fabs(db) < 1.5, "spread %f leans to one side: %f dB", spread, db);
+			if (spread == 0.f)
+				CHECK(diff < 1e-4f, "spread 0 must leave L and R identical");
+			else
+				CHECK(diff > 0.1f, "spread %f does not filter the sides differently", spread);
+		}
+		// Panning is kept: an artifact panned hard left stays on the left with spread on.
 		SineRig rig;
+		rig.in.markers[0].pan = -1.f;
 		rig.in.masterMode = wa::MODE_LP;
-		rig.in.masterCutoff = cutoffFor(261.6f);
-		rig.in.masterSpread = 0.5f;
-		int n = (int) rig.sr;
+		rig.in.masterCutoff = cutoffFor(400.f);
+		rig.in.masterSpread = 0.8f;
 		float l, r, pl = 0.f, pr = 0.f;
-		for (int i = 0; i < n; i++) {
+		for (int i = 0; i < (int) (1.5f * rig.sr); i++) {
 			rig.engine.process(rig.in, &l, &r);
-			if (i > n / 2) {
+			if (i > (int) rig.sr) {
 				pl = std::max(pl, std::fabs(l));
 				pr = std::max(pr, std::fabs(r));
 			}
 		}
-		std::printf("  spread: left %.3f, right %.3f\n", pl, pr);
-		CHECK(pr > pl * 1.8f, "spread does not open the right channel: L %f R %f", pl, pr);
+		std::printf("  hard-left artifact with spread: left %.3f, right %.4f\n", pl, pr);
+		CHECK(pr < 0.01f && pl > 0.3f, "spread balance moved a hard-panned sound");
 	}
 	{
 		// Feedback: play 0.2 s, then silence (no bank -> engine input 0). Above the threshold the
@@ -1264,7 +1293,74 @@ static void testDirectOutputs() {
 	}
 }
 
+struct FdbkSound {
+	double hz, peak, rms, h2, h3, h5;
+};
+
+/** Self-oscillation of the master filter after a short burst: pitch, level and harmonics. */
+static FdbkSound fdbkSound(int mode, float cutoffHz, float fdbk, float res, float drive) {
+	SineRig rig;
+	rig.in.masterMode = mode;
+	rig.in.masterCutoff = cutoffFor(cutoffHz);
+	rig.in.masterFdbk = fdbk;
+	rig.in.masterRes = res;
+	rig.in.masterDrive = drive;
+	std::vector<float> tail;
+	float l, r;
+	for (int i = 0; i < (int) (2.5f * rig.sr); i++) {
+		if (i == (int) (0.2f * rig.sr))
+			rig.in.markers[0].gain = 0.f;
+		rig.engine.process(rig.in, &l, &r);
+		if (i > (int) (1.5f * rig.sr))
+			tail.push_back(l);
+	}
+	FdbkSound s = {0, 0, 0, 0, 0, 0};
+	int crossings = 0;
+	double sum = 0;
+	for (size_t i = 1; i < tail.size(); i++) {
+		if (tail[i - 1] < 0.f && tail[i] >= 0.f)
+			crossings++;
+		s.peak = std::max(s.peak, (double) std::fabs(tail[i]));
+		sum += (double) tail[i] * tail[i];
+	}
+	s.rms = std::sqrt(sum / tail.size());
+	s.hz = crossings / (tail.size() / (double) rig.sr);
+	if (s.hz > 1) {
+		double h1 = tone(tail, s.hz, rig.sr);
+		s.h2 = tone(tail, 2 * s.hz, rig.sr) / h1;
+		s.h3 = tone(tail, 3 * s.hz, rig.sr) / h1;
+		s.h5 = tone(tail, 5 * s.hz, rig.sr) / h1;
+	}
+	return s;
+}
+
+static void testFeedbackCharacter() {
+	std::printf("master FDBK self-oscillation: pitch, level, harmonics (a scream = loud and rich in odd harmonics)\n");
+	struct C { const char* name; int mode; float hz, fdbk, res, drive; } cases[] = {
+		{"BP 500 Hz, FDBK 100%", wa::MODE_BP, 500.f, 1.f, 0.f, 0.f},
+		{"BP 500 Hz, FDBK 100%, RES 100%", wa::MODE_BP, 500.f, 1.f, 1.f, 0.f},
+		{"LP 2 kHz, FDBK 100%", wa::MODE_LP, 2000.f, 1.f, 0.f, 0.f},
+		{"BP 500 Hz, FDBK 100%, DRIVE 100%", wa::MODE_BP, 500.f, 1.f, 0.f, 1.f},
+		{"LP 8 kHz, FDBK 100%", wa::MODE_LP, 8000.f, 1.f, 0.f, 0.f},
+		{"BP 500 Hz, FDBK 85%", wa::MODE_BP, 500.f, 0.85f, 0.f, 0.f},
+	};
+	FdbkSound s[6];
+	int i = 0;
+	for (const C& c : cases) {
+		s[i] = fdbkSound(c.mode, c.hz, c.fdbk, c.res, c.drive);
+		std::printf("  %-34s %6.0f Hz  peak %.2f (%.1f V)  rms %.2f  2nd %4.1f%%  3rd %4.1f%%  5th %4.1f%%\n",
+			c.name, s[i].hz, s[i].peak, 5 * s[i].peak, s[i].rms, 100 * s[i].h2, 100 * s[i].h3, 100 * s[i].h5);
+		i++;
+	}
+	// Before this change: 5.7 V and DRIVE had no effect on the feedback.
+	CHECK(s[0].rms > 0.1 && s[0].peak < 0.65, "FDBK 100%% should self-oscillate at a moderate level: peak %f", s[0].peak);
+	CHECK(s[3].h3 > 2 * s[0].h3 && s[3].peak <= s[0].peak, "DRIVE should make the feedback grittier, not louder");
+	CHECK(s[4].rms < 0.01, "feedback whistles at an 8 kHz cutoff: rms %f", s[4].rms);
+	CHECK(s[5].rms < 0.01, "FDBK 85%% should ring, not self-oscillate: rms %f", s[5].rms);
+}
+
 int main() {
+	testFeedbackCharacter();
 	testArtifactVoct();
 	testDirectOutputs();
 	testResonanceLevel();

@@ -47,8 +47,8 @@ struct MarkerInput {
 	float lfo = 0.f;
 	/** LFO depth 0..1 in WAVE units (1 = swing across the whole sample). Smoothed in the engine. */
 	float lfoAmount = 0.f;
-	/** 0 = filter off, otherwise cutoff 20 Hz * 1000^cutoff (20 Hz..20 kHz) */
-	float cutoff = 0.f;
+	/** Filter cutoff 20 Hz * 1000^cutoff (0 = 20 Hz, 1 = 20 kHz, wide open). The filter is always on. */
+	float cutoff = 1.f;
 	/** FilterMode: LP, BP, HP, notch */
 	int filterMode = MODE_LP;
 	/** Resonance 0..1: Q 0.7 (wide) .. 20 (narrow, ringing) */
@@ -57,7 +57,7 @@ struct MarkerInput {
 	float drive = 0.f;
 	/** Linear gain applied to this marker's audio, 0..4 (400%) */
 	float gain = 1.f;
-	/** Semitones */
+	/** Semitones (-36..36 on the panel) */
 	float pitch = 0.f;
 	/** Fine tune in semitones (-1..1) */
 	float fine = 0.f;
@@ -115,6 +115,7 @@ public:
 			tables[i].smoothTime = -1.f; // recompute glide coefficients for the new rate
 		lfoAmountCoef = 1.f - std::exp(-1.f / (LFO_AMOUNT_SMOOTH_TIME * sr));
 		limiter.setSampleRate(sr);
+		master.setSampleRate(sr);
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			direct[m].limiter.setSampleRate(sr);
 			direct[m].running = false;
@@ -403,17 +404,15 @@ private:
 
 		// Marker filter: drive, then the multimode filter. The mode mix (dry/LP/BP/HP/notch) is
 		// interpolated between the two markers, so moving from an LP marker to an HP marker morphs
-		// the response. A marker with CUTOFF at "Off" contributes dry. Cutoff (log) and RES are
-		// interpolated between the markers whose filter is on.
-		bool onA = A.cutoff > 0.f;
-		bool onB = B.cutoff > 0.f;
+		// the response. The filter is always on: CUTOFF fully left is 20 Hz, fully right is wide
+		// open. Cutoff (log) and RES are interpolated between the two markers.
 		float mixA[NUM_MIX], mixB[NUM_MIX];
-		modeWeights(onA, A.filterMode, mixA);
-		modeWeights(onB, B.filterMode, mixB);
+		modeWeights(true, A.filterMode, mixA);
+		modeWeights(true, B.filterMode, mixB);
 		for (int k = 0; k < NUM_MIX; k++)
 			mixS[k] += (mixA[k] + (mixB[k] - mixA[k]) * w - mixS[k]) * smoothCoef;
-		float cutT = (onA && onB) ? A.cutoff + (B.cutoff - A.cutoff) * w : onA ? A.cutoff : onB ? B.cutoff : cutoffS;
-		float resT = (onA && onB) ? A.res + (B.res - A.res) * w : onA ? A.res : onB ? B.res : resS;
+		float cutT = std::min(std::max(A.cutoff + (B.cutoff - A.cutoff) * w, 0.f), 1.f);
+		float resT = A.res + (B.res - A.res) * w;
 		cutoffS += (cutT - cutoffS) * smoothCoef;
 		resS += (std::min(std::max(resT, 0.f), 1.f) - resS) * smoothCoef;
 		float driveT = A.drive + (B.drive - A.drive) * w;
@@ -447,10 +446,9 @@ private:
 				continue;
 			}
 			const MarkerInput& M = in.markers[m];
-			bool on = M.cutoff > 0.f;
 			float target[NUM_MIX];
-			modeWeights(on, M.filterMode, target);
-			float cutT = on ? std::min(std::max(M.cutoff, 0.f), 1.f) : d.cutS;
+			modeWeights(true, M.filterMode, target);
+			float cutT = std::min(std::max(M.cutoff, 0.f), 1.f);
 			float resT = std::min(std::max(M.res, 0.f), 1.f);
 			float driveT = std::min(std::max(M.drive, 0.f), 1.f);
 			float panT = std::min(std::max(M.pan, -1.f), 1.f);

@@ -11,7 +11,10 @@
 
 namespace wa {
 
-static const size_t MAX_FILE_BYTES = 2 * 1024 * 1024;
+/** Largest WAV accepted. Analysis time hardly depends on it (50-100 short slices are examined);
+loading needs up to ~8x the file size in RAM for a moment (decoding to float). */
+static const int MAX_FILE_MB = 10;
+static const size_t MAX_FILE_BYTES = (size_t) MAX_FILE_MB * 1024 * 1024;
 static const int FRAME_SIZE = 2048;
 /** Band-limited levels per octave of pitch. With one per octave, the notes just above each switch
 point lose up to half their top end (an audible brightness step between neighboring semitones);

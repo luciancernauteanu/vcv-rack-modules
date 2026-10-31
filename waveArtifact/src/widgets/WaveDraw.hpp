@@ -62,6 +62,17 @@ inline void drawSine(NVGcontext* vg, math::Rect r, float harmonic, NVGcolor colo
 	nvgStroke(vg);
 }
 
+/** Draws a short number centered on (cx, cy) by its visible height. NVG_ALIGN_MIDDLE centers the
+font's line box (ascender..descender), which leaves digits visibly off-center in a small circle;
+digits sit on the baseline and are ~0.70 em tall in Nunito, so put the baseline 0.35 em below. */
+inline void drawCenteredNumber(NVGcontext* vg, int font, float cx, float cy, float size, const std::string& text, NVGcolor color) {
+	nvgFontFaceId(vg, font);
+	nvgFontSize(vg, size);
+	nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
+	nvgFillColor(vg, color);
+	nvgText(vg, cx, cy + 0.35f * size, text.c_str(), NULL);
+}
+
 inline std::shared_ptr<window::Font> monoFont() {
 	return APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
 }
