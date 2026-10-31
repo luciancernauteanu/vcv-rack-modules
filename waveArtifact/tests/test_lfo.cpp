@@ -314,6 +314,78 @@ static void testCentered() {
 	CHECK(std::fabs(wa::lfoCentered(0.f, 1.f, 0.f) - 0.5f) < 1e-6f, "100%% sweeps the whole bar around the middle");
 }
 
+/** Cycles of a synced LFO over `seconds` (after 1 s settle) with a clock at `bpm`, `ppqn` pulses per beat. */
+static int cyclesPpqn(const char* div, float bpm, int clockPpqn, int setPpqn, float seconds) {
+	wa::ClockTracker clock;
+	wa::Lfo lfo;
+	double pulse = SR * 60.0 / bpm / clockPpqn;
+	float prev = 0.f;
+	int cycles = 0;
+	for (int n = 0; n < (int) ((1.f + seconds) * SR); n++) {
+		double ph = std::fmod((double) n, pulse);
+		float v = (ph < 0.001 * SR) ? 10.f : 0.f;
+		clock.process(v, true, SR, setPpqn);
+		float out = lfo.process(true, knobFor(div), false, false, clock, 1.f / SR);
+		if (n >= (int) SR && prev < 0.f && out >= 0.f)
+			cycles++;
+		prev = out;
+	}
+	return cycles;
+}
+
+static void testPpqn() {
+	std::printf("clock resolution: a 1/4 LFO runs at the beat rate whatever the clock's PPQN\n");
+	for (int ppqn : {1, 4, 24}) {
+		int c = cyclesPpqn("1/4", 120.f, ppqn, ppqn, 6.f);
+		std::printf("  120 BPM clock at %2d PPQN, set to %2d: 1/4 = %.3f Hz (expect 2)\n", ppqn, ppqn, c / 6.f);
+		CHECK(std::abs(c - 12) <= 1, "%d PPQN: %d cycles in 6 s, expected 12", ppqn, c);
+	}
+	// The mismatch the setting fixes: a 24 PPQN clock read as 1 PPQN runs 24x too fast.
+	int wrong = cyclesPpqn("1/4", 120.f, 24, 1, 2.f);
+	std::printf("  24 PPQN clock read as 1 PPQN: 1/4 = %.1f Hz (24x too fast)\n", wrong / 2.f);
+	CHECK(std::abs(wrong - 96) <= 2, "expected 24x (96 cycles in 2 s), got %d", wrong);
+}
+
+static void testReset() {
+	std::printf("RESET: the next clock pulse is the start of a bar; LFOs restart\n");
+	// A 1/1 LFO (one cycle per 4 beats), 120 BPM. The clock starts mid-bar, so without RESET the
+	// LFO's bar is offset; RESET sent with a pulse realigns it to that pulse.
+	for (int useReset = 0; useReset <= 1; useReset++) {
+		wa::ClockTracker clock;
+		wa::Lfo lfo;
+		int period = (int) (SR * 0.5f);
+		double phaseAtBar = -1;
+		for (int n = 0; n < (int) (6.f * SR); n++) {
+			bool pulse = n % period < (int) (0.001f * SR);
+			int beat = n / period;
+			// RESET with the pulse of beat 5 (the sequencer's bar starts there).
+			if (useReset && n == 5 * period) {
+				clock.reset();
+				lfo.reset();
+			}
+			clock.process(pulse ? 10.f : 0.f, true, SR);
+			lfo.process(true, knobFor("1/1"), false, false, clock, 1.f / SR);
+			// Just after the pulse of beat 9 (two bars after beat 5 if reset): where is the LFO?
+			if (n == 9 * period + 1)
+				phaseAtBar = lfo.getPhase();
+			(void) beat;
+		}
+		double err = std::min(phaseAtBar, 1.0 - phaseAtBar);
+		std::printf("  %s: LFO phase at the bar start %.3f cycles from 0\n", useReset ? "with RESET" : "no RESET  ", err);
+		if (useReset)
+			CHECK(err < 0.01, "RESET did not realign the LFO to the bar: %f", err);
+		else
+			CHECK(err > 0.2, "test cannot tell: without RESET the bar is already aligned (%f)", err);
+	}
+	// lfo.reset() puts the phase at 0 immediately.
+	wa::ClockTracker clock;
+	wa::Lfo lfo;
+	for (int n = 0; n < 12345; n++)
+		lfo.process(false, 0.6f, false, false, clock, 1.f / SR);
+	lfo.reset();
+	CHECK(lfo.getPhase() == 0.0, "reset does not restart the phase");
+}
+
 int main() {
 	testDivisionOptions();
 	testFree();
@@ -321,6 +393,8 @@ int main() {
 	testPhaseLock();
 	testContinuity();
 	testFold();
+	testPpqn();
+	testReset();
 	testCentered();
 	testShapes();
 	testShapesSync();

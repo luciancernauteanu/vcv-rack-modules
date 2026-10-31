@@ -70,18 +70,22 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_PITCH_FREE_PARAM, NUM_MARKERS),
 		/** Output gain 0..200% (100% = unity), before the output protection */
 		MASTER_GAIN_PARAM,
+		/** Index into wa::PPQN_VALUES: clock pulses per quarter note (right-click menu) */
+		CLOCK_PPQN_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
 		VOCT_INPUT,
 		POS_INPUT,
-		/** 1 pulse per quarter note, for LFO sync */
+		/** Clock for LFO sync; pulses per quarter note set by CLOCK_PPQN_PARAM */
 		CLOCK_INPUT,
 		MASTER_CUTOFF_INPUT,
 		MASTER_RES_INPUT,
 		MASTER_DRIVE_INPUT,
 		MASTER_SPREAD_INPUT,
 		MASTER_FDBK_INPUT,
+		/** Restarts the beat count and every LFO (next clock pulse = start of a bar) */
+		RESET_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -118,6 +122,7 @@ struct WaveArtifact : Module {
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
 	wa::Lfo posLfo;
+	dsp::SchmittTrigger resetTrigger;
 	int displayCounter = 0;
 
 	// UI thread only

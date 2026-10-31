@@ -82,37 +82,55 @@ inline float lfoCentered(float base, float amount, float lfo) {
 	return center + h * lfo;
 }
 
-/** Measures the clock period from rising edges (1 pulse = 1 quarter note). */
+/** Clock resolutions offered for the CLOCK input, in pulses per quarter note. */
+static const int NUM_PPQN = 7;
+static const int PPQN_VALUES[NUM_PPQN] = {1, 2, 4, 8, 12, 24, 48};
+
+/** Measures the tempo from clock pulses and marks the beats (quarter notes).
+`ppqn` pulses make one quarter note; the tempo is measured from every pulse (so it follows tempo
+changes within one pulse), and a beat edge is reported on every `ppqn`-th pulse. */
 class ClockTracker {
 public:
 	/** Call once per sample. */
-	void process(float voltage, bool connected, float sampleRate) {
+	void process(float voltage, bool connected, float sampleRate, int ppqn = 1) {
 		edge = false;
 		this->sampleRate = sampleRate;
+		ppqn = std::max(ppqn, 1);
 		if (!connected) {
 			running = false;
 			havePrev = false;
 			return;
 		}
 		// Schmitt trigger at 0.1 V / 1 V, per the VCV voltage standards.
+		bool pulse = false;
 		if (high) {
 			if (voltage <= 0.1f)
 				high = false;
 		}
 		else if (voltage >= 1.f) {
 			high = true;
-			edge = true;
+			pulse = true;
 		}
 		samplesSince++;
-		if (edge) {
+		if (pulse) {
 			if (havePrev)
-				periodSamples = samplesSince;
+				periodSamples = samplesSince * ppqn;
 			havePrev = true;
 			samplesSince = 0;
-			beatCount++;
+			pulseCount++;
+			if (pulseCount % ppqn == 0) {
+				edge = true;
+				beatCount++;
+			}
 		}
-		// A clock that stops for 4 periods counts as stopped; the LFO then free-runs at the last tempo.
-		running = periodSamples > 0 && samplesSince < 4 * periodSamples;
+		// A clock that stops for 4 pulses counts as stopped; the LFO then free-runs at the last tempo.
+		running = periodSamples > 0 && samplesSince * ppqn < 4 * periodSamples;
+	}
+
+	/** RESET: the next pulse is beat 0 (the start of a bar), as on the sequencer. The tempo is kept. */
+	void reset() {
+		pulseCount = -1;
+		beatCount = -1;
 	}
 
 	/** Seconds per quarter note: measured, or 120 BPM until two pulses have arrived. */
@@ -126,7 +144,7 @@ public:
 	bool isEdge() const {
 		return edge;
 	}
-	/** Index of the latest pulse (0 = first pulse since the cable was connected). */
+	/** Index of the latest beat (0 = first beat since the cable was connected or since RESET). */
 	long getBeatCount() const {
 		return beatCount;
 	}
@@ -140,6 +158,7 @@ private:
 	long samplesSince = 0;
 	long periodSamples = 0;
 	long beatCount = -1;
+	long pulseCount = -1;
 };
 
 enum LfoShape {
@@ -246,6 +265,16 @@ public:
 		}
 		lastOut = out;
 		return out;
+	}
+
+	/** RESET: restart the cycle at phase 0 (random shapes start a new segment from where they are). */
+	void reset() {
+		phase = 0.0;
+		correction = 0.0;
+		if (lfoShapeIsRandom(lastShape)) {
+			from = lastOut;
+			to = nextTarget(lastShape);
+		}
 	}
 
 	double getPhase() const {

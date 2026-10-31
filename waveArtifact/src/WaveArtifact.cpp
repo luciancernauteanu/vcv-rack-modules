@@ -130,7 +130,10 @@ WaveArtifact::WaveArtifact() {
 
 	configInput(VOCT_INPUT, "1V/octave pitch");
 	configInput(POS_INPUT, "Position CV");
-	configInput(CLOCK_INPUT, "Clock (1 pulse per quarter note) for LFO sync");
+	configInput(CLOCK_INPUT, "Clock for LFO sync (pulses per quarter note: right-click menu)");
+	configInput(RESET_INPUT, "Reset: restarts the LFOs, next clock pulse is the start of a bar");
+	configSwitch(CLOCK_PPQN_PARAM, 0.f, wa::NUM_PPQN - 1, 0.f, "Clock resolution", {"1 PPQN (quarter notes)", "2 PPQN (eighths)", "4 PPQN (sixteenths)", "8 PPQN", "12 PPQN", "24 PPQN (MIDI clock)", "48 PPQN"});
+	getParamQuantity(CLOCK_PPQN_PARAM)->randomizeEnabled = false;
 	configOutput(LEFT_OUTPUT, "Left");
 	configOutput(RIGHT_OUTPUT, "Right");
 	for (int i = 0; i < NUM_MARKERS; i++) {
@@ -173,7 +176,16 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	// the previous retired bank, so nothing is ever deleted on the audio thread.
 	bool swapWanted = pendingBank.load(std::memory_order_relaxed) && !retiredBank.load();
 
-	clock.process(inputs[CLOCK_INPUT].getVoltage(), inputs[CLOCK_INPUT].isConnected(), args.sampleRate);
+	// RESET first, so a reset and a clock pulse arriving together make that pulse beat 0.
+	bool reset = resetTrigger.process(inputs[RESET_INPUT].getVoltage(), 0.1f, 1.f);
+	if (reset) {
+		clock.reset();
+		for (int i = 0; i < NUM_MARKERS; i++)
+			lfos[i].reset();
+		posLfo.reset();
+	}
+	int ppqn = wa::PPQN_VALUES[clamp((int) std::round(params[CLOCK_PPQN_PARAM].getValue()), 0, wa::NUM_PPQN - 1)];
+	clock.process(inputs[CLOCK_INPUT].getVoltage(), inputs[CLOCK_INPUT].isConnected(), args.sampleRate, ppqn);
 
 	// Expanders: send them the clock and their chain position, take their summed modulation.
 	static const wa::ToMainMessage noMod;
@@ -185,6 +197,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		out->clock = clock;
 		out->index = 0;
 		out->linked = true;
+		out->reset = reset;
 		right->leftExpander.requestMessageFlip();
 	}
 	auto modOf = [&](int marker, int target) {
@@ -599,6 +612,7 @@ struct WaveArtifactWidget : ModuleWidget {
 		labels->add(Vec(FILTER_MODE_BUTTON.x, ROW2_LABEL_Y), "TYPE", 6.f);
 		labels->add(Vec(FINE_KNOB.x, ROW2_LABEL_Y), "FINE", 6.f);
 		labels->add(Vec(CLOCK_INPUT.x, ROW2_LABEL_Y + 0.5f), "CLOCK", 6.f);
+		labels->add(Vec(RESET_INPUT.x, ROW2_LABEL_Y + 0.5f), "RESET", 6.f);
 		// Controls band
 		labels->add(Vec(POSITION_KNOB.x, CONTROL_LABEL_Y), "POSITION");
 		labels->add(Vec(POS_ATTEN.x, POS_CV_LABEL_Y), "AMT", 6.f);
@@ -667,6 +681,7 @@ struct WaveArtifactWidget : ModuleWidget {
 
 		addParam(createParamCentered<ArrangeButton>(mm2px(ARRANGE_BUTTON), module, WaveArtifact::ARRANGE_PARAM));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(CLOCK_INPUT), module, WaveArtifact::CLOCK_INPUT));
+		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(RESET_INPUT), module, WaveArtifact::RESET_INPUT));
 
 		addParam(createParamCentered<RoundLargeBlackKnob>(mm2px(POSITION_KNOB), module, WaveArtifact::POSITION_PARAM));
 		addParam(createParamCentered<Trimpot>(mm2px(POS_ATTEN), module, WaveArtifact::POS_ATTEN_PARAM));
@@ -734,6 +749,15 @@ struct WaveArtifactWidget : ModuleWidget {
 			[=](size_t mode) {
 				m->tableCountMode = (wa::TableCountMode) mode;
 				m->startAnalysis();
+			}
+		));
+		menu->addChild(createIndexSubmenuItem("Clock resolution (CLOCK input)",
+			{"1 PPQN (quarter notes)", "2 PPQN (eighths)", "4 PPQN (sixteenths)", "8 PPQN", "12 PPQN", "24 PPQN (MIDI clock)", "48 PPQN"},
+			[=]() {
+				return (size_t) clamp((int) std::round(m->params[WaveArtifact::CLOCK_PPQN_PARAM].getValue()), 0, wa::NUM_PPQN - 1);
+			},
+			[=](size_t i) {
+				m->params[WaveArtifact::CLOCK_PPQN_PARAM].setValue((float) i);
 			}
 		));
 		menu->addChild(createIndexSubmenuItem("Artifact tone",

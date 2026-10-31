@@ -99,9 +99,15 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->clock = fromLeft.clock;
 		out->index = index;
 		out->linked = fromLeft.linked;
+		out->reset = fromLeft.reset;
 		right->leftExpander.requestMessageFlip();
 	}
 
+	// RESET from the main module restarts these LFOs too.
+	if (fromLeft.linked && fromLeft.reset) {
+		for (int k = 0; k < NUM_LFOS; k++)
+			lfos[k].reset();
+	}
 	// LFOs run whether or not the expander is linked; unlinked, sync falls back to 120 BPM.
 	const wa::ClockTracker& clock = fromLeft.linked ? fromLeft.clock : idleClock;
 	float lfoOut[NUM_LFOS];

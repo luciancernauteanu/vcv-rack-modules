@@ -45,6 +45,8 @@ struct ToExpanderMessage {
 	int index = 0;
 	/** The sender is connected to a main module (possibly through other expanders) */
 	bool linked = false;
+	/** RESET arrived this sample: restart the LFOs */
+	bool reset = false;
 };
 
 struct ToMainMessage {

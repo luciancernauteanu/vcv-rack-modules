@@ -56,7 +56,8 @@ static const Vec FINE_KNOB = Vec(124.2f, ROW2_Y);
 static const Vec PITCH_FREE_BUTTON = Vec(132.9f, ROW2_Y);
 static const Vec PAN_KNOB = Vec(146.f, ROW1_Y);
 static const Vec ARRANGE_BUTTON = Vec(165.44f, ROW1_Y);
-static const Vec CLOCK_INPUT = Vec(165.44f, ROW2_Y);
+static const Vec CLOCK_INPUT = Vec(159.5f, ROW2_Y);
+static const Vec RESET_INPUT = Vec(171.4f, ROW2_Y);
 
 /** Size of the click-to-cycle filter type buttons */
 static const Vec MODE_BUTTON_SIZE = Vec(10.f, 5.f);
