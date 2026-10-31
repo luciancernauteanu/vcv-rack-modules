@@ -6,32 +6,63 @@
 
 namespace wa {
 
+enum DivisionKind {
+	STRAIGHT,
+	DOTTED,
+	TRIPLET
+};
+
 struct SyncDivision {
 	const char* name;
 	/** Length of one LFO cycle in quarter notes */
 	float beats;
+	DivisionKind kind;
 };
 
 /** Note values from slowest to fastest; D = dotted (x1.5), T = triplet (x2/3). */
 static const SyncDivision SYNC_DIVISIONS[] = {
-	{"4/1D", 24.f}, {"4/1", 16.f}, {"2/1D", 12.f}, {"4/1T", 32.f / 3.f},
-	{"2/1", 8.f}, {"1/1D", 6.f}, {"2/1T", 16.f / 3.f}, {"1/1", 4.f},
-	{"1/2D", 3.f}, {"1/1T", 8.f / 3.f}, {"1/2", 2.f}, {"1/4D", 1.5f},
-	{"1/2T", 4.f / 3.f}, {"1/4", 1.f}, {"1/8D", 0.75f}, {"1/4T", 2.f / 3.f},
-	{"1/8", 0.5f}, {"1/16D", 0.375f}, {"1/8T", 1.f / 3.f}, {"1/16", 0.25f},
-	{"1/32D", 0.1875f}, {"1/16T", 1.f / 6.f}, {"1/32", 0.125f}, {"1/32T", 1.f / 12.f},
+	{"4/1D", 24.f, DOTTED}, {"4/1", 16.f, STRAIGHT}, {"2/1D", 12.f, DOTTED}, {"4/1T", 32.f / 3.f, TRIPLET},
+	{"2/1", 8.f, STRAIGHT}, {"1/1D", 6.f, DOTTED}, {"2/1T", 16.f / 3.f, TRIPLET}, {"1/1", 4.f, STRAIGHT},
+	{"1/2D", 3.f, DOTTED}, {"1/1T", 8.f / 3.f, TRIPLET}, {"1/2", 2.f, STRAIGHT}, {"1/4D", 1.5f, DOTTED},
+	{"1/2T", 4.f / 3.f, TRIPLET}, {"1/4", 1.f, STRAIGHT}, {"1/8D", 0.75f, DOTTED}, {"1/4T", 2.f / 3.f, TRIPLET},
+	{"1/8", 0.5f, STRAIGHT}, {"1/16D", 0.375f, DOTTED}, {"1/8T", 1.f / 3.f, TRIPLET}, {"1/16", 0.25f, STRAIGHT},
+	{"1/32D", 0.1875f, DOTTED}, {"1/16T", 1.f / 6.f, TRIPLET}, {"1/32", 0.125f, STRAIGHT}, {"1/32T", 1.f / 12.f, TRIPLET},
 };
 static const int NUM_SYNC_DIVISIONS = sizeof(SYNC_DIVISIONS) / sizeof(SYNC_DIVISIONS[0]);
+
+/** Which note values the sync rate knob steps through: straight always, plus the enabled kinds. */
+inline bool divisionEnabled(int i, bool triplets, bool dotted) {
+	switch (SYNC_DIVISIONS[i].kind) {
+		case DOTTED: return dotted;
+		case TRIPLET: return triplets;
+		default: return true;
+	}
+}
+
+inline int lfoDivisionCount(bool triplets, bool dotted) {
+	int n = 0;
+	for (int i = 0; i < NUM_SYNC_DIVISIONS; i++)
+		n += divisionEnabled(i, triplets, dotted);
+	return n;
+}
 
 /** Free rate knob 0..1 -> 0.01..20 Hz on a log scale. */
 inline float lfoFreeHz(float knob) {
 	return 0.01f * std::exp(knob * 7.600902460f); // ln(2000)
 }
 
-/** Sync rate knob 0..1 -> index into SYNC_DIVISIONS. */
-inline int lfoDivision(float knob) {
-	int i = (int) std::lround(knob * (NUM_SYNC_DIVISIONS - 1));
-	return std::min(std::max(i, 0), NUM_SYNC_DIVISIONS - 1);
+/** Sync rate knob 0..1 -> index into SYNC_DIVISIONS, stepping only through enabled note values
+(slow -> fast). Enabling triplets or dotted adds steps, so the same knob position can land on a
+neighboring value. */
+inline int lfoDivision(float knob, bool triplets, bool dotted) {
+	int n = lfoDivisionCount(triplets, dotted);
+	int k = (int) std::lround(knob * (n - 1));
+	k = std::min(std::max(k, 0), n - 1);
+	for (int i = 0; i < NUM_SYNC_DIVISIONS; i++) {
+		if (divisionEnabled(i, triplets, dotted) && k-- == 0)
+			return i;
+	}
+	return NUM_SYNC_DIVISIONS - 1;
 }
 
 /** Folds x into 0..1 by reflection, so modulation past an end bounces back instead of sticking. */
@@ -104,10 +135,10 @@ private:
 class Lfo {
 public:
 	/** Returns -1..1. */
-	float process(bool sync, float rateKnob, const ClockTracker& clock, float sampleTime) {
+	float process(bool sync, float rateKnob, bool triplets, bool dotted, const ClockTracker& clock, float sampleTime) {
 		double freq;
 		if (sync) {
-			double beats = SYNC_DIVISIONS[lfoDivision(rateKnob)].beats;
+			double beats = SYNC_DIVISIONS[lfoDivision(rateKnob, triplets, dotted)].beats;
 			freq = 1.0 / (beats * clock.beatPeriod());
 			// Lock the phase to the clock on every pulse: beat k of an n-beat cycle is phase k/n.
 			// The error is not snapped (that would jump WAVE) but pulled in over ~20 ms, so the
