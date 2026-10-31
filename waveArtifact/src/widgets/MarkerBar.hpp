@@ -8,7 +8,7 @@ Top: one slot per marker (1..5, side by side) showing the waveform it plays righ
 WAVE, its LFO and dot assignments. The slot lights up with the marker's share of the output.
 While a table is previewed, it covers the slots; click it to stop the preview.
 Bottom: the marker bar. Click empty bar to add a marker (up to 5; when all 5 are in use it moves
-the playhead instead), drag a bullet to move it (markers never cross), click a bullet or slot to
+the playhead instead), drag a bullet to move it (it can pass over other markers), click a bullet or slot to
 edit that marker, right-click a bullet or slot to delete it. Drag the white playhead to set POSITION.
 */
 struct MarkerBar : widget::Widget {
@@ -23,8 +23,6 @@ struct MarkerBar : widget::Widget {
 	bool loadOnRelease = false;
 	bool hoverStatus = false;
 	int dragMarker = -1;
-	float dragLo = 0.f;
-	float dragHi = 1.f;
 
 	// Geometry in px
 	float barX0() {
@@ -85,7 +83,7 @@ struct MarkerBar : widget::Widget {
 		menu->addChild(createMenuLabel("Marker " + std::to_string(i + 1)));
 		int t = m->markerTable(i);
 		if (t >= 0)
-			menu->addChild(createMenuLabel(string::f("Wavetable %d / %d", t + 1, m->activeBank.load()->numTables)));
+			menu->addChild(createMenuLabel(string::f("Artifact %d / %d", t + 1, m->activeBank.load()->numTables)));
 		menu->addChild(createMenuItem("Edit", "", [=]() {
 			m->selectedMarker = i;
 		}));
@@ -148,7 +146,6 @@ struct MarkerBar : widget::Widget {
 				module->selectedMarker = hit;
 				dragMode = DRAG_MARKER;
 				dragMarker = hit;
-				module->markerDragRange(hit, &dragLo, &dragHi);
 			}
 			e.consume(this);
 			return;
@@ -165,7 +162,6 @@ struct MarkerBar : widget::Widget {
 			if (added >= 0) {
 				dragMode = DRAG_MARKER;
 				dragMarker = added;
-				module->markerDragRange(added, &dragLo, &dragHi);
 			}
 		}
 		e.consume(this);
@@ -176,7 +172,7 @@ struct MarkerBar : widget::Widget {
 			return;
 		float p = xToPos(mouseLocal().x);
 		if (dragMode == DRAG_MARKER && dragMarker >= 0)
-			module->params[WaveArtifact::MARKER_POS_PARAM + dragMarker].setValue(clamp(p, dragLo, dragHi));
+			module->params[WaveArtifact::MARKER_POS_PARAM + dragMarker].setValue(p);
 		else if (dragMode == DRAG_PLAYHEAD)
 			module->params[WaveArtifact::POSITION_PARAM].setValue(p);
 	}

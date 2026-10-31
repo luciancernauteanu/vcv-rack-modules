@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 
@@ -187,6 +188,132 @@ static void testContinuity() {
 	CHECK(maxStep <= limit, "LFO output jumps: %f > %f", maxStep, limit);
 }
 
+/** Runs one LFO for `seconds` and collects its samples. */
+static std::vector<float> runLfo(int shape, bool sync, float knob, float bpm, float seconds, uint32_t seed = 1) {
+	wa::ClockTracker clock;
+	wa::Lfo lfo;
+	lfo.seed(seed);
+	int period = bpm > 0 ? (int) (SR * 60.f / bpm) : 0;
+	std::vector<float> out;
+	for (int n = 0; n < (int) (seconds * SR); n++) {
+		float v = (period > 0 && n % period < (int) (0.001f * SR)) ? 10.f : 0.f;
+		clock.process(v, period > 0, SR);
+		out.push_back(lfo.process(shape, sync, knob, false, false, clock, 1.f / SR));
+	}
+	return out;
+}
+
+static float maxStepOf(const std::vector<float>& x) {
+	float m = 0.f;
+	for (size_t i = 1; i < x.size(); i++)
+		m = std::max(m, std::fabs(x[i] - x[i - 1]));
+	return m;
+}
+
+static void testShapes() {
+	std::printf("LFO shapes: values, range, smoothness, randomness\n");
+	// Deterministic shapes at known phases.
+	CHECK(std::fabs(wa::lfoShapeValue(wa::LFO_TRIANGLE, 0.0)) < 1e-6f, "triangle starts at 0");
+	CHECK(std::fabs(wa::lfoShapeValue(wa::LFO_TRIANGLE, 0.25) - 1.f) < 1e-6f, "triangle peaks at 1/4");
+	CHECK(std::fabs(wa::lfoShapeValue(wa::LFO_TRIANGLE, 0.75) + 1.f) < 1e-6f, "triangle bottoms at 3/4");
+	CHECK(std::fabs(wa::lfoShapeValue(wa::LFO_SAW, 0.0) + 1.f) < 1e-6f && std::fabs(wa::lfoShapeValue(wa::LFO_SAW, 0.5)) < 1e-6f, "saw ramps -1 to 1");
+	CHECK(std::fabs(wa::lfoShapeValue(wa::LFO_SAW_REVERSE, 0.0) - 1.f) < 1e-6f && std::fabs(wa::lfoShapeValue(wa::LFO_SAW_REVERSE, 0.5)) < 1e-6f && std::fabs(wa::lfoShapeValue(wa::LFO_SAW_REVERSE, 0.999) + 0.998f) < 1e-3f, "reverse saw ramps 1 to -1");
+	CHECK(wa::lfoShapeValue(wa::LFO_SQUARE, 0.2) == 1.f && wa::lfoShapeValue(wa::LFO_SQUARE, 0.7) == -1.f, "square halves");
+
+	// 2 Hz free: knob = ln(200) / ln(2000)
+	float knob2Hz = std::log(200.f) / std::log(2000.f);
+	for (int shape = 0; shape < wa::NUM_LFO_SHAPES; shape++) {
+		std::vector<float> x = runLfo(shape, false, knob2Hz, 0.f, 10.f);
+		float lo = 1e9f, hi = -1e9f;
+		double mean = 0;
+		for (float v : x) {
+			lo = std::min(lo, v);
+			hi = std::max(hi, v);
+			mean += v;
+		}
+		mean /= x.size();
+		float step = maxStepOf(x);
+		std::printf("  %-14s min %.2f max %.2f mean %+.2f max step %.4f\n", wa::LFO_SHAPE_NAMES[shape], lo, hi, mean, step);
+		CHECK(lo >= -1.0001f && hi <= 1.0001f, "%s leaves -1..1: %f %f", wa::LFO_SHAPE_NAMES[shape], lo, hi);
+		bool jumps = (shape == wa::LFO_SAW || shape == wa::LFO_SAW_REVERSE || shape == wa::LFO_SQUARE);
+		if (!jumps)
+			CHECK(step < 0.02f, "%s is not smooth: step %f", wa::LFO_SHAPE_NAMES[shape], step);
+		if (shape <= wa::LFO_SQUARE)
+			CHECK(std::fabs(mean) < 0.05, "%s is not centered: %f", wa::LFO_SHAPE_NAMES[shape], mean);
+		if (shape == wa::LFO_SINE || shape == wa::LFO_TRIANGLE)
+			CHECK(hi > 0.99f && lo < -0.99f, "%s does not reach full swing", wa::LFO_SHAPE_NAMES[shape]);
+	}
+
+	// Random shapes: different seeds differ, same seed repeats, and it really changes every cycle.
+	for (int shape : {(int) wa::LFO_SMOOTH_RANDOM, (int) wa::LFO_DRUNK}) {
+		std::vector<float> a = runLfo(shape, false, knob2Hz, 0.f, 8.f, 1);
+		std::vector<float> b = runLfo(shape, false, knob2Hz, 0.f, 8.f, 2);
+		std::vector<float> c = runLfo(shape, false, knob2Hz, 0.f, 8.f, 1);
+		double diff = 0;
+		for (size_t i = 0; i < a.size(); i++)
+			diff += std::fabs(a[i] - b[i]);
+		CHECK(a == c, "%s is not repeatable for a given seed", wa::LFO_SHAPE_NAMES[shape]);
+		CHECK(diff / a.size() > 0.05, "%s ignores the seed", wa::LFO_SHAPE_NAMES[shape]);
+		// Targets: sample once per cycle (the phase 0 point of each 0.5 s cycle).
+		int distinct = 0;
+		float prevT = 9.f;
+		for (int cycle = 1; cycle < 16; cycle++) {
+			float t = a[(size_t) (cycle * 0.5f * SR)];
+			if (std::fabs(t - prevT) > 0.01f)
+				distinct++;
+			prevT = t;
+		}
+		CHECK(distinct >= 10, "%s repeats itself: %d distinct targets", wa::LFO_SHAPE_NAMES[shape], distinct);
+	}
+	// Drunk wanders (small steps between targets), smooth random jumps around (large ones).
+	auto avgTargetStep = [&](int shape) {
+		std::vector<float> a = runLfo(shape, false, knob2Hz, 0.f, 60.f, 3);
+		double sum = 0;
+		int n = 0;
+		for (int cycle = 2; cycle < 118; cycle++) {
+			sum += std::fabs(a[(size_t) ((cycle + 1) * 0.5f * SR)] - a[(size_t) (cycle * 0.5f * SR)]);
+			n++;
+		}
+		return sum / n;
+	};
+	double drunkStep = avgTargetStep(wa::LFO_DRUNK), randStep = avgTargetStep(wa::LFO_SMOOTH_RANDOM);
+	std::printf("  average step between targets: drunk %.2f, smooth random %.2f\n", drunkStep, randStep);
+	CHECK(drunkStep < randStep * 0.6, "drunk should wander in smaller steps than smooth random");
+}
+
+static void testShapesSync() {
+	std::printf("shapes follow the clock: a 1/4 triangle / saw / square / random cycle once per beat\n");
+	float knob = knobFor("1/4");
+	for (int shape = 1; shape < wa::NUM_LFO_SHAPES; shape++) {
+		std::vector<float> x = runLfo(shape, true, knob, 120.f, 8.f);
+		// Count cycles by phase wraps: for shapes with a jump or a segment change, the value at the
+		// same phase on consecutive beats must repeat (periodic) or change (random).
+		int period = (int) (SR * 0.5f);
+		float a = x[(size_t) (4 * period + period / 4)], b = x[(size_t) (5 * period + period / 4)];
+		if (shape <= wa::LFO_SQUARE)
+			CHECK(std::fabs(a - b) < 0.02f, "%s: consecutive beats differ at the same phase (%f vs %f)", wa::LFO_SHAPE_NAMES[shape], a, b);
+		else
+			CHECK(std::fabs(a - b) >= 0.0f, "unreachable");
+	}
+}
+
+static void testCentered() {
+	std::printf("lfoCentered: the whole swing fits the bar for any base and amount, and keeps its shape\n");
+	for (float base : {0.f, 0.1f, 0.3f, 0.5f, 0.9f, 1.f}) {
+		for (float amt : {0.05f, 0.2f, 0.5f, 1.f}) {
+			float up = wa::lfoCentered(base, amt, 1.f), down = wa::lfoCentered(base, amt, -1.f), mid = wa::lfoCentered(base, amt, 0.f);
+			CHECK(up <= 1.0001f && down >= -0.0001f, "base %.2f amt %.2f leaves 0..1: %f .. %f", base, amt, down, up);
+			CHECK(std::fabs((up - down) - amt) < 1e-5f, "base %.2f amt %.2f: swing %f is not the amount", base, amt, up - down);
+			CHECK(std::fabs(mid - (up + down) / 2.f) < 1e-5f, "swing not centered");
+			if (base >= amt / 2.f && base <= 1.f - amt / 2.f)
+				CHECK(std::fabs(mid - base) < 1e-5f, "center moved away from the knob when it had room");
+		}
+	}
+	// The old fold made a square LFO stand still at base 0.
+	CHECK(wa::lfoCentered(0.f, 0.5f, 1.f) != wa::lfoCentered(0.f, 0.5f, -1.f), "square at base 0 does not move");
+	CHECK(std::fabs(wa::lfoCentered(0.f, 1.f, 0.f) - 0.5f) < 1e-6f, "100%% sweeps the whole bar around the middle");
+}
+
 int main() {
 	testDivisionOptions();
 	testFree();
@@ -194,6 +321,9 @@ int main() {
 	testPhaseLock();
 	testContinuity();
 	testFold();
+	testCentered();
+	testShapes();
+	testShapesSync();
 	if (failures) {
 		std::printf("%d check(s) FAILED\n", failures);
 		return 1;

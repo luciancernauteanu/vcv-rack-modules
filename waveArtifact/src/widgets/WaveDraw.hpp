@@ -15,13 +15,21 @@ inline void drawTable(NVGcontext* vg, const wa::WavetableBank& bank, float index
 
 	int points = clamp((int) r.size.x, 32, 256);
 	float midY = r.pos.y + r.size.y / 2.f;
-	float amp = r.size.y * 0.45f;
-	nvgBeginPath(vg);
+	// Artifacts are loudness-normalized, so peaks range from ~0.6 to 1.6: scale each drawing to fit
+	// (this shows the shape; the level is the same for all).
+	float vals[257];
+	float peak = 1e-6f;
 	for (int k = 0; k <= points; k++) {
 		int i = std::min(k * wa::FRAME_SIZE / points, wa::FRAME_SIZE - 1);
-		float v = f0[i] + (f1[i] - f0[i]) * tf;
+		vals[k] = f0[i] + (f1[i] - f0[i]) * tf;
+		peak = std::max(peak, std::fabs(vals[k]));
+	}
+	float amp = r.size.y * 0.45f / peak;
+	nvgBeginPath(vg);
+	for (int k = 0; k <= points; k++) {
+		float v = vals[k];
 		float x = r.pos.x + r.size.x * k / points;
-		float y = midY - clamp(v, -1.f, 1.f) * amp;
+		float y = midY - v * amp;
 		if (k == 0)
 			nvgMoveTo(vg, x, y);
 		else

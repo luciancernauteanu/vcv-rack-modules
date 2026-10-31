@@ -109,9 +109,16 @@ static void testSineToSaw() {
 		pitched += bank->pitched[t];
 		const float* f = bank->frame(t, 0);
 		float peak = 0.f;
-		for (int i = 0; i < wa::FRAME_SIZE; i++)
+		double sumSq = 0.0;
+		for (int i = 0; i < wa::FRAME_SIZE; i++) {
 			peak = std::max(peak, std::fabs(f[i]));
-		CHECK(std::fabs(peak - 1.f) < 1e-3f, "table %d peak %f, expected 1", t, peak);
+			sumSq += (double) f[i] * f[i];
+		}
+		float rms = (float) std::sqrt(sumSq / wa::FRAME_SIZE);
+		// Loudness-normalized: at the target RMS, or stopped by the peak cap.
+		bool atRms = std::fabs(rms - wa::ARTIFACT_RMS) < 1e-3f;
+		bool atCap = std::fabs(peak - wa::ARTIFACT_PEAK_CAP) < 1e-3f;
+		CHECK((atRms && peak <= wa::ARTIFACT_PEAK_CAP + 1e-3f) || atCap, "table %d: rms %f, peak %f", t, rms, peak);
 		// Periodic: the wrap step must be about as small as an in-frame step.
 		float wrapStep = std::fabs(f[0] - f[wa::FRAME_SIZE - 1]);
 		CHECK(wrapStep < 0.05f, "table %d wrap discontinuity %f", t, wrapStep);
@@ -206,11 +213,123 @@ static void testRejects() {
 	CHECK(bank && allFinite(*bank), "silent file must give a finite (silent) bank");
 }
 
+/** Energy of table `t` (level 0) in harmonics [lo, hi], by direct DFT. */
+static double bandEnergy(const wa::WavetableBank& b, int t, int lo, int hi) {
+	const float* f = b.frame(t, 0);
+	double e = 0;
+	for (int k = lo; k <= hi; k++) {
+		double re = 0, im = 0;
+		for (int i = 0; i < wa::FRAME_SIZE; i++) {
+			double a = 2 * PI * k * i / wa::FRAME_SIZE;
+			re += f[i] * std::cos(a);
+			im -= f[i] * std::sin(a);
+		}
+		e += re * re + im * im;
+	}
+	return e;
+}
+
+static void testTone() {
+	std::printf("tone: Smooth and Soft take the edge off the top harmonics, Natural does not\n");
+	// A bright, harsh source: a 110 Hz saw, rich in harmonics.
+	std::vector<float> src;
+	double sr = 44100;
+	for (int i = 0; i < (int) (2 * sr); i++) {
+		double t = i / sr, saw = 0;
+		for (int k = 1; k <= 120; k++)
+			saw += std::sin(2 * PI * k * 110.0 * t) / k;
+		src.push_back((float) (0.3 * saw));
+	}
+	std::vector<uint8_t> wav = makeWav(src, 1, 44100);
+	std::string err;
+	wa::TableTone tones[3] = {wa::TONE_NATURAL, wa::TONE_SMOOTH, wa::TONE_SOFT};
+	double ratio[3];
+	for (int i = 0; i < 3; i++) {
+		std::unique_ptr<wa::WavetableBank> b(wa::analyzeWav(wav.data(), wav.size(), wa::TABLES_50, &err, tones[i]));
+		CHECK(b != nullptr, "analysis failed: %s", err.c_str());
+		if (!b)
+			return;
+		double low = bandEnergy(*b, 25, 1, 12), high = bandEnergy(*b, 25, 60, 100);
+		ratio[i] = high / low;
+		CHECK(allFinite(*b), "tone %d: non-finite data", i);
+		std::printf("  tone %d: energy above harmonic 60 is %.1f dB relative to the lowest 12\n", i, 10 * std::log10(ratio[i]));
+	}
+	// Natural keeps the source's top end, Smooth takes at least 6 dB off it, Soft much more.
+	CHECK(ratio[1] < ratio[0] * 0.25, "Smooth does not soften: %g vs %g", ratio[1], ratio[0]);
+	CHECK(ratio[2] < ratio[1] * 0.1, "Soft is not softer than Smooth: %g vs %g", ratio[2], ratio[1]);
+}
+
+static double tableRmsDb(const wa::WavetableBank& b, int t) {
+	const float* f = b.frame(t, 0);
+	double s = 0;
+	for (int i = 0; i < wa::FRAME_SIZE; i++)
+		s += (double) f[i] * f[i];
+	return 10 * std::log10(s / wa::FRAME_SIZE);
+}
+
+static void testLoudness() {
+	std::printf("loudness: artifacts of very different shapes come out about equally loud\n");
+	// 1 s each of sine, saw, square and a narrow (10%) pulse at 110 Hz, all band-limited.
+	std::vector<float> src;
+	const double sr = 44100, f = 110;
+	for (int seg = 0; seg < 4; seg++) {
+		for (int i = 0; i < (int) sr; i++) {
+			double t = i / sr, s = 0;
+			for (int k = 1; k * f < 18000; k++) {
+				double a = 0;
+				if (seg == 0)
+					a = (k == 1) ? 1.0 : 0.0;
+				else if (seg == 1)
+					a = 1.0 / k;
+				else if (seg == 2)
+					a = (k % 2) ? 1.0 / k : 0.0;
+				else
+					a = std::sin(PI * k * 0.1) / k; // pulse, 10% duty
+				s += a * std::sin(2 * PI * k * f * t);
+			}
+			src.push_back((float) s);
+		}
+	}
+	float peak = 0;
+	for (float v : src)
+		peak = std::max(peak, std::fabs(v));
+	for (float& v : src)
+		v *= 0.8f / peak;
+	std::vector<uint8_t> wav = makeWav(src, 1, 44100);
+	std::string err;
+	std::unique_ptr<wa::WavetableBank> b(wa::analyzeWav(wav.data(), wav.size(), wa::TABLES_AUTO, &err, wa::TONE_NATURAL));
+	CHECK(b != nullptr, "analysis failed: %s", err.c_str());
+	if (!b)
+		return;
+	const char* names[4] = {"sine", "saw", "square", "10% pulse"};
+	double lo = 1e9, hi = -1e9;
+	float worstPeak = 0;
+	for (int seg = 0; seg < 4; seg++) {
+		// A table well inside the segment
+		int t = (int) ((seg + 0.5) * b->numTables / 4);
+		double db = tableRmsDb(*b, t);
+		float pk = 0;
+		for (int i = 0; i < wa::FRAME_SIZE; i++)
+			pk = std::max(pk, std::fabs(b->frame(t, 0)[i]));
+		worstPeak = std::max(worstPeak, pk);
+		std::printf("  %-10s RMS %+.1f dB, peak %.2f\n", names[seg], db, pk);
+		lo = std::min(lo, db);
+		hi = std::max(hi, db);
+	}
+	std::printf("  loudness spread %.1f dB\n", hi - lo);
+	// Shapes up to a crest factor of 2.9 (ARTIFACT_PEAK_CAP / ARTIFACT_RMS) come out equal; a 10% pulse
+	// is spikier and stops at the peak cap, a few dB under (before: 13.5 dB spread).
+	CHECK(hi - lo < 6.0, "artifacts differ in loudness by %.1f dB", hi - lo);
+	CHECK(worstPeak <= wa::ARTIFACT_PEAK_CAP + 1e-3f, "peak %f above the cap", worstPeak);
+}
+
 int main() {
 	testSineToSaw();
 	testModes();
 	testStereoNoise();
 	testRejects();
+	testTone();
+	testLoudness();
 	if (failures) {
 		std::printf("%d check(s) FAILED\n", failures);
 		return 1;

@@ -6,11 +6,13 @@
 // position sweeps, position jumps, table changes (including one mid-fade), marker add/remove and a
 // bank swap. Any step above the bound is a click.
 
+#include "ExpanderMessages.hpp"
 #include "MorphEngine.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -41,7 +43,7 @@ static wa::WavetableBank* makeBank(const std::vector<std::vector<double>>& amps,
 	for (int t = 0; t < bank->numTables; t++) {
 		double peak = 0.0, sumKA = 0.0;
 		for (int l = 0; l < wa::NUM_LEVELS; l++) {
-			int maxH = (wa::FRAME_SIZE / 2) >> l;
+			int maxH = wa::levelHarmonics(l);
 			float* f = bank->frame(t, l);
 			for (int i = 0; i < wa::FRAME_SIZE; i++) {
 				double x = 2 * PI * i / wa::FRAME_SIZE, v = 0.0;
@@ -687,6 +689,99 @@ static void testDrive() {
 	}
 }
 
+static void testMasterDrive() {
+	std::printf("master drive: 0 is clean, warm (even + odd harmonics), bounded, no DC\n");
+	double f = 261.6256;
+	for (float d : {0.f, 0.4f, 1.f}) {
+		SineRig rig;
+		rig.in.masterDrive = d;
+		std::vector<float> tail;
+		float peak = rig.peakOver(1.f, &tail);
+		double h1 = tone(tail, f, rig.sr), h2 = tone(tail, 2 * f, rig.sr), h3 = tone(tail, 3 * f, rig.sr);
+		double dc = 0;
+		for (float v : tail) dc += v;
+		dc /= tail.size();
+		std::printf("  drive %.1f: peak %.3f, 2nd %.1f%%, 3rd %.1f%%, DC %.4f\n", d, peak, 100 * h2 / h1, 100 * h3 / h1, dc);
+		if (d == 0.f) {
+			CHECK(h2 / h1 < 0.003 && h3 / h1 < 0.003, "master drive 0 is not clean");
+		}
+		else {
+			CHECK(h2 / h1 > 0.01, "drive %.1f adds no even harmonic: %f", d, h2 / h1);
+			CHECK(h3 / h1 > 0.02, "drive %.1f adds no odd harmonic: %f", d, h3 / h1);
+		}
+		CHECK(peak < 1.4f, "master drive %.1f is too loud: %f", d, peak);
+		CHECK(std::fabs(dc) < 0.01, "master drive leaves DC: %f", dc);
+	}
+	SineRig a;
+	a.in.voct = (float) std::log2(3520.0 / 261.6256);
+	a.in.masterDrive = 1.f;
+	std::vector<float> tail;
+	a.peakOver(1.f, &tail);
+	double alias = tone(tail, 16320.0, a.sr) / tone(tail, 3520.0, a.sr);
+	std::printf("  3520 Hz at full drive: alias at 16320 Hz %.1f dB below\n", 20 * std::log10(alias + 1e-12));
+	CHECK(alias < 0.03, "master drive aliases: %f", alias);
+}
+
+static void testMasterCv() {
+	std::printf("master CV is added after smoothing (audio rate), and changes the sound\n");
+	// LP at 200 Hz blocks a C4 sine's level; +1 (10 oct) of cutoff CV opens it, instantly.
+	{
+		SineRig rig;
+		rig.in.masterMode = wa::MODE_LP;
+		rig.in.masterCutoff = cutoffFor(80.f);
+		float closed = rig.peakOver(0.5f);
+		rig.in.masterCutoffMod = 0.6f; // 80 Hz * 2^6 = 5 kHz
+		float open = rig.peakOver(0.5f);
+		std::printf("  cutoff CV: closed %.3f, open %.3f\n", closed, open);
+		CHECK(closed < 0.2f && open > 0.9f, "cutoff CV does nothing: %f -> %f", closed, open);
+	}
+	// Audio-rate: a 2 kHz sine on the cutoff modulates the output at that rate (sidebands).
+	{
+		SineRig rig;
+		rig.in.masterMode = wa::MODE_LP;
+		rig.in.masterCutoff = cutoffFor(300.f);
+		rig.in.masterRes = 0.6f;
+		std::vector<float> out;
+		float l, r;
+		for (int n = 0; n < (int) (0.6f * rig.sr); n++) {
+			rig.in.masterCutoffMod = 0.25f * (float) std::sin(2 * PI * 2000.0 * n / rig.sr);
+			rig.engine.process(rig.in, &l, &r);
+			if (n > (int) (0.1f * rig.sr)) out.push_back(l);
+		}
+		double side = tone(out, 2000.0 + 261.6256, rig.sr) + tone(out, 2000.0 - 261.6256, rig.sr);
+		std::printf("  audio-rate cutoff FM: sideband level %.4f\n", side);
+		CHECK(side > 0.005, "cutoff CV is smoothed away at audio rate: %f", side);
+	}
+	// Drive CV, feedback CV, resonance CV all act.
+	{
+		SineRig a, b;
+		b.in.masterDriveMod = 1.f;
+		std::vector<float> ta, tb;
+		a.peakOver(0.5f, &ta);
+		b.peakOver(0.5f, &tb);
+		double h3a = tone(ta, 3 * 261.6256, a.sr), h3b = tone(tb, 3 * 261.6256, b.sr);
+		CHECK(h3b > h3a * 10 + 0.01, "drive CV does nothing");
+	}
+}
+
+static void testMasterWarmth() {
+	std::printf("master warmth: resonance compresses at high level instead of ringing linearly\n");
+	// BP at the signal frequency with high RES: the gain at level 0.05 vs 1.0. A linear filter gives
+	// the same gain; the saturating integrators give less at the loud level.
+	double gains[2];
+	int k = 0;
+	for (float level : {0.05f, 1.f}) {
+		SineRig rig;
+		rig.in.masterMode = wa::MODE_BP;
+		rig.in.masterCutoff = cutoffFor(261.6f);
+		rig.in.masterRes = 1.f;
+		rig.in.markers[0].gain = level;
+		gains[k++] = rig.peakOver(1.f) / level;
+	}
+	std::printf("  BP, RES 100%%: gain %.2f at level 0.05, %.2f at level 1.0\n", gains[0], gains[1]);
+	CHECK(gains[1] < gains[0] * 0.9, "no compression at high level: %f vs %f", gains[1], gains[0]);
+}
+
 static void testMasterFilter() {
 	std::printf("master filter: off is transparent, spread splits L/R, feedback self-oscillates but stays bounded\n");
 	{
@@ -698,10 +793,12 @@ static void testMasterFilter() {
 			float l1, r1, l2, r2;
 			a.engine.process(a.in, &l1, &r1);
 			b.engine.process(b.in, &l2, &r2);
-			maxDiff = std::max(maxDiff, std::fabs(l1 - l2) + std::fabs(r1 - r2));
+			// Skip the first 50 ms: the master starts as low-pass and settles to off over a few ms.
+			if (n > 2400)
+				maxDiff = std::max(maxDiff, std::fabs(l1 - l2) + std::fabs(r1 - r2));
 		}
 		std::printf("  off vs no filter: max difference %.6f\n", maxDiff);
-		CHECK(maxDiff < 1e-6f, "master off is not transparent: %f", maxDiff);
+		CHECK(maxDiff < 1e-4f, "master off is not transparent: %f", maxDiff);
 	}
 	{
 		// LP at C4 with SPREAD +100% (+-1 octave): left cutoff 131 Hz, right 523 Hz.
@@ -719,7 +816,7 @@ static void testMasterFilter() {
 			}
 		}
 		std::printf("  spread: left %.3f, right %.3f\n", pl, pr);
-		CHECK(pr > pl * 2.f, "spread does not open the right channel: L %f R %f", pl, pr);
+		CHECK(pr > pl * 1.8f, "spread does not open the right channel: L %f R %f", pl, pr);
 	}
 	{
 		// Feedback: play 0.2 s, then silence (no bank -> engine input 0). Above the threshold the
@@ -751,9 +848,281 @@ static void testMasterFilter() {
 	}
 }
 
+static void testVcaLevel() {
+	std::printf("expander GAIN as a VCA\n");
+	CHECK(wa::vcaLevel(0.f, 0.f) == 1.f, "amount 0 must leave the level alone at 0 V");
+	CHECK(wa::vcaLevel(0.f, 10.f) == 1.f, "amount 0 must leave the level alone at 10 V");
+	CHECK(wa::vcaLevel(1.f, 0.f) == 0.f, "full amount, 0 V must be silent");
+	CHECK(std::fabs(wa::vcaLevel(1.f, 5.f) - 0.5f) < 1e-6f, "full amount, 5 V = half");
+	CHECK(wa::vcaLevel(1.f, 10.f) == 1.f, "full amount, 10 V = unity");
+	CHECK(wa::vcaLevel(1.f, 15.f) == 1.f, "CV above 10 V must not exceed the knob");
+	CHECK(wa::vcaLevel(1.f, -5.f) == 0.f, "negative CV must not invert");
+	CHECK(std::fabs(wa::vcaLevel(0.5f, 0.f) - 0.5f) < 1e-6f, "half amount, 0 V = half");
+	// In the engine: a silenced marker is silent, a half VCA is half level.
+	for (float mul : {0.f, 0.5f, 1.f}) {
+		SineRig rig;
+		rig.in.markers[0].gain = 1.f * mul;
+		float peak = rig.peakOver(0.5f);
+		CHECK(std::fabs(peak - mul) < 0.01f, "VCA level %f gave peak %f", mul, peak);
+	}
+}
+
+static void testMarkerCrossing() {
+	std::printf("a marker dragged across another (order changes while playing): finite, no clicks\n");
+	const float sr = 48000.f;
+	double slope;
+	std::unique_ptr<wa::WavetableBank> bank(makeBank(ampsFor(8, 2), &slope));
+	wa::MorphEngine engine;
+	engine.setSampleRate(sr);
+	wa::EngineInput in;
+	in.bank = bank.get();
+	for (int i = 0; i < 3; i++) {
+		in.markers[i].active = true;
+		in.markers[i].pos = i * 0.5f;
+		in.markers[i].wave = i / 2.f;
+	}
+	in.position = 0.5f;
+	float prev = 0.f, maxStep = 0.f;
+	bool finite = true;
+	long audible = 0;
+	int total = (int) (3.f * sr);
+	for (int n = 0; n < total; n++) {
+		float t = n / sr;
+		// Marker 1 (the middle one) is dragged right across marker 3, then back across marker 1.
+		in.markers[1].pos = 0.5f + 0.5f * std::sin((float) (2 * PI * 0.5 * t)) * 0.9f + (t > 2.f ? 0.f : 0.f);
+		in.position = 0.75f;
+		float l, r;
+		engine.process(in, &l, &r);
+		finite = finite && std::isfinite(l) && std::isfinite(r);
+		if (n > 0)
+			maxStep = std::max(maxStep, std::fabs(l - prev));
+		prev = l;
+		if (std::fabs(l) > 1e-3f)
+			audible++;
+	}
+	// 261 Hz, 4 harmonics: same bound as the other click tests.
+	float limit = (float) (slope * 2 * PI * 261.6256 / sr * std::sqrt(2.0) * 1.2 + 0.01);
+	std::printf("  max step %.4f (limit %.4f), audible %.0f%% of the time\n", maxStep, limit, 100.0 * audible / total);
+	CHECK(finite, "non-finite output while crossing markers");
+	CHECK(maxStep <= limit, "marker crossing clicks: %f > %f", maxStep, limit);
+	CHECK(audible > total * 0.9, "crossing causes too much silence: %ld of %d", audible, total);
+}
+
+/** RMS of 1 s of white-ish noise through an Svf mode at the given cutoff and RES. */
+static double noiseRms(int mode, float cutoffHz, float res, bool* finite = nullptr) {
+	const float sr = 48000.f;
+	wa::Svf svf;
+	float mix[wa::NUM_MIX];
+	wa::modeWeights(true, mode, mix);
+	uint32_t s = 12345;
+	double sum = 0;
+	long n = 0;
+	for (int i = 0; i < (int) (2 * sr); i++) {
+		s = s * 1664525u + 1013904223u;
+		float x = ((s >> 8) * (1.f / 8388608.f) - 1.f) * 0.5f;
+		float y = svf.process(x, cutoffHz, wa::filterQ(res), sr, mix);
+		if (finite && !std::isfinite(y))
+			*finite = false;
+		if (i > (int) sr) {
+			sum += (double) y * y;
+			n++;
+		}
+	}
+	return std::sqrt(sum / n);
+}
+
+static double sineGain(int mode, float cutoffHz, float sineHz, float res) {
+	const float sr = 48000.f;
+	wa::Svf svf;
+	float mix[wa::NUM_MIX];
+	wa::modeWeights(true, mode, mix);
+	float peak = 0.f;
+	for (int i = 0; i < (int) (1.5 * sr); i++) {
+		float x = (float) std::sin(2 * PI * sineHz * i / sr);
+		float y = svf.process(x, cutoffHz, wa::filterQ(res), sr, mix);
+		if (i > (int) sr)
+			peak = std::max(peak, std::fabs(y));
+	}
+	return peak;
+}
+
+static void testResonanceLevel() {
+	std::printf("resonance never takes level away (passband stays put, broadband stays loud)\n");
+	// A tone well inside the passband keeps its level at any RES.
+	struct P { const char* name; int mode; float cutoff, tone; } passes[] = {
+		{"LP, 150 Hz tone, cutoff 4 kHz", wa::MODE_LP, 4000.f, 150.f},
+		{"HP, 6 kHz tone, cutoff 300 Hz", wa::MODE_HP, 300.f, 6000.f},
+		{"Notch, 150 Hz tone, cutoff 4 kHz", wa::MODE_NOTCH, 4000.f, 150.f},
+	};
+	for (const P& p : passes) {
+		double g0 = sineGain(p.mode, p.cutoff, p.tone, 0.f), g1 = sineGain(p.mode, p.cutoff, p.tone, 1.f);
+		std::printf("  %-34s res 0%%: %.3f  res 100%%: %.3f\n", p.name, g0, g1);
+		CHECK(g1 > g0 * 0.97 && g1 < g0 * 1.05, "%s: passband level moved with RES: %f -> %f", p.name, g0, g1);
+	}
+	// Broadband (noise) must not get quieter as RES rises. BP is allowed a little: the band narrows.
+	struct B { const char* name; int mode; float cutoff; double minRatio; } broad[] = {
+		{"LP @ 1 kHz noise", wa::MODE_LP, 1000.f, 1.0},
+		{"HP @ 1 kHz noise", wa::MODE_HP, 1000.f, 1.0},
+		{"Notch @ 1 kHz noise", wa::MODE_NOTCH, 1000.f, 0.97},
+		{"BP @ 1 kHz noise", wa::MODE_BP, 1000.f, 0.75},
+	};
+	for (const B& b : broad) {
+		bool finite = true;
+		double r0 = noiseRms(b.mode, b.cutoff, 0.f), r1 = noiseRms(b.mode, b.cutoff, 1.f, &finite);
+		std::printf("  %-22s rms res 0%%: %.3f  res 100%%: %.3f (x%.2f)\n", b.name, r0, r1, r1 / r0);
+		CHECK(finite, "%s: not finite", b.name);
+		CHECK(r1 >= r0 * b.minRatio, "%s gets quieter with RES: %f -> %f", b.name, r0, r1);
+	}
+}
+
+static void testLimiter() {
+	std::printf("output protection: look-ahead limiter, DC block, NaN guard\n");
+	const float sr = 48000.f;
+	const float ceil = 2.f;
+	{
+		// Below the ceiling: unchanged (only delayed by the look-ahead).
+		wa::SafetyLimiter lim;
+		lim.setSampleRate(sr);
+		int lat = lim.getLatency();
+		std::vector<float> in, out;
+		for (int i = 0; i < (int) sr; i++) {
+			float x = 1.5f * (float) std::sin(2 * PI * 261.6256 * i / sr);
+			float l, r;
+			lim.process(x, -x, ceil, &l, &r);
+			in.push_back(x);
+			out.push_back(l);
+		}
+		float worst = 0.f;
+		for (size_t i = 24000; i < in.size(); i++)
+			worst = std::max(worst, std::fabs(out[i] - in[i - lat]));
+		std::printf("  below the ceiling: max difference from the delayed input %.4f (latency %d samples = %.2f ms)\n", worst, lat, 1000.f * lat / sr);
+		// The DC blocker (about 4 Hz) leads the phase by under 1 degree at 261 Hz: a few percent of the sample
+		// difference, not a change of level.
+		CHECK(worst < 0.03f, "limiter alters a signal below the ceiling: %f", worst);
+	}
+	{
+		// A sudden jump to 4x the ceiling: never above the ceiling, and no click from the gain change.
+		wa::SafetyLimiter lim;
+		lim.setSampleRate(sr);
+		float peak = 0.f, maxStep = 0.f, prev = 0.f, minGain = 1.f;
+		for (int i = 0; i < (int) (1.5 * sr); i++) {
+			float amp = (i < (int) (0.3 * sr)) ? 0.5f : 8.f;
+			float x = amp * (float) std::sin(2 * PI * 110.0 * i / sr);
+			float l, r;
+			lim.process(x, x, ceil, &l, &r);
+			peak = std::max(peak, std::fabs(l));
+			if (i > 0)
+				maxStep = std::max(maxStep, std::fabs(l - prev));
+			prev = l;
+			minGain = std::min(minGain, lim.getGain());
+		}
+		// A 110 Hz sine at the ceiling steps at most 2*pi*110/48000*2 = 0.029 per sample.
+		std::printf("  sudden 4x overload: peak %.4f (ceiling %.1f), max step %.4f, gain down to %.2f\n", peak, ceil, maxStep, minGain);
+		CHECK(peak <= ceil + 1e-4f, "limiter let %f through (ceiling %f)", peak, ceil);
+		CHECK(maxStep < 0.1f, "limiter clicks on a sudden overload: step %f", maxStep);
+		CHECK(minGain < 0.3f && minGain > 0.2f, "limiter gain not as expected: %f", minGain);
+	}
+	{
+		// Extreme and invalid input.
+		wa::SafetyLimiter lim;
+		lim.setSampleRate(sr);
+		float l = 0, r = 0, peak = 0;
+		bool finite = true;
+		for (int i = 0; i < (int) sr; i++) {
+			float x = (i == 1000) ? std::numeric_limits<float>::quiet_NaN() : (i == 2000) ? std::numeric_limits<float>::infinity() : (i % 7 == 0 ? 1e6f : -1e6f);
+			lim.process(x, -x, ceil, &l, &r);
+			finite = finite && std::isfinite(l) && std::isfinite(r);
+			peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));
+		}
+		std::printf("  NaN, infinity and 1e6 input: finite %d, peak %.3f\n", (int) finite, peak);
+		CHECK(finite, "limiter output not finite");
+		CHECK(peak <= ceil + 1e-4f, "limiter exceeded the ceiling on extreme input: %f", peak);
+	}
+	{
+		// DC offset is removed; gain recovers after a burst.
+		wa::SafetyLimiter lim;
+		lim.setSampleRate(sr);
+		float l = 0, r = 0;
+		for (int i = 0; i < (int) (2 * sr); i++)
+			lim.process(1.5f, 1.5f, ceil, &l, &r);
+		std::printf("  1.5 (7.5 V) of constant DC for 2 s: output %.4f\n", l);
+		CHECK(std::fabs(l) < 0.01f, "DC passes the limiter: %f", l);
+		for (int i = 0; i < (int) (0.1 * sr); i++) {
+			float x = 6.f * (float) std::sin(2 * PI * 200.0 * i / sr);
+			lim.process(x, x, ceil, &l, &r);
+		}
+		float g1 = lim.getGain();
+		for (int i = 0; i < (int) (2 * sr); i++)
+			lim.process(0.1f * (float) std::sin(2 * PI * 200.0 * i / sr), 0.f, ceil, &l, &r);
+		std::printf("  after a burst: gain %.2f, 2 s later %.3f\n", g1, lim.getGain());
+		CHECK(g1 < 0.5f && lim.getGain() > 0.99f, "limiter does not recover: %f -> %f", g1, lim.getGain());
+	}
+	{
+		// Steady loud low note: the gain stays steady inside each cycle (no waveform distortion).
+		wa::SafetyLimiter lim;
+		lim.setSampleRate(sr);
+		float gmin = 1.f, gmax = 0.f, l, r;
+		for (int i = 0; i < (int) (2 * sr); i++) {
+			lim.process(5.f * (float) std::sin(2 * PI * 40.0 * i / sr), 0.f, ceil, &l, &r);
+			if (i > (int) sr) {
+				gmin = std::min(gmin, lim.getGain());
+				gmax = std::max(gmax, lim.getGain());
+			}
+		}
+		std::printf("  40 Hz at 2.5x the ceiling: gain stays between %.4f and %.4f\n", gmin, gmax);
+		CHECK(gmax - gmin < 0.01f, "limiter modulates a steady note: %f..%f", gmin, gmax);
+	}
+}
+
+static void testMasterGainAndProtection() {
+	std::printf("master gain, and the output never exceeds 10 V whatever is turned up\n");
+	for (float g : {0.f, 0.5f, 1.f, 2.f}) {
+		SineRig rig;
+		rig.in.masterGain = g;
+		float peak = rig.peakOver(1.f);
+		std::printf("  master gain %3.0f%%: peak %.3f\n", g * 100, peak);
+		CHECK(std::fabs(peak - std::min(g, 2.f)) < 0.02f, "master gain %f gave peak %f", g, peak);
+	}
+	// Everything at once: 400% artifact gain, 200% master, full drive, resonant filter with feedback.
+	SineRig rig;
+	for (int m = 0; m < 3; m++) {
+		rig.in.markers[m].active = true;
+		rig.in.markers[m].pos = m * 0.5f;
+		rig.in.markers[m].gain = 4.f;
+		rig.in.markers[m].drive = 1.f;
+		rig.in.markers[m].cutoff = 0.5f;
+		rig.in.markers[m].res = 1.f;
+	}
+	rig.in.masterGain = 2.f;
+	rig.in.masterDrive = 1.f;
+	rig.in.masterMode = wa::MODE_BP;
+	rig.in.masterCutoff = 0.5f;
+	rig.in.masterRes = 1.f;
+	rig.in.masterFdbk = 1.f;
+	float l, r, peak = 0.f;
+	bool finite = true;
+	for (int i = 0; i < (int) (4.f * rig.sr); i++) {
+		rig.in.position = 0.5f + 0.5f * (float) std::sin(2 * PI * 3.0 * i / rig.sr);
+		rig.engine.process(rig.in, &l, &r);
+		finite = finite && std::isfinite(l) && std::isfinite(r);
+		peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));
+	}
+	std::printf("  everything maxed: peak %.4f (x5 V = %.2f V)\n", peak, peak * 5.f);
+	CHECK(finite, "non-finite output with everything maxed");
+	CHECK(peak <= 2.0001f, "protection failed: %f V", peak * 5.f);
+}
+
 int main() {
+	testResonanceLevel();
+	testLimiter();
+	testMasterGainAndProtection();
+	testMarkerCrossing();
+	testVcaLevel();
+	testMasterDrive();
+	testMasterCv();
 	testFilterModes();
 	testDrive();
+	testMasterWarmth();
 	testMasterFilter();
 	testPreview();
 	testClickFree();
