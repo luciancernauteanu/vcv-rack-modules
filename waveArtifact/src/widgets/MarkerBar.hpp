@@ -97,6 +97,27 @@ struct MarkerBar : widget::Widget {
 		return p.y >= mm2px(layout::STATUS_Y - 3.f);
 	}
 
+	/** Previous (0) / next (1) WAV-in-folder arrow at the right end of the file line */
+	math::Rect arrowRect(int k) {
+		Vec size = mm2px(layout::FILE_ARROW_SIZE);
+		float cx = mm2px(layout::BAR_X1 - (k == 0 ? layout::FILE_ARROW_SIZE.x * 1.6f : layout::FILE_ARROW_SIZE.x * 0.5f));
+		return math::Rect(Vec(cx - size.x / 2.f, mm2px(layout::STATUS_Y) - size.y / 2.f), size);
+	}
+	bool showArrows() {
+		return module && module->hasSiblings();
+	}
+	/** Arrow under `p` (0 previous, 1 next), or -1 */
+	int arrowAt(Vec p) {
+		if (!showArrows())
+			return -1;
+		for (int k = 0; k < 2; k++) {
+			if (arrowRect(k).grow(Vec(1.f, 1.f)).contains(p))
+				return k;
+		}
+		return -1;
+	}
+	int hoverArrow = -1;
+
 	void onButton(const ButtonEvent& e) override {
 		if (!module || e.action != GLFW_PRESS)
 			return;
@@ -107,6 +128,15 @@ struct MarkerBar : widget::Widget {
 
 		// Load: the file line, or the empty screen before anything is loaded. The dialog opens on
 		// release (onDragEnd), so the press/release pair is not split by the modal dialog.
+		// Previous / next WAV in the folder (no dialog, so it can act on press)
+		int arrow = arrowAt(e.pos);
+		if (arrow >= 0) {
+			if (left)
+				module->loadSibling(arrow == 0 ? -1 : 1);
+			e.consume(this);
+			return;
+		}
+
 		bool noBank = !module->activeBank.load();
 		if (left && (inStatusLine(e.pos) || (noBank && e.pos.y < mm2px(layout::SLOTS_BOTTOM + 1.f)))) {
 			loadOnRelease = true;
@@ -187,13 +217,43 @@ struct MarkerBar : widget::Widget {
 	}
 
 	void onHover(const HoverEvent& e) override {
-		hoverStatus = module && inStatusLine(e.pos);
+		hoverArrow = arrowAt(e.pos);
+		hoverStatus = module && inStatusLine(e.pos) && hoverArrow < 0;
 		Widget::onHover(e);
 		e.consume(this); // needed to receive onLeave
 	}
 
 	void onLeave(const LeaveEvent& e) override {
 		hoverStatus = false;
+		hoverArrow = -1;
+	}
+
+	void drawArrows(const DrawArgs& args) {
+		if (!showArrows())
+			return;
+		for (int k = 0; k < 2; k++) {
+			math::Rect r = arrowRect(k);
+			bool hot = hoverArrow == k;
+			nvgBeginPath(args.vg);
+			nvgRoundedRect(args.vg, r.pos.x, r.pos.y, r.size.x, r.size.y, 2.f);
+			nvgFillColor(args.vg, hot ? nvgRGBA(0xb8, 0xc4, 0xff, 0x40) : nvgRGBA(0xb8, 0xc4, 0xff, 0x18));
+			nvgFill(args.vg);
+			nvgStrokeColor(args.vg, hot ? layout::SCREEN_TEXT : layout::SCREEN_DIM);
+			nvgStrokeWidth(args.vg, 0.8f);
+			nvgStroke(args.vg);
+			// Triangle pointing left (previous) or right (next)
+			Vec c = r.getCenter();
+			float h = r.size.y * 0.28f;
+			float w = h * 1.1f;
+			float dir = (k == 0) ? -1.f : 1.f;
+			nvgBeginPath(args.vg);
+			nvgMoveTo(args.vg, c.x + dir * w * 0.6f, c.y);
+			nvgLineTo(args.vg, c.x - dir * w * 0.4f, c.y - h);
+			nvgLineTo(args.vg, c.x - dir * w * 0.4f, c.y + h);
+			nvgClosePath(args.vg);
+			nvgFillColor(args.vg, hot ? nvgRGB(0xff, 0xff, 0xff) : layout::SCREEN_TEXT);
+			nvgFill(args.vg);
+		}
 	}
 
 	void drawStatus(const DrawArgs& args) {
@@ -219,8 +279,12 @@ struct MarkerBar : widget::Widget {
 		if (module && module->activeBank.load()) {
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 			nvgFillColor(args.vg, layout::SCREEN_DIM);
-			nvgText(args.vg, mm2px(layout::BAR_X1), y, "click the file name to load another WAV", NULL);
+			// The arrows sit at the right end; the hint moves left of them.
+			float hintX = showArrows() ? arrowRect(0).pos.x - mm2px(1.5f) : mm2px(layout::BAR_X1);
+			const char* hint = showArrows() ? "click name to load - arrows: same folder" : "click the file name to load another WAV";
+			nvgText(args.vg, hintX, y, hint, NULL);
 		}
+		drawArrows(args);
 	}
 
 	void drawLayer(const DrawArgs& args, int layer) override {
