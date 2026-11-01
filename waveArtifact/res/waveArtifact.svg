@@ -72,10 +72,12 @@
     <circle id="MASTER_DRIVE_PARAM" cx="122.3" cy="84.8" r="3.5" fill="#ff0000"/>
     <circle id="MASTER_SPREAD_PARAM" cx="132.7" cy="84.8" r="3.5" fill="#ff0000"/>
     <circle id="MASTER_FDBK_PARAM" cx="143.1" cy="84.8" r="3.5" fill="#ff0000"/>
-    <circle id="MASTER_GAIN_PARAM" cx="157.5" cy="85.4" r="3.5" fill="#ff0000"/>
-    <rect id="STOP_PARAM" x="164.8" y="82.6" width="9.4" height="5.6" fill="#ff0000"/>
-    <circle id="LEFT_OUTPUT" cx="157.5" cy="97.6" r="4" fill="#0000ff"/>
-    <circle id="RIGHT_OUTPUT" cx="169.5" cy="97.6" r="4" fill="#0000ff"/>
+    <circle id="MASTER_GAIN_PARAM" cx="155.3" cy="85.4" r="3.5" fill="#ff0000"/>
+    <circle id="MASTER_GAIN_AMT_PARAM" cx="163.4" cy="85.4" r="3" fill="#ff0000"/>
+    <circle id="MASTER_GAIN_INPUT" cx="171.6" cy="85.4" r="4" fill="#00ff00"/>
+    <circle id="STOP_PARAM" cx="171.9" cy="97.6" r="2.8" fill="#ff0000"/>
+    <circle id="LEFT_OUTPUT" cx="155.3" cy="97.6" r="4" fill="#0000ff"/>
+    <circle id="RIGHT_OUTPUT" cx="164.1" cy="97.6" r="4" fill="#0000ff"/>
     <rect id="DOT_STRIP" x="6" y="108" width="170.88" height="12" fill="#ffff00"/>
     <circle id="ARTIFACT_L_OUTPUT_0" cx="188.32" cy="28" r="4" fill="#0000ff"/>
     <circle id="ARTIFACT_R_OUTPUT_0" cx="199.92" cy="28" r="4" fill="#0000ff"/>

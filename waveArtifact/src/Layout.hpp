@@ -87,6 +87,11 @@ static const float BAR_X1 = 162.88f;
 static const float BULLET_R = 2.1f;
 /** File/status line (click it to load a WAV) */
 static const float STATUS_Y = 26.f;
+/** Previous / next WAV-in-folder arrows, fixed at the left end of the file line */
+static const Vec FILE_ARROW_SIZE = Vec(4.2f, 3.6f);
+static const float FILE_ARROW_GAP = 1.2f;
+/** The file name always starts here (relative to BAR_X0): after both arrows and a 2 mm gap */
+static const float FILE_TEXT_INDENT = 2.f * 4.2f + FILE_ARROW_GAP + 2.f;
 
 // Controls band
 static const float CTRL_Y0 = 77.5f;
@@ -132,15 +137,18 @@ static const float MASTER_COL_X[5] = {101.5f, 111.9f, 122.3f, 132.7f, 143.1f}; /
 // Outputs on an inverted background
 static const Vec OUT_BOX_POS = Vec(150.f, CTRL_Y0);
 static const Vec OUT_BOX_SIZE = Vec(26.88f, CTRL_Y1 - CTRL_Y0);
-// Master GAIN knob on top, the two jacks under it (labels L / R below them).
-// GAIN above L, STOP above R.
-static const Vec MASTER_GAIN_KNOB = Vec(157.5f, 85.4f);
-static const Vec STOP_BUTTON = Vec(169.5f, 85.4f);
-static const Vec STOP_BUTTON_SIZE = Vec(9.4f, 5.6f);
+// Top row: master GAIN knob, its CV AMT trimpot and the GAIN CV jack. Bottom row: L, R and STOP.
+static const float OUT_COL_X[3] = {155.3f, 163.4f, 171.6f};
+static const Vec MASTER_GAIN_KNOB = Vec(OUT_COL_X[0], 85.4f);
+static const Vec MASTER_GAIN_AMT = Vec(OUT_COL_X[1], 85.4f);
+static const Vec MASTER_GAIN_CV = Vec(OUT_COL_X[2], 85.4f);
+// STOP is a round warning bullet (no text), centred here.
+static const Vec STOP_BUTTON = Vec(171.9f, 97.6f);
+static const Vec STOP_BUTTON_SIZE = Vec(5.6f, 5.6f);
 static const NVGcolor STOP_COLOR = nvgRGB(0xff, 0x5c, 0x5c);
 static const float MASTER_GAIN_LABEL_Y = 79.6f;
-static const Vec LEFT_OUTPUT = Vec(157.5f, 97.6f);
-static const Vec RIGHT_OUTPUT = Vec(169.5f, 97.6f);
+static const Vec LEFT_OUTPUT = Vec(155.3f, 97.6f);
+static const Vec RIGHT_OUTPUT = Vec(164.1f, 97.6f);
 static const float OUTPUT_LABEL_Y = 104.1f;
 
 // Right column: each artifact's own output, a stereo pair per row (artifact 1 on top), numbered in

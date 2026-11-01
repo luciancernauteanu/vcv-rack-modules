@@ -37,13 +37,16 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
    at the bottom of the screen later on), or right-click the module and choose **Load WAV...**
    Any WAV works: a voice, a pad, a field recording. The module analyses it for a moment and
    the file line then shows the name and the number of artifacts, e.g. `pad.wav  64 artifacts`.
+   The **◀ ▶** arrows at the right end of the file line load the previous or next WAV in the
+   same folder, sorted by name and wrapping around (also in the right-click menu).
 3. **Patch the output.** Cable **L** and **R** (bottom right of the main section, in the dark
    box next to STOP) to an **Audio** module's left and right inputs.
 4. **Hear it.** The module starts with one marker, so you hear one wavetable at a steady pitch
    (C4 with the FREQ knob in the middle).
 5. **Add markers.** Click an empty spot on the marker bar (the line with the bullets) to add a
    marker there, up to five. Each new marker picks the artifact under that spot of the sample.
-   Or right-click the module and choose **Auto arrange artifacts** to place all five evenly.
+   Or right-click the module and choose **⚠ Auto arrange artifacts → Auto arrange now** to
+   place all five evenly. It resets the artifacts you have set up, so it asks first.
 6. **Move through them.** Turn **POSITION**, or drag the white playhead on the bar. The sound
    crossfades between the two markers the playhead is between. Drag a bullet to move a marker.
 7. **Shape each marker.** Click a slot at the top of the screen (or a bullet) to select a
@@ -56,7 +59,9 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
    internal tempo (BPM) or a clock patched to **CLOCK**.
 9. **Finish the sound** with the master section: pick a filter type (OFF / LP / BP / HP /
    NOTCH), then CUTOFF, RES, DRIVE, SPREAD and FDBK, each with its own CV trimpot and jack,
-   and the master GAIN. **STOP** fades every output to silence until you press it again.
+   and the master GAIN with its own **AMT** trimpot and **CV** jack (a VCA: GAIN at 0%, AMT at
+   100%, then 0-10 V = 0-200%; negative AMT ducks). The red **!** bullet (STOP) fades every output to silence
+   until you press it again.
 
 Useful to know:
 

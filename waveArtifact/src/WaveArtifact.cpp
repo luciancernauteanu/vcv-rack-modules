@@ -100,6 +100,9 @@ WaveArtifact::WaveArtifact() {
 	configParam(MASTER_FDBK_PARAM, 0.f, 1.f, 0.f, "Master filter feedback (self-oscillates above ~75%)", "%", 0.f, 100.f);
 	configParam(MASTER_DRIVE_PARAM, 0.f, 1.f, 0.f, "Master drive (warm saturation)", "%", 0.f, 100.f);
 	configParam(MASTER_GAIN_PARAM, 0.f, 2.f, 1.f, "Master gain", "%", 0.f, 100.f);
+	// Bipolar like an attenuverter: -100% turns an envelope into a ducker.
+	configParam(MASTER_GAIN_AMT_PARAM, -1.f, 1.f, 0.f, "Master gain CV amount (10 V at 100% = +200%)", "%", 0.f, 100.f);
+	configInput(MASTER_GAIN_INPUT, "Master gain CV (VCA: set GAIN to 0% and AMT to 100% for 0..10 V = 0..200%)");
 	const char* masterNames[5] = {"cutoff", "resonance", "drive", "spread", "feedback"};
 	for (int k = 0; k < 5; k++) {
 		std::string n = std::string("Master filter ") + masterNames[k];
@@ -182,6 +185,8 @@ void WaveArtifact::onReset(const ResetEvent& e) {
 	}
 	wavBytes.clear();
 	fileName.clear();
+	filePath.clear();
+	folderWavs.clear();
 	setStatus("Load a WAV (max 10 MB)");
 }
 
@@ -312,6 +317,12 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	in.masterFdbk = params[MASTER_FDBK_PARAM].getValue();
 	in.masterDrive = params[MASTER_DRIVE_PARAM].getValue();
 	in.masterGain = params[MASTER_GAIN_PARAM].getValue();
+	// Gain CV: 10 V at 100% sweeps the whole knob range (0..200%). The engine clamps to 0..200% and
+	// smooths it, so a gate cannot click. A NaN would stick in the smoother forever: treat it as 0.
+	if (inputs[MASTER_GAIN_INPUT].isConnected()) {
+		float g = in.masterGain + params[MASTER_GAIN_AMT_PARAM].getValue() * inputs[MASTER_GAIN_INPUT].getVoltage() / 10.f * 2.f;
+		in.masterGain = std::isfinite(g) ? g : 0.f;
+	}
 	// Master CV: knob units, 10 V at 100% = the whole knob range (cutoff: about 1 V/oct). Added in the
 	// engine after smoothing, so it can run at audio rate.
 	auto masterCv = [&](int input, int amt) {
@@ -362,11 +373,78 @@ void WaveArtifact::onSampleRateChange(const SampleRateChangeEvent& e) {
 	engine.setSampleRate(e.sampleRate);
 }
 
+/** WAV files directly in `dir`, sorted by name ignoring case. */
+static std::vector<std::string> listWavs(const std::string& dir) {
+	std::vector<std::string> wavs;
+	if (dir.empty() || !system::isDirectory(dir))
+		return wavs;
+	for (const std::string& p : system::getEntries(dir)) {
+		if (string::lowercase(system::getExtension(p)) == ".wav" && system::isFile(p))
+			wavs.push_back(p);
+	}
+	std::sort(wavs.begin(), wavs.end(), [](const std::string& a, const std::string& b) {
+		std::string la = string::lowercase(system::getFilename(a));
+		std::string lb = string::lowercase(system::getFilename(b));
+		return la != lb ? la < lb : a < b;
+	});
+	return wavs;
+}
+
+bool WaveArtifact::hasSiblings() {
+	return folderWavs.size() > 1;
+}
+
+void WaveArtifact::loadSibling(int dir) {
+	if (filePath.empty())
+		return;
+	if (analyzing) {
+		setStatus("Busy, still analyzing");
+		return;
+	}
+	// Re-scan: files may have been added or removed since the last load.
+	std::vector<std::string> wavs = listWavs(system::getDirectory(filePath));
+	if (wavs.empty())
+		return;
+	std::string current = system::getFilename(filePath);
+	int n = (int) wavs.size();
+	int at = -1;
+	for (int i = 0; i < n; i++) {
+		if (system::getFilename(wavs[i]) == current) {
+			at = i;
+			break;
+		}
+	}
+	int next;
+	if (at >= 0) {
+		next = ((at + dir) % n + n) % n;
+	}
+	else {
+		// The current file is gone: take the first name after it (or before it, going back).
+		std::string lc = string::lowercase(current);
+		next = (dir > 0) ? 0 : n - 1;
+		for (int i = 0; i < n; i++) {
+			int k = (dir > 0) ? i : n - 1 - i;
+			std::string lk = string::lowercase(system::getFilename(wavs[k]));
+			if ((dir > 0) ? lk > lc : lk < lc) {
+				next = k;
+				break;
+			}
+		}
+	}
+	// Only this file left: nothing to step to (compare indices, not paths: separators may differ).
+	if (n == 1 && at >= 0)
+		return;
+	loadFile(wavs[next]);
+}
+
 void WaveArtifact::loadFile(const std::string& path) {
 	if (analyzing) {
 		setStatus("Busy, still analyzing");
 		return;
 	}
+	// Remember the path even if this file fails, so the arrows can step past it.
+	filePath = path;
+	folderWavs = listWavs(system::getDirectory(path));
 	uint64_t size = system::getFileSize(path);
 	if (size == 0) {
 		setStatus("Cannot read file");
@@ -579,7 +657,9 @@ void openLoadDialog(WaveArtifact* module) {
 	if (!module)
 		return;
 	osdialog_filters* filters = osdialog_filters_parse("WAV:wav,WAV");
-	char* path = osdialog_file(OSDIALOG_OPEN, NULL, NULL, filters);
+	// Open in the folder of the last WAV, so loading the next one is quick.
+	std::string dir = module->filePath.empty() ? "" : system::getDirectory(module->filePath);
+	char* path = osdialog_file(OSDIALOG_OPEN, dir.empty() ? NULL : dir.c_str(), NULL, filters);
 	osdialog_filters_free(filters);
 	if (!path)
 		return;
@@ -611,6 +691,47 @@ struct ArtifactNumber : widget::Widget {
 		if (!font)
 			return;
 		wadraw::drawCenteredNumber(args.vg, font->handle, c.x, c.y, r * 1.4f, std::to_string(index + 1), nvgRGB(0x16, 0x18, 0x22));
+	}
+};
+
+/** STOP as a round warning bullet: a red dot with an exclamation mark, no text. Dim when playing,
+bright and glowing when stopped. Same click behaviour as a lit toggle. */
+struct StopBullet : LitToggle {
+	/** Round glow around the bullet (a radial gradient), drawn on the light layer while stopped. */
+	void drawLayer(const DrawArgs& args, int layer) override {
+		if (layer == 1 && isOn()) {
+			Vec c = box.size.div(2.f);
+			float r = std::min(box.size.x, box.size.y) / 2.f;
+			NVGpaint glow = nvgRadialGradient(args.vg, c.x, c.y, r * 0.95f, r * 1.7f, nvgTransRGBAf(color, 0.22f), nvgTransRGBAf(color, 0.f));
+			nvgBeginPath(args.vg);
+			nvgCircle(args.vg, c.x, c.y, r * 1.7f);
+			nvgFillPaint(args.vg, glow);
+			nvgFill(args.vg);
+		}
+		ParamWidget::drawLayer(args, layer);
+	}
+
+	void draw(const DrawArgs& args) override {
+		bool on = isOn();
+		Vec c = box.size.div(2.f);
+		float r = std::min(box.size.x, box.size.y) / 2.f;
+		nvgBeginPath(args.vg);
+		nvgCircle(args.vg, c.x, c.y, r - 0.4f);
+		nvgFillColor(args.vg, on ? nvgTransRGBAf(color, 0.95f) : nvgRGB(0x14, 0x16, 0x1d));
+		nvgFill(args.vg);
+		nvgStrokeColor(args.vg, nvgTransRGBAf(color, on ? 1.f : 0.5f));
+		nvgStrokeWidth(args.vg, 0.7f);
+		nvgStroke(args.vg);
+		// Exclamation mark: a bar and a dot
+		NVGcolor mark = on ? nvgRGB(0x10, 0x12, 0x1a) : nvgTransRGBAf(color, 0.85f);
+		nvgBeginPath(args.vg);
+		nvgRect(args.vg, c.x - r * 0.13f, c.y - r * 0.55f, r * 0.26f, r * 0.75f);
+		nvgFillColor(args.vg, mark);
+		nvgFill(args.vg);
+		nvgBeginPath(args.vg);
+		nvgCircle(args.vg, c.x, c.y + r * 0.62f, r * 0.15f);
+		nvgFillColor(args.vg, mark);
+		nvgFill(args.vg);
 	}
 };
 
@@ -667,6 +788,8 @@ struct WaveArtifactWidget : ModuleWidget {
 		for (int k = 0; k < 5; k++)
 			labels->add(Vec(MASTER_COL_X[k], MASTER_LABEL_Y), masterNames[k], 6.f);
 		labels->add(Vec(MASTER_GAIN_KNOB.x, MASTER_GAIN_LABEL_Y), "GAIN", 6.f, true);
+		labels->add(Vec(MASTER_GAIN_AMT.x, MASTER_GAIN_LABEL_Y), "AMT", 5.f, true);
+		labels->add(Vec(MASTER_GAIN_CV.x, MASTER_GAIN_LABEL_Y), "CV", 5.f, true);
 		labels->add(Vec(LEFT_OUTPUT.x, OUTPUT_LABEL_Y), "L", 6.f, true);
 		labels->add(Vec(RIGHT_OUTPUT.x, OUTPUT_LABEL_Y), "R", 6.f, true);
 		// Artifact outputs column
@@ -759,7 +882,9 @@ struct WaveArtifactWidget : ModuleWidget {
 		}
 
 		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(MASTER_GAIN_KNOB), module, WaveArtifact::MASTER_GAIN_PARAM));
-		addParam(createLitToggle(STOP_BUTTON, module, WaveArtifact::STOP_PARAM, "STOP", STOP_COLOR, STOP_BUTTON_SIZE));
+		addParam(createParamCentered<Trimpot>(mm2px(MASTER_GAIN_AMT), module, WaveArtifact::MASTER_GAIN_AMT_PARAM));
+		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(MASTER_GAIN_CV), module, WaveArtifact::MASTER_GAIN_INPUT));
+		addParam(createLitToggle<StopBullet>(STOP_BUTTON, module, WaveArtifact::STOP_PARAM, "", STOP_COLOR, STOP_BUTTON_SIZE));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(LEFT_OUTPUT), module, WaveArtifact::LEFT_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(RIGHT_OUTPUT), module, WaveArtifact::RIGHT_OUTPUT));
 
@@ -792,6 +917,12 @@ struct WaveArtifactWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Load WAV...", "", [=]() {
 			openLoadDialog(m);
 		}));
+		menu->addChild(createMenuItem("Previous WAV in folder", "", [=]() {
+			m->loadSibling(-1);
+		}, !m->hasSiblings()));
+		menu->addChild(createMenuItem("Next WAV in folder", "", [=]() {
+			m->loadSibling(1);
+		}, !m->hasSiblings()));
 		menu->addChild(createIndexSubmenuItem("Artifact count",
 			{"Auto (50-100)", "50", "64", "100"},
 			[=]() {
@@ -824,8 +955,13 @@ struct WaveArtifactWidget : ModuleWidget {
 				m->startAnalysis();
 			}
 		));
-		menu->addChild(createMenuItem("Auto arrange artifacts", "resets their settings", [=]() {
-			m->autoArrange();
+		// Overwrites every marker, so it asks first (a submenu, one more click).
+		menu->addChild(createSubmenuItem("⚠ Auto arrange artifacts", "", [=](Menu* sub) {
+			sub->addChild(createMenuLabel("⚠ Resets your current artifacts:"));
+			sub->addChild(createMenuLabel("all 5 on, evenly spaced, settings back to default"));
+			sub->addChild(createMenuItem("Auto arrange now", "", [=]() {
+				m->autoArrange();
+			}));
 		}));
 		if (m->previewTable.load() >= 0) {
 			menu->addChild(createMenuItem("Stop artifact preview", "", [=]() {

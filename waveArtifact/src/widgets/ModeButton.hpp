@@ -55,7 +55,15 @@ struct ModeButton : app::ParamWidget {
 		if (!font)
 			return;
 		nvgFontFaceId(args.vg, font->handle);
-		nvgFontSize(args.vg, box.size.y * 0.7f);
+		float fontSize = box.size.y * 0.7f;
+		nvgFontSize(args.vg, fontSize);
+		// Long labels (NOTCH) shrink so they keep a margin inside the button; short ones (LP) stay as they are.
+		float bounds[4];
+		nvgTextBounds(args.vg, 0.f, 0.f, text.c_str(), NULL, bounds);
+		float width = bounds[2] - bounds[0];
+		float maxWidth = box.size.x * 0.76f;
+		if (width > maxWidth && width > 0.f)
+			nvgFontSize(args.vg, fontSize * maxWidth / width);
 		nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
 		nvgFillColor(args.vg, (text == "OFF") ? layout::SCREEN_DIM : color);
 		nvgText(args.vg, box.size.x / 2.f, box.size.y / 2.f + 0.5f, text.c_str(), NULL);
