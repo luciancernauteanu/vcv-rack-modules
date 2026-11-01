@@ -87,8 +87,11 @@ static const float BAR_X1 = 162.88f;
 static const float BULLET_R = 2.1f;
 /** File/status line (click it to load a WAV) */
 static const float STATUS_Y = 26.f;
-/** Previous / next WAV-in-folder arrows at the right end of the file line */
+/** Previous / next WAV-in-folder arrows, fixed at the left end of the file line */
 static const Vec FILE_ARROW_SIZE = Vec(4.2f, 3.6f);
+static const float FILE_ARROW_GAP = 1.2f;
+/** The file name always starts here (relative to BAR_X0): after both arrows and a 2 mm gap */
+static const float FILE_TEXT_INDENT = 2.f * 4.2f + FILE_ARROW_GAP + 2.f;
 
 // Controls band
 static const float CTRL_Y0 = 77.5f;

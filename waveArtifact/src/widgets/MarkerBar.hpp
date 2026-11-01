@@ -97,14 +97,18 @@ struct MarkerBar : widget::Widget {
 		return p.y >= mm2px(layout::STATUS_Y - 3.f);
 	}
 
-	/** Previous (0) / next (1) WAV-in-folder arrow at the right end of the file line */
+	/** Previous (0) / next (1) WAV-in-folder arrow, fixed at the left end of the file line, just
+	before the file name (which always starts at FILE_TEXT_INDENT, so nothing moves). */
 	math::Rect arrowRect(int k) {
 		Vec size = mm2px(layout::FILE_ARROW_SIZE);
-		// Fixed at the far right of the file line: previous, then next. Does not move with the file name.
-		float cx = mm2px(layout::BAR_X1) - size.x / 2.f - (1 - k) * (size.x + mm2px(1.2f));
-		return math::Rect(Vec(cx - size.x / 2.f, mm2px(layout::STATUS_Y) - size.y / 2.f), size);
+		float x0 = mm2px(layout::BAR_X0) + k * (size.x + mm2px(layout::FILE_ARROW_GAP));
+		return math::Rect(Vec(x0, mm2px(layout::STATUS_Y) - size.y / 2.f), size);
 	}
+	/** Shown once a WAV has been loaded (dim when its folder has no other WAV) */
 	bool showArrows() {
+		return module && !module->filePath.empty();
+	}
+	bool arrowsActive() {
 		return module && module->hasSiblings();
 	}
 	/** Arrow under `p` (0 previous, 1 next), or -1 */
@@ -234,7 +238,9 @@ struct MarkerBar : widget::Widget {
 			return;
 		for (int k = 0; k < 2; k++) {
 			math::Rect r = arrowRect(k);
-			bool hot = hoverArrow == k;
+			bool active = arrowsActive();
+			bool hot = active && hoverArrow == k;
+			nvgGlobalAlpha(args.vg, active ? 1.f : 0.35f);
 			nvgBeginPath(args.vg);
 			nvgRoundedRect(args.vg, r.pos.x, r.pos.y, r.size.x, r.size.y, 2.f);
 			nvgFillColor(args.vg, hot ? nvgRGBA(0xb8, 0xc4, 0xff, 0x40) : nvgRGBA(0xb8, 0xc4, 0xff, 0x18));
@@ -255,6 +261,7 @@ struct MarkerBar : widget::Widget {
 			nvgFillColor(args.vg, hot ? nvgRGB(0xff, 0xff, 0xff) : layout::SCREEN_TEXT);
 			nvgFill(args.vg);
 		}
+		nvgGlobalAlpha(args.vg, 1.f);
 	}
 
 	void drawStatus(const DrawArgs& args) {
@@ -263,7 +270,8 @@ struct MarkerBar : widget::Widget {
 			return;
 		std::string text = module ? module->getStatus() : "Load a WAV (max 10 MB)";
 		float y = mm2px(layout::STATUS_Y);
-		float x = mm2px(layout::BAR_X0);
+		// Fixed start, after the arrows' slot, whether or not the arrows are shown.
+		float x = mm2px(layout::BAR_X0 + layout::FILE_TEXT_INDENT);
 		nvgFontFaceId(args.vg, font->handle);
 		nvgFontSize(args.vg, 9.5f);
 		nvgTextAlign(args.vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
@@ -280,10 +288,7 @@ struct MarkerBar : widget::Widget {
 		if (module && module->activeBank.load()) {
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 			nvgFillColor(args.vg, layout::SCREEN_DIM);
-			// Hint at the right end of the bar, as before the arrows.
-			float hintX = showArrows() ? arrowRect(0).pos.x - mm2px(1.5f) : mm2px(layout::BAR_X1);
-			const char* hint = "click the file name to load another WAV";
-			nvgText(args.vg, hintX, y, hint, NULL);
+			nvgText(args.vg, mm2px(layout::BAR_X1), y, "click the file name to load another WAV", NULL);
 		}
 		drawArrows(args);
 	}
