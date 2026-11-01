@@ -45,16 +45,57 @@ modulation. Gives all modes at once; `mix` blends them:
 - LP / HP: unity passband at any RES (resonance adds a peak at the cutoff; it never takes level away).
 - BP: unity at the center at the lowest RES, rising to sqrt(Q/0.7) at full RES (keeps broadband
   loudness roughly constant as the band narrows).
-- Notch: unity passband, a dip at the cutoff that narrows as RES rises.
+- Notch (resonant): unity passband and an infinitely deep dip at the cutoff. A plain SVF notch
+  only narrows with Q, so at high RES it shrinks to a sliver between two harmonics and goes silent.
+  Here RES does what it does on LP / HP, it adds resonance: the notch starts wide (audible at
+  RES 0) and tightens a little, while two resonant peaks grow on its shoulders, an equal number
+  of octaves below and above the cutoff. The peaks are two band-passes boosting the input before
+  the notch core, so the core's zero still removes everything at the cutoff (full depth).
 */
 struct Svf {
 	float ic1 = 0.f;
 	float ic2 = 0.f;
 	/** Last normalized band-pass output (unity at center), for feedback. */
 	float lastBp = 0.f;
+	/** The notch's two shoulder resonators (below / above the cutoff); idle in the other modes. */
+	float edgeIc[2][2] = {};
+
+	/** Notch core Q: wide at RES 0, moderately narrow at RES 1 (never a sliver). */
+	static constexpr float NOTCH_Q_MIN = 0.4f;
+	static constexpr float NOTCH_Q_MAX = 1.6f;
+	/** Shoulder peaks: distance from the cutoff in octaves (RES 0 -> RES 1), level and Q at RES 1. */
+	static constexpr float EDGE_OCT_MIN = 0.85f;
+	static constexpr float EDGE_OCT_MAX = 0.45f;
+	static constexpr float EDGE_GAIN_MAX = 2.6f;
+	static constexpr float EDGE_Q_MIN = 1.5f;
+	static constexpr float EDGE_Q_MAX = 9.f;
 
 	void reset() {
 		ic1 = ic2 = lastBp = 0.f;
+		resetEdges();
+	}
+	void resetEdges() {
+		edgeIc[0][0] = edgeIc[0][1] = edgeIc[1][0] = edgeIc[1][1] = 0.f;
+	}
+
+	/** One trapezoidal SVF step on state `ic`: returns the normalized band-pass (unity at center). */
+	static float bandPass(float ic[2], float x, float fc, float k, float sampleRate) {
+		fc = std::min(std::max(fc, 5.f), 0.45f * sampleRate);
+		float g = std::tan(3.141592654f * fc / sampleRate);
+		float a1 = 1.f / (1.f + g * (g + k));
+		float a2 = g * a1;
+		float a3 = g * a2;
+		float v3 = x - ic[1];
+		float v1 = a1 * ic[0] + a2 * v3;
+		float v2 = ic[1] + a2 * ic[0] + a3 * v3;
+		ic[0] = 2.f * v1 - ic[0];
+		ic[1] = 2.f * v2 - ic[1];
+		return k * v1;
+	}
+
+	/** RES 0..1 back from Q (the callers pass filterQ(res)). */
+	static float resFromQ(float q) {
+		return std::min(std::max(std::log(q / FILTER_Q_MIN) / FILTER_LN_Q_RANGE, 0.f), 1.f);
 	}
 
 	/** Exactly linear up to 40% of `lim`, then a tanh knee that approaches `lim`. The linear part
@@ -76,11 +117,43 @@ struct Svf {
 	float process(float x, float fc, float q, float sampleRate, const float mix[NUM_MIX], float stateLimit = 0.f) {
 		fc = std::min(std::max(fc, 5.f), 0.45f * sampleRate);
 		float k = 1.f / q;
+		// Notch share: its core runs at the notch's own (wider) Q. Blending the damping by the share
+		// keeps a mode crossfade smooth; with no notch in the mix, nothing changes.
+		float wNotch = mix[4];
+		float res = 0.f;
+		if (wNotch > 0.f) {
+			res = resFromQ(q);
+			float qNotch = NOTCH_Q_MIN * std::pow(NOTCH_Q_MAX / NOTCH_Q_MIN, res);
+			k += wNotch * (1.f / qNotch - k);
+		}
+		// Resonant shoulders, in series BEFORE the notch core: the core's zero at the cutoff then
+		// removes the shoulders' own output there too, so the dip stays infinitely deep. They grow
+		// with RES (none at 0), move in towards the cutoff and sharpen. Only the notch share hears
+		// them (u == x whenever the mix has no notch, so LP / BP / HP are untouched).
+		float u = x;
+		if (wNotch > 1e-4f && res > 0.f) {
+			float edgeGain = EDGE_GAIN_MAX * std::pow(res, 1.25f);
+			float oct = EDGE_OCT_MIN + (EDGE_OCT_MAX - EDGE_OCT_MIN) * res;
+			float kEdge = 1.f / (EDGE_Q_MIN + (EDGE_Q_MAX - EDGE_Q_MIN) * res);
+			float ratio = std::exp2(oct);
+			float below = bandPass(edgeIc[0], x, fc / ratio, kEdge, sampleRate);
+			float above = bandPass(edgeIc[1], x, fc * ratio, kEdge, sampleRate);
+			if (stateLimit > 0.f) {
+				for (int e = 0; e < 2; e++)
+					for (int i = 0; i < 2; i++)
+						edgeIc[e][i] = softLimit(edgeIc[e][i], stateLimit);
+			}
+			u += wNotch * edgeGain * (below + above);
+		}
+		else {
+			resetEdges();
+		}
+
 		float g = std::tan(3.141592654f * fc / sampleRate);
 		float a1 = 1.f / (1.f + g * (g + k));
 		float a2 = g * a1;
 		float a3 = g * a2;
-		float v3 = x - ic2;
+		float v3 = u - ic2;
 		float v1 = a1 * ic1 + a2 * v3;
 		float v2 = ic2 + a2 * ic1 + a3 * v3;
 		ic1 = 2.f * v1 - ic1;
@@ -91,10 +164,10 @@ struct Svf {
 		}
 		float lp = v2;
 		float bp = k * v1; // unity gain at the center
-		float hp = x - bp - lp;
+		float hp = u - bp - lp;
 		lastBp = bp;
 		float bpGain = std::sqrt(q / FILTER_Q_MIN);
-		return mix[0] * x + mix[1] * lp + mix[3] * hp + mix[2] * bp * bpGain + mix[4] * (x - bp);
+		return mix[0] * x + mix[1] * lp + mix[3] * hp + mix[2] * bp * bpGain + mix[4] * (u - bp);
 	}
 };
 

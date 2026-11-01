@@ -1505,7 +1505,63 @@ static void testPositionLfoEdge() {
 	}
 }
 
+/** Steady-state gain (dB) of the NOTCH mode for a sine `oct` octaves from a 1 kHz cutoff. */
+static double notchGainDb(double oct, float res) {
+	const float sr = 48000.f, fc = 1000.f;
+	float f = fc * (float) std::exp2(oct);
+	wa::Svf s;
+	float mix[wa::NUM_MIX];
+	wa::modeWeights(true, wa::MODE_NOTCH, mix);
+	int n = (int) sr, skip = (int) (0.5f * sr);
+	double in = 0, out = 0;
+	for (int i = 0; i < n; i++) {
+		float x = (float) std::sin(2 * PI * f * i / sr);
+		float y = s.process(x, fc, wa::filterQ(res), sr, mix);
+		if (i >= skip) {
+			in += x * x;
+			out += y * y;
+		}
+	}
+	return 10.0 * std::log10(out / in + 1e-20);
+}
+
+/** Resonant notch: full depth at the cutoff at every RES, wide (audible) at RES 0, and RES grows
+resonant peaks on both shoulders instead of shrinking the notch to nothing (the old behaviour:
+at RES 1 a tone 0.1 octave away lost only 0.5 dB). */
+static void testResonantNotch() {
+	std::printf("resonant notch (1 kHz cutoff)\n");
+	for (float res : {0.f, 0.5f, 1.f}) {
+		double center = notchGainDb(0.0, res);
+		std::printf("  RES %.2f: at cutoff %.1f dB (limit -60)\n", res, center);
+		CHECK(center < -60.0, "notch not deep at the cutoff (RES %.2f): %.1f dB", res, center);
+	}
+	// Wide at RES 0: half an octave away still well down (measured -11.3 dB; the old notch -7.0).
+	double wide = notchGainDb(0.5, 0.f);
+	std::printf("  RES 0.00: +0.5 oct %.1f dB (limit -8)\n", wide);
+	CHECK(wide < -8.0, "notch too narrow at RES 0: %.1f dB half an octave away", wide);
+	// Close in, it must still bite at full RES (measured -11.7 dB at 0.1 oct; the old notch -0.5).
+	double close = notchGainDb(0.1, 1.f);
+	std::printf("  RES 1.00: +0.1 oct %.1f dB (limit -6)\n", close);
+	CHECK(close < -6.0, "notch vanished at full RES: %.1f dB at 0.1 octave", close);
+	// Shoulder peaks: grow with RES, both sides alike (measured +7.6 dB at RES 1), bounded.
+	double prev = -100.0;
+	for (float res : {0.25f, 0.5f, 0.75f, 1.f}) {
+		double lo = notchGainDb(-0.5, res), hi = notchGainDb(0.5, res);
+		std::printf("  RES %.2f: shoulders %.1f / %.1f dB\n", res, lo, hi);
+		CHECK(std::fabs(lo - hi) < 0.5, "shoulders not symmetric at RES %.2f: %.1f / %.1f dB", res, lo, hi);
+		CHECK(hi > prev, "shoulder peak does not grow with RES (%.2f): %.1f <= %.1f dB", res, hi, prev);
+		prev = hi;
+	}
+	CHECK(prev > 5.0 && prev < 10.0, "shoulder peak at RES 1 out of range: %.1f dB (want 5..10)", prev);
+	// Far from the notch the passband stays flat at every RES.
+	for (float res : {0.f, 1.f}) {
+		double far = notchGainDb(2.5, res);
+		CHECK(std::fabs(far) < 1.0, "passband not flat 2.5 octaves up (RES %.2f): %.1f dB", res, far);
+	}
+}
+
 int main() {
+	testResonantNotch();
 	testPositionLfoEdge();
 	testFeedbackCharacter();
 	testArtifactVoct();
