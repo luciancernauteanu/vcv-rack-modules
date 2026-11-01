@@ -75,7 +75,8 @@ WaveArtifact::WaveArtifact() {
 		configSwitch(MARKER_LFO_SHAPE_PARAM + i, 0.f, wa::NUM_LFO_SHAPES - 1, 0.f, name + " WAVE LFO shape", lfoShapeNames());
 		getParamQuantity(MARKER_LFO_SHAPE_PARAM + i)->randomizeEnabled = false;
 		lfos[i].seed(random::u32());
-		configParam(MARKER_GAIN_PARAM + i, 0.f, 4.f, 1.f, name + " gain", "%", 0.f, 100.f);
+		// Shown in dB: 0 dB (the default) is unity; stored as a linear factor so saved patches are unchanged.
+		configParam(MARKER_GAIN_PARAM + i, 0.f, 4.f, 1.f, name + " gain", " dB", -10.f, 20.f);
 		configParam(MARKER_CUTOFF_PARAM + i, 0.f, 1.f, 1.f, name + " filter cutoff", " Hz", 1000.f, 20.f);
 		configParam(MARKER_RES_PARAM + i, 0.f, 1.f, 0.f, name + " filter resonance", "%", 0.f, 100.f);
 		configSwitch(MARKER_FILTER_MODE_PARAM + i, 0.f, 3.f, 0.f, name + " filter type", {"Low-pass", "Band-pass", "High-pass", "Notch"});
