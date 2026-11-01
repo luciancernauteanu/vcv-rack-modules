@@ -59,8 +59,9 @@
     <rect id="POS_LFO_SYNC_PARAM" x="36.1" y="90.2" width="6.8" height="4.4" fill="#ff0000"/>
     <rect id="POS_LFO_TRIPLET_PARAM" x="43.8" y="90.2" width="4.2" height="4.4" fill="#ff0000"/>
     <rect id="POS_LFO_DOTTED_PARAM" x="48.7" y="90.2" width="4.2" height="4.4" fill="#ff0000"/>
-    <circle id="POS_LFO_RATE_PARAM" cx="38.5" cy="98.8" r="3" fill="#ff0000"/>
-    <circle id="POS_LFO_AMT_PARAM" cx="51" cy="98.8" r="3" fill="#ff0000"/>
+    <circle id="POS_LFO_RATE_PARAM" cx="36.4" cy="98.8" r="3" fill="#ff0000"/>
+    <circle id="POS_LFO_SMOOTH_PARAM" cx="45" cy="98.8" r="3" fill="#ff0000"/>
+    <circle id="POS_LFO_AMT_PARAM" cx="53.6" cy="98.8" r="3" fill="#ff0000"/>
     <circle id="FREQ_PARAM" cx="64.5" cy="90.5" r="4" fill="#ff0000"/>
     <circle id="VOCT_INPUT" cx="75.5" cy="90.5" r="4" fill="#00ff00"/>
     <rect id="MASTER_MODE_PARAM" x="84" y="82.3" width="10" height="5" fill="#ff0000"/>
@@ -76,9 +77,9 @@
     <circle id="LEFT_OUTPUT" cx="157.5" cy="97.6" r="4" fill="#0000ff"/>
     <circle id="RIGHT_OUTPUT" cx="169.5" cy="97.6" r="4" fill="#0000ff"/>
     <rect id="DOT_STRIP" x="6" y="108" width="170.88" height="12" fill="#ffff00"/>
-    <circle id="ARTIFACT_L_OUTPUT_0" cx="189.3" cy="28" r="4" fill="#0000ff"/>
-    <circle id="ARTIFACT_R_OUTPUT_0" cx="200.9" cy="28" r="4" fill="#0000ff"/>
-    <circle id="ARTIFACT_L_OUTPUT_4" cx="189.3" cy="106" r="4" fill="#0000ff"/>
-    <circle id="ARTIFACT_R_OUTPUT_4" cx="200.9" cy="106" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_L_OUTPUT_0" cx="188.32" cy="28" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_R_OUTPUT_0" cx="199.92" cy="28" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_L_OUTPUT_4" cx="188.32" cy="106" r="4" fill="#0000ff"/>
+    <circle id="ARTIFACT_R_OUTPUT_4" cx="199.92" cy="106" r="4" fill="#0000ff"/>
   </g>
 </svg>

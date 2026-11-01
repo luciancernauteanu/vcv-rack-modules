@@ -114,6 +114,8 @@ WaveArtifact::WaveArtifact() {
 	configSwitch(POS_LFO_SHAPE_PARAM, 0.f, wa::NUM_LFO_SHAPES - 1, 0.f, "Position LFO shape", lfoShapeNames());
 	configLfoRate(this, POS_LFO_RATE_PARAM, POS_LFO_SYNC_PARAM, POS_LFO_TRIPLET_PARAM, POS_LFO_DOTTED_PARAM, "Position LFO rate");
 	configParam(POS_LFO_AMT_PARAM, 0.f, 1.f, 0.f, "Position LFO amount", "%", 0.f, 100.f);
+	// 20 ms .. 2 s, log. Default 0.2 (50 ms): rounds the edge of a saw / square so POSITION does not jump.
+	configParam(POS_LFO_SMOOTH_PARAM, 0.f, 1.f, 0.2f, "Position LFO smoothing", " ms", 100.f, 1000.f * wa::MIN_WAVE_SMOOTH);
 	configSwitch(POS_LFO_SYNC_PARAM, 0.f, 1.f, 1.f, "Position LFO sync", {"Free (Hz)", "Tempo sync (BPM / CLOCK)"});
 	configSwitch(POS_LFO_TRIPLET_PARAM, 0.f, 1.f, 0.f, "Position LFO triplets", {"Off", "On"});
 	configSwitch(POS_LFO_DOTTED_PARAM, 0.f, 1.f, 0.f, "Position LFO dotted", {"Off", "On"});
@@ -130,13 +132,15 @@ WaveArtifact::WaveArtifact() {
 	configSwitch(STOP_PARAM, 0.f, 1.f, 0.f, "Stop audio (all outputs fade to silence; LFOs and clock keep running)", {"Playing", "Stopped"});
 	configSwitch(CLOCK_PPQN_PARAM, 0.f, wa::NUM_PPQN - 1, 0.f, "Clock resolution", {"1 PPQN (quarter notes)", "2 PPQN (eighths)", "4 PPQN (sixteenths)", "8 PPQN", "12 PPQN", "24 PPQN (MIDI clock)", "48 PPQN"});
 	getParamQuantity(CLOCK_PPQN_PARAM)->randomizeEnabled = false;
+	// Randomize must not silence the module.
+	getParamQuantity(STOP_PARAM)->randomizeEnabled = false;
 	configOutput(LEFT_OUTPUT, "Left");
 	configOutput(RIGHT_OUTPUT, "Right");
 	configOutput(CLOCK_OUTPUT, "Clock out (one 10 V trigger per beat: internal BPM, or the CLOCK input)");
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		std::string name = "Artifact " + std::to_string(i + 1);
-		configOutput(ARTIFACT_L_OUTPUT + i, name + " left (mono when right is unpatched; patched = leaves the main L/R)");
-		configOutput(ARTIFACT_R_OUTPUT + i, name + " right (patched = leaves the main L/R)");
+		configOutput(ARTIFACT_L_OUTPUT + i, name + " left (follows POSITION; mono when right is unpatched; patched = leaves the main L/R)");
+		configOutput(ARTIFACT_R_OUTPUT + i, name + " right (follows POSITION; patched = leaves the main L/R)");
 	}
 
 	for (int i = 0; i < NUM_MARKERS; i++) {
@@ -148,6 +152,17 @@ WaveArtifact::WaveArtifact() {
 	rightExpander.producerMessage = new wa::ToMainMessage;
 	rightExpander.consumerMessage = new wa::ToMainMessage;
 	setStatus("Load a WAV (max 10 MB)");
+}
+
+void WaveArtifact::onRandomize(const RandomizeEvent& e) {
+	Module::onRandomize(e);
+	// Rack calls this with the engine locked, so the expanders' params can be set directly. They
+	// are walked in chain order, like the messages; each applies its own randomizeEnabled flags.
+	Module* last = this;
+	for (int n = 0; n < wa::MAX_EXPANDERS && isWaveArtifactExpander(last->rightExpander.module); n++) {
+		last = last->rightExpander.module;
+		last->onRandomize(e);
+	}
 }
 
 void WaveArtifact::onReset(const ResetEvent& e) {
@@ -274,6 +289,9 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		bool triplets = params[POS_LFO_TRIPLET_PARAM].getValue() > 0.5f;
 		bool dotted = params[POS_LFO_DOTTED_PARAM].getValue() > 0.5f;
 		float lfo = posLfo.process(shape, sync, params[POS_LFO_RATE_PARAM].getValue(), triplets, dotted, clock, args.sampleTime);
+		// SMOOTH acts on the LFO alone (knob and CV stay fast): a saw / square edge would otherwise
+		// throw the playhead across the markers in a few ms, which is heard as a click.
+		lfo = posLfoSmoother.process(lfo, wa::MIN_WAVE_SMOOTH * std::exp(params[POS_LFO_SMOOTH_PARAM].getValue() * LN_100), args.sampleTime);
 		float amt = params[POS_LFO_AMT_PARAM].getValue();
 		if (amt > 0.f)
 			position = wa::lfoCentered(position, amt, lfo);
@@ -639,6 +657,7 @@ struct WaveArtifactWidget : ModuleWidget {
 		labels->add(Vec(POS_ATTEN.x, POS_CV_LABEL_Y), "CV AMT", 6.f);
 		labels->add(Vec(POS_LFO_SHAPE_SCREEN.x, POS_LFO_LABEL_Y), "POS LFO", 6.f);
 		labels->add(Vec(POS_LFO_RATE_KNOB.x, POS_LFO_KNOB_LABEL_Y), "RATE", 6.f);
+		labels->add(Vec(POS_LFO_SMOOTH_KNOB.x, POS_LFO_KNOB_LABEL_Y), "SMOOTH", 5.f);
 		labels->add(Vec(POS_LFO_AMT_KNOB.x, POS_LFO_KNOB_LABEL_Y), "AMT", 6.f);
 		labels->add(Vec(POS_INPUT.x, CONTROL_LABEL_Y), "POS CV", 6.f);
 		labels->add(Vec(FREQ_KNOB.x, CONTROL_LABEL_Y), "FREQ");
@@ -724,6 +743,7 @@ struct WaveArtifactWidget : ModuleWidget {
 		addParam(createLfoRateKnob<LfoRateKnobT<Trimpot>>(POS_LFO_RATE_KNOB, module, WaveArtifact::POS_LFO_RATE_PARAM,
 			WaveArtifact::POS_LFO_SYNC_PARAM, WaveArtifact::POS_LFO_TRIPLET_PARAM, WaveArtifact::POS_LFO_DOTTED_PARAM,
 			WaveArtifact::POS_LFO_AMT_PARAM));
+		addParam(createParamCentered<Trimpot>(mm2px(POS_LFO_SMOOTH_KNOB), module, WaveArtifact::POS_LFO_SMOOTH_PARAM));
 		addParam(createParamCentered<Trimpot>(mm2px(POS_LFO_AMT_KNOB), module, WaveArtifact::POS_LFO_AMT_PARAM));
 		addParam(createParamCentered<RoundBlackKnob>(mm2px(FREQ_KNOB), module, WaveArtifact::FREQ_PARAM));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(VOCT_INPUT), module, WaveArtifact::VOCT_INPUT));
@@ -826,31 +846,47 @@ struct WaveArtifactWidget : ModuleWidget {
 		}, count >= wa::MAX_EXPANDERS));
 	}
 
-	/** Creates an expander at the right end of the chain (pushing anything there aside), set to the
-	first marker no expander in the chain uses yet. Undoable. */
+	/** Creates an expander set to the first marker no expander in the chain uses yet, and slots it in
+	so the chain stays in ascending marker order: right after the last expander with a lower marker
+	(or right after the main module), pushing the rest of the row to the right. E.g. with one
+	expander on marker 5, the new one (marker 1) goes first. One undo step, which also moves the
+	pushed modules back. */
 	void addExpander() {
 		WaveArtifact* m = getModule<WaveArtifact>();
 		if (!m)
 			return;
 		bool used[WaveArtifact::NUM_MARKERS] = {};
-		int count = 0;
+		std::vector<Module*> chain;
 		Module* last = m;
 		while (isWaveArtifactExpander(last->rightExpander.module)) {
 			last = last->rightExpander.module;
+			chain.push_back(last);
 			used[((WaveArtifactExpander*) last)->getMarker()] = true;
-			if (++count >= wa::MAX_EXPANDERS)
+			if ((int) chain.size() >= wa::MAX_EXPANDERS)
 				return;
 		}
-		int marker = count % WaveArtifact::NUM_MARKERS;
+		int marker = (int) chain.size() % WaveArtifact::NUM_MARKERS;
 		for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
 			if (!used[i]) {
 				marker = i;
 				break;
 			}
 		}
-		ModuleWidget* lastWidget = APP->scene->rack->getModule(last->id);
-		if (!lastWidget)
+		// Insert before the first expander with a higher marker; at the end if there is none.
+		Module* before = m;
+		for (Module* e : chain) {
+			if (((WaveArtifactExpander*) e)->getMarker() > marker)
+				break;
+			before = e;
+		}
+		ModuleWidget* beforeWidget = APP->scene->rack->getModule(before->id);
+		if (!beforeWidget)
 			return;
+
+		// Positions before the insert, to record the modules it pushes aside.
+		std::map<int64_t, Vec> oldPos;
+		for (ModuleWidget* w : APP->scene->rack->getModules())
+			oldPos[w->module ? w->module->id : -1] = w->box.pos;
 
 		Model* model = modelWaveArtifactExpander;
 		Module* em = model->createModule();
@@ -858,12 +894,29 @@ struct WaveArtifactWidget : ModuleWidget {
 		APP->engine->addModule(em);
 		ModuleWidget* emw = model->createModuleWidget(em);
 		APP->scene->rack->addModule(emw);
-		APP->scene->rack->setModulePosForce(emw, Vec(lastWidget->box.getRight(), lastWidget->box.pos.y));
+		// Placed at the right edge of `before`: whatever sat there (the higher-marker expanders and
+		// anything touching them) is shoved right to make room.
+		APP->scene->rack->setModulePosForce(emw, Vec(beforeWidget->box.getRight(), beforeWidget->box.pos.y));
 
+		// Undo removes the expander, then moves the pushed modules back; redo does the reverse.
+		history::ComplexAction* complex = new history::ComplexAction;
+		complex->name = "add Wave Artifacts expander";
+		for (ModuleWidget* w : APP->scene->rack->getModules()) {
+			if (w == emw || !w->module)
+				continue;
+			auto it = oldPos.find(w->module->id);
+			if (it == oldPos.end() || it->second.equals(w->box.pos))
+				continue;
+			history::ModuleMove* mv = new history::ModuleMove;
+			mv->moduleId = w->module->id;
+			mv->oldPos = it->second;
+			mv->newPos = w->box.pos;
+			complex->push(mv);
+		}
 		history::ModuleAdd* h = new history::ModuleAdd;
-		h->name = "add Wave Artifacts expander";
 		h->setModule(emw);
-		APP->history->push(h);
+		complex->push(h);
+		APP->history->push(complex);
 	}
 };
 

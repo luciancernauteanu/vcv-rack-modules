@@ -70,7 +70,14 @@ inline void drawCenteredNumber(NVGcontext* vg, int font, float cx, float cy, flo
 	nvgFontSize(vg, size);
 	nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
 	nvgFillColor(vg, color);
-	nvgText(vg, cx, cy + 0.35f * size, text.c_str(), NULL);
+	// A single digit is centered by its ink, not its advance box: Nunito Bold's glyphs sit a little
+	// off their advance center (measured from the font, em units; "1" is 0.048 em left, "5" 0.015
+	// em right), which shows in a small circle.
+	static const float INK_OFFSET_EM[10] = {-0.0002f, -0.0481f, -0.0098f, 0.0085f, 0.0085f, 0.0151f, 0.0024f, -0.0022f, 0.f, -0.0015f};
+	float dx = 0.f;
+	if (text.size() == 1 && text[0] >= '0' && text[0] <= '9')
+		dx = -INK_OFFSET_EM[text[0] - '0'] * size;
+	nvgText(vg, cx + dx, cy + 0.35f * size, text.c_str(), NULL);
 }
 
 inline std::shared_ptr<window::Font> monoFont() {

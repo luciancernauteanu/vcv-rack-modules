@@ -1190,7 +1190,7 @@ static void testArtifactVoct() {
 }
 
 static void testDirectOutputs() {
-	std::printf("artifact outputs: own chain before the master, always playing, off when unpatched\n");
+	std::printf("artifact outputs: own chain after the position, before the master, off when unpatched\n");
 	const double c4 = 261.6256, c5 = 2 * c4;
 	{
 		// Unpatched: silent.
@@ -1201,8 +1201,8 @@ static void testDirectOutputs() {
 		CHECK(peak == 0.f, "unpatched artifact output is not silent: %f", peak);
 	}
 	{
-		// Patched, playhead on artifact 1: the main mix is artifact 1 (C4), artifact 0's own output
-		// still plays artifact 0 (C5), at full level.
+		// Patched, playhead on artifact 1: the main mix is artifact 1 (C4). The artifact outputs come
+		// after the position, so artifact 0's own output is silent there.
 		SineRig rig;
 		twoArtifacts(rig);
 		rig.in.markers[0].pitch = 12.f;
@@ -1212,9 +1212,46 @@ static void testDirectOutputs() {
 		renderBoth(rig, 0, 1.f, &mainL, &dirL);
 		double mainC4 = tone(mainL, c4, rig.sr), mainC5 = tone(mainL, c5, rig.sr);
 		double dirC5 = tone(dirL, c5, rig.sr), dirC4 = tone(dirL, c4, rig.sr);
-		std::printf("  playhead on artifact 1: main C4 %.3f C5 %.3f | artifact 0 out C5 %.3f C4 %.3f\n", mainC4, mainC5, dirC5, dirC4);
+		std::printf("  playhead on artifact 1: main C4 %.3f C5 %.3f | artifact 0 out C5 %.4f C4 %.4f\n", mainC4, mainC5, dirC5, dirC4);
 		CHECK(mainC4 > 0.4 && mainC5 < 0.02, "main mix is not artifact 1");
-		CHECK(dirC5 > 0.45 && dirC4 < 0.02, "artifact 0 output does not play artifact 0 regardless of the playhead");
+		CHECK(dirC5 < 1e-3 && dirC4 < 1e-3, "artifact 0 output plays while the playhead is away from it");
+	}
+	{
+		// Playhead on artifact 0: its own output plays it (C5) at full level.
+		SineRig rig;
+		twoArtifacts(rig);
+		rig.in.markers[0].pitch = 12.f;
+		rig.in.position = 0.f;
+		rig.in.wantDirect[0] = true;
+		std::vector<float> dirL;
+		renderBoth(rig, 0, 1.f, nullptr, &dirL);
+		double dirC5 = tone(dirL, c5, rig.sr), dirC4 = tone(dirL, c4, rig.sr);
+		std::printf("  playhead on artifact 0: artifact 0 out C5 %.3f C4 %.4f\n", dirC5, dirC4);
+		CHECK(dirC5 > 0.45 && dirC4 < 0.02, "artifact 0 output does not play artifact 0 on its marker");
+	}
+	{
+		// Sweeping the playhead across both artifacts: each output fades with the position, no click.
+		SineRig rig;
+		twoArtifacts(rig);
+		rig.in.wantDirect[0] = true;
+		rig.in.wantDirect[1] = true;
+		float l, r, dl, dr, prev[2] = {0.f, 0.f}, maxStep = 0.f;
+		int n = (int) (1.5f * rig.sr);
+		for (int i = 0; i < n; i++) {
+			// 0 -> 1 -> 0 in 1 s, after a 0.25 s settle, then hold.
+			float t = std::min(std::max((float) i / rig.sr - 0.25f, 0.f), 1.f);
+			rig.in.position = (t < 0.5f) ? 2.f * t : 2.f - 2.f * t;
+			rig.engine.process(rig.in, &l, &r);
+			for (int m = 0; m < 2; m++) {
+				rig.engine.getDirect(m, &dl, &dr);
+				if (i > (int) (0.1f * rig.sr))
+					maxStep = std::max(maxStep, std::fabs(dl - prev[m]));
+				prev[m] = dl;
+			}
+		}
+		float limit = (float) (2 * PI * c4 / rig.sr * 1.3 + 0.01);
+		std::printf("  playhead sweep: artifact outputs max step %.4f (limit %.4f)\n", maxStep, limit);
+		CHECK(maxStep <= limit, "artifact outputs click while the playhead moves: %f", maxStep);
 	}
 	{
 		// Patching moves the artifact out of the main mix: its output carries exactly the level the
@@ -1241,7 +1278,7 @@ static void testDirectOutputs() {
 	}
 	{
 		// Halfway between two artifacts with artifact 0 patched: the main mix keeps only artifact 1
-		// (its half share, C4); artifact 0 (C5) plays only on its own output.
+		// (its half share, C4); artifact 0 (C5) plays only on its own output, at its half share.
 		SineRig rig;
 		twoArtifacts(rig);
 		rig.in.markers[0].pitch = 12.f;
@@ -1252,7 +1289,7 @@ static void testDirectOutputs() {
 		double mainC4 = tone(mainL, c4, rig.sr), mainC5 = tone(mainL, c5, rig.sr), dirC5 = tone(dirL, c5, rig.sr);
 		std::printf("  halfway, artifact 0 patched: main C4 %.3f C5 %.4f | artifact 0 out C5 %.3f\n", mainC4, mainC5, dirC5);
 		CHECK(mainC5 < 1e-3 && mainC4 > 0.15, "main mix does not leave out only the patched artifact");
-		CHECK(dirC5 > 0.45, "patched artifact missing from its own output");
+		CHECK(dirC5 > 0.2 && dirC5 < 0.3, "patched artifact is not at its half share on its own output: %f", dirC5);
 	}
 	{
 		// Patching and unpatching while it plays: the main output fades, no click.
@@ -1419,7 +1456,57 @@ static void testFeedbackCharacter() {
 	CHECK(s[5].rms < 0.01, "FDBK 85%% should ring, not self-oscillate: rms %f", s[5].rms);
 }
 
+static void testPositionLfoEdge() {
+	std::printf("position LFO saw / reverse saw / square: playhead speed at the edge, with and without SMOOTH\n");
+	const float sr = 48000.f, dt = 1.f / sr;
+	double slope;
+	std::unique_ptr<wa::WavetableBank> bank(makeBank(ampsFor(64, 5), &slope));
+	float adj = maxAdjacentDiff(*bank);
+	for (int shape : {wa::LFO_SAW, wa::LFO_SAW_REVERSE, wa::LFO_SQUARE}) {
+		float peakSpeed[2] = {0.f, 0.f}, maxStep[2] = {0.f, 0.f};
+		for (int smoothed = 0; smoothed < 2; smoothed++) {
+			wa::MorphEngine engine;
+			engine.setSampleRate(sr);
+			wa::EngineInput in;
+			in.bank = bank.get();
+			for (int i = 0; i < 5; i++) {
+				in.markers[i].active = true;
+				in.markers[i].pos = i * 0.25f;
+				in.markers[i].wave = i / 4.f;
+			}
+			wa::Lfo lfo;
+			wa::ClockTracker clock;
+			wa::LfoSmoother smoother;
+			float l, r, prev = 0.f, prevPos = 0.f;
+			for (int n = 0; n < (int) (3.f * sr); n++) {
+				float x = lfo.process(shape, false, 0.5f, false, false, clock, dt);
+				x = smoother.process(x, smoothed ? 0.05f : 0.f, dt); // the module's default SMOOTH is 50 ms
+				in.position = wa::lfoCentered(0.5f, 1.f, x);
+				engine.process(in, &l, &r);
+				float pos = engine.getPosition();
+				if (n > (int) (0.5f * sr)) {
+					peakSpeed[smoothed] = std::max(peakSpeed[smoothed], std::fabs(pos - prevPos));
+					maxStep[smoothed] = std::max(maxStep[smoothed], std::fabs(l - prev));
+				}
+				prev = l;
+				prevPos = pos;
+			}
+		}
+		// Steepest legitimate step: the waveform's own slope at 261.6 Hz plus the playhead moving
+		// through neighboring tables at its peak speed (4 gaps of 0.25 across the bar).
+		auto limitFor = [&](float posSpeed) {
+			return (float) ((slope * 2 * PI * 261.6256 / sr + posSpeed * 4.f * adj) * 1.2 + 0.01);
+		};
+		std::printf("  %-12s peak playhead speed per sample: raw %.5f, SMOOTH 50 ms %.5f (%.0fx slower); output step %.4f / %.4f\n",
+			wa::LFO_SHAPE_NAMES[shape], peakSpeed[0], peakSpeed[1], peakSpeed[0] / std::max(peakSpeed[1], 1e-9f), maxStep[0], maxStep[1]);
+		CHECK(peakSpeed[1] * 3.f < peakSpeed[0], "SMOOTH does not slow the playhead at the edge: %f vs %f", peakSpeed[1], peakSpeed[0]);
+		CHECK(peakSpeed[1] < 0.0015f, "smoothed playhead still too fast at the edge: %f", peakSpeed[1]);
+		CHECK(maxStep[1] <= limitFor(peakSpeed[1]), "smoothed output clicks: %f > %f", maxStep[1], limitFor(peakSpeed[1]));
+	}
+}
+
 int main() {
+	testPositionLfoEdge();
 	testFeedbackCharacter();
 	testArtifactVoct();
 	testDirectOutputs();

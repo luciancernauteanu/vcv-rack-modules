@@ -82,6 +82,28 @@ inline float lfoCentered(float base, float amount, float lfo) {
 	return center + h * lfo;
 }
 
+/** One-pole smoothing of an LFO's output (the position LFO's SMOOTH). A saw or square edge, which
+jumps a whole `amount` in one sample, becomes an exponential ramp with this time constant, so
+whatever the LFO drives (the playhead) glides across instead of jumping. Time constant 0 or less =
+no smoothing. */
+class LfoSmoother {
+public:
+	float process(float x, float timeConstant, float sampleTime) {
+		if (timeConstant <= 0.f)
+			y = x;
+		else
+			y += (x - y) * (1.f - std::exp(-sampleTime / timeConstant));
+		return y;
+	}
+
+	void reset(float value = 0.f) {
+		y = value;
+	}
+
+private:
+	float y = 0.f;
+};
+
 /** Clock resolutions offered for the CLOCK input, in pulses per quarter note. */
 static const int NUM_PPQN = 7;
 static const int PPQN_VALUES[NUM_PPQN] = {1, 2, 4, 8, 12, 24, 48};

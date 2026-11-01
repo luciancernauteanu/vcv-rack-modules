@@ -113,8 +113,9 @@ static const Vec POS_LFO_SHAPE_SIZE = Vec(17.f, 7.f);
 static const Vec POS_LFO_SYNC_BUTTON = Vec(39.5f, 92.4f);
 static const Vec POS_LFO_TRIP_BUTTON = Vec(45.9f, 92.4f);
 static const Vec POS_LFO_DOT_BUTTON = Vec(50.8f, 92.4f);  // SYNC / T / D centered under the shape screen
-static const Vec POS_LFO_RATE_KNOB = Vec(38.5f, 98.8f);
-static const Vec POS_LFO_AMT_KNOB = Vec(51.f, 98.8f);
+static const Vec POS_LFO_RATE_KNOB = Vec(36.4f, 98.8f);
+static const Vec POS_LFO_SMOOTH_KNOB = Vec(45.f, 98.8f);
+static const Vec POS_LFO_AMT_KNOB = Vec(53.6f, 98.8f);
 static const float POS_LFO_KNOB_LABEL_Y = 104.6f;
 static const Vec FREQ_KNOB = Vec(64.5f, CONTROL_Y);
 static const Vec VOCT_INPUT = Vec(75.5f, CONTROL_Y);
@@ -146,8 +147,8 @@ static const float OUTPUT_LABEL_Y = 104.1f;
 // the artifact's color, on an inverted background like the main outputs.
 static const Vec ARTOUT_BOX_POS = Vec(180.88f, 11.f);
 static const Vec ARTOUT_BOX_SIZE = Vec(26.48f, 109.f);
-static const float ARTOUT_L_X = 189.3f;
-static const float ARTOUT_R_X = 200.9f;
+static const float ARTOUT_L_X = 188.32f; // jacks centered in the box (center 194.12), like the number badges
+static const float ARTOUT_R_X = 199.92f;
 static const float ARTOUT_ROW0_Y = 28.f;
 static const float ARTOUT_ROW_STEP = 19.5f;
 /** Number badge above each pair */
