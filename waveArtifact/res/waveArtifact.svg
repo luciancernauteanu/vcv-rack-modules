@@ -75,7 +75,7 @@
     <circle id="MASTER_GAIN_PARAM" cx="155.3" cy="85.4" r="3.5" fill="#ff0000"/>
     <circle id="MASTER_GAIN_AMT_PARAM" cx="163.4" cy="85.4" r="3" fill="#ff0000"/>
     <circle id="MASTER_GAIN_INPUT" cx="171.6" cy="85.4" r="4" fill="#00ff00"/>
-    <rect id="STOP_PARAM" x="168.1" y="95" width="7.6" height="5.2" fill="#ff0000"/>
+    <circle id="STOP_PARAM" cx="171.9" cy="97.6" r="2.8" fill="#ff0000"/>
     <circle id="LEFT_OUTPUT" cx="155.3" cy="97.6" r="4" fill="#0000ff"/>
     <circle id="RIGHT_OUTPUT" cx="164.1" cy="97.6" r="4" fill="#0000ff"/>
     <rect id="DOT_STRIP" x="6" y="108" width="170.88" height="12" fill="#ffff00"/>

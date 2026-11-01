@@ -60,7 +60,7 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
 9. **Finish the sound** with the master section: pick a filter type (OFF / LP / BP / HP /
    NOTCH), then CUTOFF, RES, DRIVE, SPREAD and FDBK, each with its own CV trimpot and jack,
    and the master GAIN with its own **AMT** trimpot and **CV** jack (a VCA: GAIN at 0%, AMT at
-   100%, then 0-10 V = 0-200%; negative AMT ducks). **STOP** fades every output to silence
+   100%, then 0-10 V = 0-200%; negative AMT ducks). The red **!** bullet (STOP) fades every output to silence
    until you press it again.
 
 Useful to know:

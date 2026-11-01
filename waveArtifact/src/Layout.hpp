@@ -88,7 +88,7 @@ static const float BULLET_R = 2.1f;
 /** File/status line (click it to load a WAV) */
 static const float STATUS_Y = 26.f;
 /** Previous / next WAV-in-folder arrows at the right end of the file line */
-static const Vec FILE_ARROW_SIZE = Vec(5.f, 4.2f);
+static const Vec FILE_ARROW_SIZE = Vec(4.2f, 3.6f);
 
 // Controls band
 static const float CTRL_Y0 = 77.5f;
@@ -139,8 +139,9 @@ static const float OUT_COL_X[3] = {155.3f, 163.4f, 171.6f};
 static const Vec MASTER_GAIN_KNOB = Vec(OUT_COL_X[0], 85.4f);
 static const Vec MASTER_GAIN_AMT = Vec(OUT_COL_X[1], 85.4f);
 static const Vec MASTER_GAIN_CV = Vec(OUT_COL_X[2], 85.4f);
+// STOP is a round warning bullet (no text), centred here.
 static const Vec STOP_BUTTON = Vec(171.9f, 97.6f);
-static const Vec STOP_BUTTON_SIZE = Vec(7.6f, 5.2f);
+static const Vec STOP_BUTTON_SIZE = Vec(5.6f, 5.6f);
 static const NVGcolor STOP_COLOR = nvgRGB(0xff, 0x5c, 0x5c);
 static const float MASTER_GAIN_LABEL_Y = 79.6f;
 static const Vec LEFT_OUTPUT = Vec(155.3f, 97.6f);

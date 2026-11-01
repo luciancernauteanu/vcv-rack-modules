@@ -431,7 +431,8 @@ void WaveArtifact::loadSibling(int dir) {
 			}
 		}
 	}
-	if (wavs[next] == filePath && n == 1)
+	// Only this file left: nothing to step to (compare indices, not paths: separators may differ).
+	if (n == 1 && at >= 0)
 		return;
 	loadFile(wavs[next]);
 }
@@ -693,6 +694,47 @@ struct ArtifactNumber : widget::Widget {
 	}
 };
 
+/** STOP as a round warning bullet: a red dot with an exclamation mark, no text. Dim when playing,
+bright and glowing when stopped. Same click behaviour as a lit toggle. */
+struct StopBullet : LitToggle {
+	/** Round glow around the bullet (a radial gradient), drawn on the light layer while stopped. */
+	void drawLayer(const DrawArgs& args, int layer) override {
+		if (layer == 1 && isOn()) {
+			Vec c = box.size.div(2.f);
+			float r = std::min(box.size.x, box.size.y) / 2.f;
+			NVGpaint glow = nvgRadialGradient(args.vg, c.x, c.y, r * 0.95f, r * 1.7f, nvgTransRGBAf(color, 0.22f), nvgTransRGBAf(color, 0.f));
+			nvgBeginPath(args.vg);
+			nvgCircle(args.vg, c.x, c.y, r * 1.7f);
+			nvgFillPaint(args.vg, glow);
+			nvgFill(args.vg);
+		}
+		ParamWidget::drawLayer(args, layer);
+	}
+
+	void draw(const DrawArgs& args) override {
+		bool on = isOn();
+		Vec c = box.size.div(2.f);
+		float r = std::min(box.size.x, box.size.y) / 2.f;
+		nvgBeginPath(args.vg);
+		nvgCircle(args.vg, c.x, c.y, r - 0.4f);
+		nvgFillColor(args.vg, on ? nvgTransRGBAf(color, 0.95f) : nvgRGB(0x14, 0x16, 0x1d));
+		nvgFill(args.vg);
+		nvgStrokeColor(args.vg, nvgTransRGBAf(color, on ? 1.f : 0.5f));
+		nvgStrokeWidth(args.vg, 0.7f);
+		nvgStroke(args.vg);
+		// Exclamation mark: a bar and a dot
+		NVGcolor mark = on ? nvgRGB(0x10, 0x12, 0x1a) : nvgTransRGBAf(color, 0.85f);
+		nvgBeginPath(args.vg);
+		nvgRect(args.vg, c.x - r * 0.13f, c.y - r * 0.55f, r * 0.26f, r * 0.75f);
+		nvgFillColor(args.vg, mark);
+		nvgFill(args.vg);
+		nvgBeginPath(args.vg);
+		nvgCircle(args.vg, c.x, c.y + r * 0.62f, r * 0.15f);
+		nvgFillColor(args.vg, mark);
+		nvgFill(args.vg);
+	}
+};
+
 struct WaveArtifactWidget : ModuleWidget {
 	static const int EDIT_KNOBS = 17;
 	ParamWidget* editKnobs[WaveArtifact::NUM_MARKERS][EDIT_KNOBS] = {};
@@ -842,7 +884,7 @@ struct WaveArtifactWidget : ModuleWidget {
 		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(MASTER_GAIN_KNOB), module, WaveArtifact::MASTER_GAIN_PARAM));
 		addParam(createParamCentered<Trimpot>(mm2px(MASTER_GAIN_AMT), module, WaveArtifact::MASTER_GAIN_AMT_PARAM));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(MASTER_GAIN_CV), module, WaveArtifact::MASTER_GAIN_INPUT));
-		addParam(createLitToggle(STOP_BUTTON, module, WaveArtifact::STOP_PARAM, "STOP", STOP_COLOR, STOP_BUTTON_SIZE));
+		addParam(createLitToggle<StopBullet>(STOP_BUTTON, module, WaveArtifact::STOP_PARAM, "", STOP_COLOR, STOP_BUTTON_SIZE));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(LEFT_OUTPUT), module, WaveArtifact::LEFT_OUTPUT));
 		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(RIGHT_OUTPUT), module, WaveArtifact::RIGHT_OUTPUT));
 

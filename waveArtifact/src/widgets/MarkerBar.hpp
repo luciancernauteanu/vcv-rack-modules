@@ -100,7 +100,8 @@ struct MarkerBar : widget::Widget {
 	/** Previous (0) / next (1) WAV-in-folder arrow at the right end of the file line */
 	math::Rect arrowRect(int k) {
 		Vec size = mm2px(layout::FILE_ARROW_SIZE);
-		float cx = mm2px(layout::BAR_X1 - (k == 0 ? layout::FILE_ARROW_SIZE.x * 1.6f : layout::FILE_ARROW_SIZE.x * 0.5f));
+		// Fixed at the far right of the file line: previous, then next. Does not move with the file name.
+		float cx = mm2px(layout::BAR_X1) - size.x / 2.f - (1 - k) * (size.x + mm2px(1.2f));
 		return math::Rect(Vec(cx - size.x / 2.f, mm2px(layout::STATUS_Y) - size.y / 2.f), size);
 	}
 	bool showArrows() {
@@ -126,8 +127,6 @@ struct MarkerBar : widget::Widget {
 		if (!left && !right)
 			return;
 
-		// Load: the file line, or the empty screen before anything is loaded. The dialog opens on
-		// release (onDragEnd), so the press/release pair is not split by the modal dialog.
 		// Previous / next WAV in the folder (no dialog, so it can act on press)
 		int arrow = arrowAt(e.pos);
 		if (arrow >= 0) {
@@ -137,6 +136,8 @@ struct MarkerBar : widget::Widget {
 			return;
 		}
 
+		// Load: the file line, or the empty screen before anything is loaded. The dialog opens on
+		// release (onDragEnd), so the press/release pair is not split by the modal dialog.
 		bool noBank = !module->activeBank.load();
 		if (left && (inStatusLine(e.pos) || (noBank && e.pos.y < mm2px(layout::SLOTS_BOTTOM + 1.f)))) {
 			loadOnRelease = true;
@@ -279,9 +280,9 @@ struct MarkerBar : widget::Widget {
 		if (module && module->activeBank.load()) {
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 			nvgFillColor(args.vg, layout::SCREEN_DIM);
-			// The arrows sit at the right end; the hint moves left of them.
+			// Hint at the right end of the bar, as before the arrows.
 			float hintX = showArrows() ? arrowRect(0).pos.x - mm2px(1.5f) : mm2px(layout::BAR_X1);
-			const char* hint = showArrows() ? "click name to load - arrows: same folder" : "click the file name to load another WAV";
+			const char* hint = "click the file name to load another WAV";
 			nvgText(args.vg, hintX, y, hint, NULL);
 		}
 		drawArrows(args);
