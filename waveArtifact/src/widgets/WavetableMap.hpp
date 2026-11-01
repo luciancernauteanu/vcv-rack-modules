@@ -9,7 +9,6 @@ glass sheen), so smooth, bright, spiky or thin regions are visible at once. Each
 sits on the waveform as its numbered colour bullet (as on the marker bar), at the artifact it is
 playing now (moves with WAVE, its LFO and expander CV).
 
-- Hover: a magnifier shows that artifact's waveform and number.
 - Click: give that artifact to the selected marker. Keep dragging to sweep it through the sample.
 - Drag a bullet: sweep that marker (it becomes the selected one).
 - Double-click: preview that artifact (again to stop). Right-click: preview / assign menu.
@@ -27,7 +26,6 @@ struct WavetableMap : widget::Widget {
 
 	// Interaction
 	int hovered = -1;
-	float hoverX = 0.f;
 	int dragMarker = -1;
 
 	const wa::WavetableBank* bank() {
@@ -119,7 +117,6 @@ struct WavetableMap : widget::Widget {
 	void onHover(const HoverEvent& e) override {
 		const wa::WavetableBank* b = bank();
 		hovered = b ? tableAt(e.pos.x, b->numTables) : -1;
-		hoverX = e.pos.x;
 		Widget::onHover(e);
 		e.consume(this);
 	}
@@ -392,35 +389,6 @@ struct WavetableMap : widget::Widget {
 			}
 			if (font)
 				wadraw::drawCenteredNumber(vg, font->handle, x, mid, br * 1.4f, std::to_string(i + 1), nvgRGB(0x16, 0x18, 0x22));
-		}
-
-		// Hover magnifier: the hovered artifact's waveform and number, next to the cursor.
-		if (hovered >= 0 && hovered < n && dragMarker < 0) {
-			float mw = mm2px(26.f);
-			float mx = hoverX + mm2px(3.f);
-			if (mx + mw > W)
-				mx = hoverX - mm2px(3.f) - mw;
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, mx, 1.f, mw, H - 2.f, 2.f);
-			nvgFillColor(vg, nvgRGBAf(0.04f, 0.045f, 0.05f, 0.95f));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(0xc8, 0xcb, 0xd2, 0x90));
-			nvgStrokeWidth(vg, 0.8f);
-			nvgStroke(vg);
-			math::Rect wr(Vec(mx + mm2px(8.f), 3.f), Vec(mw - mm2px(9.f), H - 6.f));
-			wadraw::drawTable(vg, *b, (float) hovered, wr, nvgRGB(0xee, 0xef, 0xf3), 1.2f);
-			if (font) {
-				nvgFontFaceId(vg, font->handle);
-				nvgFontSize(vg, 9.f);
-				nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-				nvgFillColor(vg, nvgRGB(0xe0, 0xe2, 0xe8));
-				std::string label = std::to_string(hovered + 1);
-				nvgText(vg, mx + mm2px(1.5f), H / 2.f - 4.f, label.c_str(), NULL);
-				nvgFontSize(vg, 7.f);
-				nvgFillColor(vg, nvgRGB(0x80, 0x84, 0x8c));
-				std::string total = "/" + std::to_string(n);
-				nvgText(vg, mx + mm2px(1.5f), H / 2.f + 5.f, total.c_str(), NULL);
-			}
 		}
 	}
 };

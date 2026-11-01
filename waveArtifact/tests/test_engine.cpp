@@ -1217,18 +1217,57 @@ static void testDirectOutputs() {
 		CHECK(dirC5 > 0.45 && dirC4 < 0.02, "artifact 0 output does not play artifact 0 regardless of the playhead");
 	}
 	{
-		// With the playhead on the artifact and the master off, its output matches the main mix level.
+		// Patching moves the artifact out of the main mix: its output carries exactly the level the
+		// main output had unpatched (master off), and the main output goes silent.
+		auto setup = [](SineRig& rig) {
+			rig.in.markers[0].gain = 0.7f;
+			rig.in.markers[0].cutoff = 0.6f;
+			rig.in.markers[0].res = 0.5f;
+			rig.in.markers[0].pan = 0.4f;
+		};
+		SineRig before;
+		setup(before);
+		std::vector<float> mainBefore;
+		renderBoth(before, 0, 1.f, &mainBefore, nullptr);
 		SineRig rig;
-		rig.in.markers[0].gain = 0.7f;
-		rig.in.markers[0].cutoff = 0.6f;
-		rig.in.markers[0].res = 0.5f;
-		rig.in.markers[0].pan = 0.4f;
+		setup(rig);
 		rig.in.wantDirect[0] = true;
 		std::vector<float> mainL, dirL;
 		renderBoth(rig, 0, 1.f, &mainL, &dirL);
-		double m = tone(mainL, c4, rig.sr), d = tone(dirL, c4, rig.sr);
-		std::printf("  same artifact, master off: main %.4f, artifact output %.4f\n", m, d);
+		double m = tone(mainBefore, c4, rig.sr), d = tone(dirL, c4, rig.sr), left = tone(mainL, c4, rig.sr);
+		std::printf("  separate: main unpatched %.4f -> artifact output %.4f, main while patched %.5f\n", m, d, left);
 		CHECK(std::fabs(m - d) < 0.01 * m, "artifact output differs from the main path: %f vs %f", d, m);
+		CHECK(left < 1e-3, "patched artifact still in the main mix: %f", left);
+	}
+	{
+		// Halfway between two artifacts with artifact 0 patched: the main mix keeps only artifact 1
+		// (its half share, C4); artifact 0 (C5) plays only on its own output.
+		SineRig rig;
+		twoArtifacts(rig);
+		rig.in.markers[0].pitch = 12.f;
+		rig.in.position = 0.5f;
+		rig.in.wantDirect[0] = true;
+		std::vector<float> mainL, dirL;
+		renderBoth(rig, 0, 1.f, &mainL, &dirL);
+		double mainC4 = tone(mainL, c4, rig.sr), mainC5 = tone(mainL, c5, rig.sr), dirC5 = tone(dirL, c5, rig.sr);
+		std::printf("  halfway, artifact 0 patched: main C4 %.3f C5 %.4f | artifact 0 out C5 %.3f\n", mainC4, mainC5, dirC5);
+		CHECK(mainC5 < 1e-3 && mainC4 > 0.15, "main mix does not leave out only the patched artifact");
+		CHECK(dirC5 > 0.45, "patched artifact missing from its own output");
+	}
+	{
+		// Patching and unpatching while it plays: the main output fades, no click.
+		SineRig rig;
+		float l, r, prev = 0.f, maxStep = 0.f;
+		for (int i = 0; i < (int) (1.5f * rig.sr); i++) {
+			rig.in.wantDirect[0] = (i >= (int) (0.5f * rig.sr) && i < (int) (1.f * rig.sr));
+			rig.engine.process(rig.in, &l, &r);
+			if (i > (int) (0.2f * rig.sr))
+				maxStep = std::max(maxStep, std::fabs(l - prev));
+			prev = l;
+		}
+		float limit = (float) (2 * PI * c4 / rig.sr * 1.3 + 0.01);
+		std::printf("  patch / unpatch while playing: main max step %.4f (limit %.4f)\n", maxStep, limit);
+		CHECK(maxStep <= limit, "patching an artifact output clicks the main output: %f", maxStep);
 	}
 	{
 		// Switching the artifact off fades its output out (no click), and it stays silent.
@@ -1252,6 +1291,27 @@ static void testDirectOutputs() {
 		std::printf("  artifact switched off: max step %.4f (limit %.4f), level afterwards %.5f\n", maxStep, limit, late);
 		CHECK(maxStep <= limit, "switching the artifact off clicks: %f", maxStep);
 		CHECK(late < 1e-3f, "switched-off artifact still sounds: %f", late);
+	}
+	{
+		// STOP (holdSilent) fades the artifact output out and back in without a click: its filter
+		// freezes like the main chain, and its look-ahead limiter drains instead of being cut.
+		SineRig rig;
+		rig.in.wantDirect[0] = true;
+		float l, r, dl, dr, prev = 0.f, maxStep = 0.f, stopped = 0.f;
+		for (int i = 0; i < (int) (1.5f * rig.sr); i++) {
+			rig.in.holdSilent = (i >= (int) (0.5f * rig.sr) && i < (int) (1.f * rig.sr));
+			rig.engine.process(rig.in, &l, &r);
+			rig.engine.getDirect(0, &dl, &dr);
+			if (i > (int) (0.2f * rig.sr))
+				maxStep = std::max(maxStep, std::fabs(dl - prev));
+			prev = dl;
+			if (i > (int) (0.6f * rig.sr) && i < (int) (1.f * rig.sr))
+				stopped = std::max(stopped, std::fabs(dl));
+		}
+		float limit = (float) (2 * PI * c4 / rig.sr * 1.3 + 0.01);
+		std::printf("  stop / resume: artifact output max step %.4f (limit %.4f), level while stopped %.5f\n", maxStep, limit, stopped);
+		CHECK(maxStep <= limit, "stopping or resuming clicks the artifact output: %f", maxStep);
+		CHECK(stopped < 1e-4f, "artifact output still sounds while stopped: %f", stopped);
 	}
 	{
 		// Output protection on every artifact output.

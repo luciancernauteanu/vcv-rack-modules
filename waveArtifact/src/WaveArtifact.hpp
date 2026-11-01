@@ -76,6 +76,8 @@ struct WaveArtifact : Module {
 		INTERNAL_BPM_PARAM,
 		/** Momentary: restart the beat grid and every LFO (same as a RESET gate) */
 		RESTART_PARAM,
+		/** Latching: silences every output (main and artifact outs) with a 5 ms fade */
+		STOP_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {

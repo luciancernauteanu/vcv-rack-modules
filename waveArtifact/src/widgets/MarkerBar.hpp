@@ -302,6 +302,20 @@ struct MarkerBar : widget::Widget {
 				nvgFontSize(args.vg, 9.f);
 				nvgFillColor(args.vg, nvgTransRGBAf(c, 1.f));
 			}
+			// OUT tag: this artifact's own output is patched, so it plays there and not in L/R.
+			if (module && (module->outputs[WaveArtifact::ARTIFACT_L_OUTPUT + i].isConnected() || module->outputs[WaveArtifact::ARTIFACT_R_OUTPUT + i].isConnected())) {
+				bool cv = active && module->shownCv[i].load(std::memory_order_relaxed);
+				float tx = r.pos.x + pad + (cv ? 24.f : 9.f), ty = r.pos.y + pad, tw = 17.f, th = 8.5f;
+				nvgBeginPath(args.vg);
+				nvgRoundedRect(args.vg, tx + 0.4f, ty + 0.4f, tw - 0.8f, th - 0.8f, 2.f);
+				nvgStrokeColor(args.vg, c);
+				nvgStrokeWidth(args.vg, 0.8f);
+				nvgStroke(args.vg);
+				nvgFontSize(args.vg, 7.f);
+				nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
+				nvgText(args.vg, tx + tw / 2.f, ty + th / 2.f + 0.35f * 7.f, "OUT", NULL);
+				nvgFontSize(args.vg, 9.f);
+			}
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
 			std::string info;
 			if (!active)

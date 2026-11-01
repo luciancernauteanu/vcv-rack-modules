@@ -383,10 +383,20 @@ private:
 			float g = std::min(std::max(in.markers[m].gain, 0.f), (float) MAX_GAIN);
 			gainS[m] += (g - gainS[m]) * smoothCoef;
 		}
+		// An artifact with a patched output leaves the main mix: its share fades to 0 (20 ms), so its
+		// sound comes only from its own jacks. The morph keeps its markers; over a separated one the
+		// main output simply goes quiet.
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			float t = in.wantDirect[m] ? 0.f : 1.f;
+			mainShare[m] = (t > mainShare[m]) ? std::min(t, mainShare[m] + tableFadeStep) : std::max(t, mainShare[m] - tableFadeStep);
+		}
+		heard[a] *= mainShare[a];
+		if (b != a)
+			heard[b] *= mainShare[b];
 		float ra = readMarker(a);
 		float rb = (b == a) ? ra : readMarker(b);
-		float va = ra * gainS[a];
-		float vb = rb * gainS[b];
+		float va = ra * gainS[a] * mainShare[a];
+		float vb = rb * gainS[b] * mainShare[b];
 		// Artifacts with a patched output are read every sample, heard in the morph or not.
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			if (!in.wantDirect[m])
@@ -443,6 +453,14 @@ private:
 			if (!in.wantDirect[m]) {
 				d.running = false;
 				directL[m] = directR[m] = 0.f;
+				continue;
+			}
+			if (gain <= 0.f && d.running) {
+				// Fully faded (STOP, bank swap): freeze drive and filter like the main chain, whose
+				// phases also stop, so the sound resumes exactly where it paused instead of refilling
+				// an emptied filter. The limiter keeps running on silence: it looks ahead, so it still
+				// holds the last few faded samples and must let them out.
+				d.limiter.process(0.f, 0.f, LIMIT, &directL[m], &directR[m]);
 				continue;
 			}
 			const MarkerInput& M = in.markers[m];
@@ -615,6 +633,8 @@ private:
 	float playedIndex[NUM_MARKERS] = {};
 	/** Morph weight of each marker in the current output (0..1, sums to 1) */
 	float heard[NUM_MARKERS] = {1.f, 0.f, 0.f, 0.f, 0.f};
+	/** Each artifact's share of the main mix: 0 while its own output is patched (see renderMorph) */
+	float mainShare[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 
 	// Preview (audition)
 	float previewEnv = 0.f;

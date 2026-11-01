@@ -6,6 +6,11 @@ A wavetable map along the bottom shows the whole sample, with each marker's bull
 artifact it plays. The **Wave Artifacts Expander** (up to 5, to the right) adds per-marker CV
 inputs and two LFOs.
 
+Each artifact also has its own stereo output (ARTIFACT OUT, right of the panel): its own chain
+before the master section, always playing whatever the position. Patching an artifact's output
+takes that artifact out of the main L/R (a 20 ms fade, no click), so it becomes a separate audio
+stream; unpatch it to bring it back. The screen tags it "OUT" while it is routed out.
+
 The plugin and module slugs stay `waveArtifact` and `waveArtifactExpander`, so patches saved
 with earlier builds still load.
 
