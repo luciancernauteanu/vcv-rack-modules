@@ -1456,7 +1456,57 @@ static void testFeedbackCharacter() {
 	CHECK(s[5].rms < 0.01, "FDBK 85%% should ring, not self-oscillate: rms %f", s[5].rms);
 }
 
+static void testPositionLfoEdge() {
+	std::printf("position LFO saw / reverse saw / square: playhead speed at the edge, with and without SMOOTH\n");
+	const float sr = 48000.f, dt = 1.f / sr;
+	double slope;
+	std::unique_ptr<wa::WavetableBank> bank(makeBank(ampsFor(64, 5), &slope));
+	float adj = maxAdjacentDiff(*bank);
+	for (int shape : {wa::LFO_SAW, wa::LFO_SAW_REVERSE, wa::LFO_SQUARE}) {
+		float peakSpeed[2] = {0.f, 0.f}, maxStep[2] = {0.f, 0.f};
+		for (int smoothed = 0; smoothed < 2; smoothed++) {
+			wa::MorphEngine engine;
+			engine.setSampleRate(sr);
+			wa::EngineInput in;
+			in.bank = bank.get();
+			for (int i = 0; i < 5; i++) {
+				in.markers[i].active = true;
+				in.markers[i].pos = i * 0.25f;
+				in.markers[i].wave = i / 4.f;
+			}
+			wa::Lfo lfo;
+			wa::ClockTracker clock;
+			wa::LfoSmoother smoother;
+			float l, r, prev = 0.f, prevPos = 0.f;
+			for (int n = 0; n < (int) (3.f * sr); n++) {
+				float x = lfo.process(shape, false, 0.5f, false, false, clock, dt);
+				x = smoother.process(x, smoothed ? 0.05f : 0.f, dt); // the module's default SMOOTH is 50 ms
+				in.position = wa::lfoCentered(0.5f, 1.f, x);
+				engine.process(in, &l, &r);
+				float pos = engine.getPosition();
+				if (n > (int) (0.5f * sr)) {
+					peakSpeed[smoothed] = std::max(peakSpeed[smoothed], std::fabs(pos - prevPos));
+					maxStep[smoothed] = std::max(maxStep[smoothed], std::fabs(l - prev));
+				}
+				prev = l;
+				prevPos = pos;
+			}
+		}
+		// Steepest legitimate step: the waveform's own slope at 261.6 Hz plus the playhead moving
+		// through neighboring tables at its peak speed (4 gaps of 0.25 across the bar).
+		auto limitFor = [&](float posSpeed) {
+			return (float) ((slope * 2 * PI * 261.6256 / sr + posSpeed * 4.f * adj) * 1.2 + 0.01);
+		};
+		std::printf("  %-12s peak playhead speed per sample: raw %.5f, SMOOTH 50 ms %.5f (%.0fx slower); output step %.4f / %.4f\n",
+			wa::LFO_SHAPE_NAMES[shape], peakSpeed[0], peakSpeed[1], peakSpeed[0] / std::max(peakSpeed[1], 1e-9f), maxStep[0], maxStep[1]);
+		CHECK(peakSpeed[1] * 3.f < peakSpeed[0], "SMOOTH does not slow the playhead at the edge: %f vs %f", peakSpeed[1], peakSpeed[0]);
+		CHECK(peakSpeed[1] < 0.0015f, "smoothed playhead still too fast at the edge: %f", peakSpeed[1]);
+		CHECK(maxStep[1] <= limitFor(peakSpeed[1]), "smoothed output clicks: %f > %f", maxStep[1], limitFor(peakSpeed[1]));
+	}
+}
+
 int main() {
+	testPositionLfoEdge();
 	testFeedbackCharacter();
 	testArtifactVoct();
 	testDirectOutputs();

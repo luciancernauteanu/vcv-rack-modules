@@ -490,7 +490,59 @@ static void testClockHandover() {
 	CHECK(maxStep <= limit, "switching clocks makes the LFO jump: %f", maxStep);
 }
 
+static void testLfoSmoother() {
+	std::printf("LFO smoother (position LFO SMOOTH): one-pole, tames saw / square edges\n");
+	const float sr = 48000.f, dt = 1.f / sr;
+	{
+		// Step response: reaches 63% after one time constant, settles to 1.
+		wa::LfoSmoother s;
+		const float tau = 0.05f;
+		float v = 0.f, at63 = -1.f;
+		for (int i = 0; i < (int) (0.5f * sr); i++) {
+			v = s.process(1.f, tau, dt);
+			if (at63 < 0.f && v >= 0.632f)
+				at63 = (i + 1) * dt;
+		}
+		std::printf("  step response: 63%% after %.4f s (tau %.3f), after 0.5 s %.4f\n", at63, tau, v);
+		CHECK(std::fabs(at63 - tau) < 0.002f, "63%% time %f, expected %f", at63, tau);
+		CHECK(v > 0.999f, "does not settle: %f", v);
+	}
+	{
+		// Time constant 0 passes the signal through untouched.
+		wa::LfoSmoother s;
+		CHECK(s.process(0.7f, 0.f, dt) == 0.7f && s.process(-0.3f, 0.f, dt) == -0.3f, "tau 0 must not smooth");
+	}
+	// A real saw: the edge (a jump of 2 in the LFO's -1..1 range) is the largest step per sample.
+	for (int shape : {wa::LFO_SAW, wa::LFO_SAW_REVERSE, wa::LFO_SQUARE}) {
+		float raw = 0.f, smoothed20 = 0.f, smoothed50 = 0.f, smoothed500 = 0.f;
+		wa::Lfo lfo;
+		wa::ClockTracker clock;
+		wa::LfoSmoother s20, s50, s500;
+		float prev = 0.f, p20 = 0.f, p50 = 0.f, p500 = 0.f;
+		for (int i = 0; i < (int) (3.f * sr); i++) {
+			float x = lfo.process(shape, false, 0.5f, false, false, clock, dt);
+			float a = s20.process(x, 0.02f, dt), b = s50.process(x, 0.05f, dt), c = s500.process(x, 0.5f, dt);
+			if (i > (int) (0.5f * sr)) {
+				raw = std::max(raw, std::fabs(x - prev));
+				smoothed20 = std::max(smoothed20, std::fabs(a - p20));
+				smoothed50 = std::max(smoothed50, std::fabs(b - p50));
+				smoothed500 = std::max(smoothed500, std::fabs(c - p500));
+			}
+			prev = x;
+			p20 = a;
+			p50 = b;
+			p500 = c;
+		}
+		std::printf("  %-12s max step per sample: raw %.4f, 20 ms %.5f, 50 ms %.5f, 500 ms %.6f\n",
+			wa::LFO_SHAPE_NAMES[shape], raw, smoothed20, smoothed50, smoothed500);
+		CHECK(raw > 1.5f, "the edge should be a full jump, got %f", raw);
+		CHECK(smoothed20 < 0.01f && smoothed50 < 0.005f && smoothed500 < 0.0005f, "edge not smoothed enough");
+		CHECK(smoothed50 < smoothed20 && smoothed500 < smoothed50, "more SMOOTH must mean a slower edge");
+	}
+}
+
 int main() {
+	testLfoSmoother();
 	testInternalClock();
 	testRestartInternal();
 	testClockHandover();

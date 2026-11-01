@@ -78,6 +78,9 @@ struct WaveArtifact : Module {
 		RESTART_PARAM,
 		/** Latching: silences every output (main and artifact outs) with a 5 ms fade */
 		STOP_PARAM,
+		/** Position LFO smoothing 0..1 -> 20 ms * 100^v (20 ms .. 2 s): a one-pole on the LFO alone, so the
+		knob and CV stay fast and a saw / square edge becomes a ramp instead of a jump of the playhead */
+		POS_LFO_SMOOTH_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -140,6 +143,8 @@ struct WaveArtifact : Module {
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
 	wa::Lfo posLfo;
+	/** The position LFO after its SMOOTH one-pole */
+	wa::LfoSmoother posLfoSmoother;
 	dsp::SchmittTrigger resetTrigger;
 	dsp::PulseGenerator clockOutPulse;
 	bool restartHeld = false;
@@ -163,6 +168,9 @@ struct WaveArtifact : Module {
 	void process(const ProcessArgs& args) override;
 	void onSampleRateChange(const SampleRateChangeEvent& e) override;
 	void onReset(const ResetEvent& e) override;
+	/** Randomize also randomizes the expanders snapped on to the right (each keeps its own
+	randomizeEnabled flags: MARKER, LFO shape, SYNC, T, D and PERC stay as they are). */
+	void onRandomize(const RandomizeEvent& e) override;
 
 	// Marker editing, UI thread. All state is in params, so these are saved and undo-free like knobs.
 	bool isMarkerActive(int i);
