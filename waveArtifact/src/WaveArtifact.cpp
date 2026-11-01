@@ -135,8 +135,8 @@ WaveArtifact::WaveArtifact() {
 	configOutput(CLOCK_OUTPUT, "Clock out (one 10 V trigger per beat: internal BPM, or the CLOCK input)");
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		std::string name = "Artifact " + std::to_string(i + 1);
-		configOutput(ARTIFACT_L_OUTPUT + i, name + " left (mono when right is unpatched; patched = leaves the main L/R)");
-		configOutput(ARTIFACT_R_OUTPUT + i, name + " right (patched = leaves the main L/R)");
+		configOutput(ARTIFACT_L_OUTPUT + i, name + " left (follows POSITION; mono when right is unpatched; patched = leaves the main L/R)");
+		configOutput(ARTIFACT_R_OUTPUT + i, name + " right (follows POSITION; patched = leaves the main L/R)");
 	}
 
 	for (int i = 0; i < NUM_MARKERS; i++) {
@@ -826,31 +826,47 @@ struct WaveArtifactWidget : ModuleWidget {
 		}, count >= wa::MAX_EXPANDERS));
 	}
 
-	/** Creates an expander at the right end of the chain (pushing anything there aside), set to the
-	first marker no expander in the chain uses yet. Undoable. */
+	/** Creates an expander set to the first marker no expander in the chain uses yet, and slots it in
+	so the chain stays in ascending marker order: right after the last expander with a lower marker
+	(or right after the main module), pushing the rest of the row to the right. E.g. with one
+	expander on marker 5, the new one (marker 1) goes first. One undo step, which also moves the
+	pushed modules back. */
 	void addExpander() {
 		WaveArtifact* m = getModule<WaveArtifact>();
 		if (!m)
 			return;
 		bool used[WaveArtifact::NUM_MARKERS] = {};
-		int count = 0;
+		std::vector<Module*> chain;
 		Module* last = m;
 		while (isWaveArtifactExpander(last->rightExpander.module)) {
 			last = last->rightExpander.module;
+			chain.push_back(last);
 			used[((WaveArtifactExpander*) last)->getMarker()] = true;
-			if (++count >= wa::MAX_EXPANDERS)
+			if ((int) chain.size() >= wa::MAX_EXPANDERS)
 				return;
 		}
-		int marker = count % WaveArtifact::NUM_MARKERS;
+		int marker = (int) chain.size() % WaveArtifact::NUM_MARKERS;
 		for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
 			if (!used[i]) {
 				marker = i;
 				break;
 			}
 		}
-		ModuleWidget* lastWidget = APP->scene->rack->getModule(last->id);
-		if (!lastWidget)
+		// Insert before the first expander with a higher marker; at the end if there is none.
+		Module* before = m;
+		for (Module* e : chain) {
+			if (((WaveArtifactExpander*) e)->getMarker() > marker)
+				break;
+			before = e;
+		}
+		ModuleWidget* beforeWidget = APP->scene->rack->getModule(before->id);
+		if (!beforeWidget)
 			return;
+
+		// Positions before the insert, to record the modules it pushes aside.
+		std::map<int64_t, Vec> oldPos;
+		for (ModuleWidget* w : APP->scene->rack->getModules())
+			oldPos[w->module ? w->module->id : -1] = w->box.pos;
 
 		Model* model = modelWaveArtifactExpander;
 		Module* em = model->createModule();
@@ -858,12 +874,29 @@ struct WaveArtifactWidget : ModuleWidget {
 		APP->engine->addModule(em);
 		ModuleWidget* emw = model->createModuleWidget(em);
 		APP->scene->rack->addModule(emw);
-		APP->scene->rack->setModulePosForce(emw, Vec(lastWidget->box.getRight(), lastWidget->box.pos.y));
+		// Placed at the right edge of `before`: whatever sat there (the higher-marker expanders and
+		// anything touching them) is shoved right to make room.
+		APP->scene->rack->setModulePosForce(emw, Vec(beforeWidget->box.getRight(), beforeWidget->box.pos.y));
 
+		// Undo removes the expander, then moves the pushed modules back; redo does the reverse.
+		history::ComplexAction* complex = new history::ComplexAction;
+		complex->name = "add Wave Artifacts expander";
+		for (ModuleWidget* w : APP->scene->rack->getModules()) {
+			if (w == emw || !w->module)
+				continue;
+			auto it = oldPos.find(w->module->id);
+			if (it == oldPos.end() || it->second.equals(w->box.pos))
+				continue;
+			history::ModuleMove* mv = new history::ModuleMove;
+			mv->moduleId = w->module->id;
+			mv->oldPos = it->second;
+			mv->newPos = w->box.pos;
+			complex->push(mv);
+		}
 		history::ModuleAdd* h = new history::ModuleAdd;
-		h->name = "add Wave Artifacts expander";
 		h->setModule(emw);
-		APP->history->push(h);
+		complex->push(h);
+		APP->history->push(complex);
 	}
 };
 

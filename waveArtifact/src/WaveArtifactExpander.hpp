@@ -27,6 +27,8 @@ struct WaveArtifactExpander : Module {
 		ENUMS(MOD_INPUT, wa::NUM_MOD_TARGETS),
 		/** Pitch for this artifact only, 1 V/oct, added to the main V/OCT */
 		VOCT_INPUT,
+		/** While patched, this artifact sounds only while the gate is high (>= 1 V; off below 0.1 V) */
+		GATE_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -45,6 +47,7 @@ struct WaveArtifactExpander : Module {
 	/** Used while not linked (no clock): synced LFOs run at the 120 BPM fallback */
 	wa::ClockTracker idleClock;
 	dsp::ClockDivider lightDivider;
+	dsp::SchmittTrigger gateTrigger;
 
 	// For the UI
 	std::atomic<bool> linked{false};

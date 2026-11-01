@@ -97,7 +97,7 @@ struct WaveArtifact : Module {
 	enum OutputId {
 		LEFT_OUTPUT,
 		RIGHT_OUTPUT,
-		/** Each artifact's own output (its chain alone, before the master). L carries mono when R is unpatched. */
+		/** Each artifact's own output (its chain alone, after the position crossfade, before the master). L carries mono when R is unpatched. */
 		ENUMS(ARTIFACT_L_OUTPUT, NUM_MARKERS),
 		ENUMS(ARTIFACT_R_OUTPUT, NUM_MARKERS),
 		/** Beat clock: a 10 V, 5 ms trigger per quarter note from the clock in use (internal or CLOCK) */

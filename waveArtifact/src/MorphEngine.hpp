@@ -14,7 +14,8 @@
 // tables (band-limited mip level picked from each marker's frequency) -> crossfade by position
 // -> drive -> multimode filter (its mode mix morphs between the markers) -> declick gain
 // -> equal-power pan -> preview mix -> stereo master filter -> limiter.
-// Each artifact can also have its own output: its chain alone, before the master (renderDirect).
+// Each artifact can also have its own output: its chain alone, before the master, at its share of
+// the position crossfade (renderDirect).
 //
 // The morph is audio-only: pitch is NOT interpolated between markers, so a marker at -12 st and
 // a marker at 0 st crossfade as two separate pitches, never sliding (glide could be a later option).
@@ -314,7 +315,8 @@ public:
 
 	/** An artifact's own output (engine units, x5 V), 0 unless `wantDirect` was set for it.
 	It is the artifact's whole chain (oscillator, GAIN, DRIVE, filter, PAN) before the master
-	section, always playing whatever the position, with its own 10 V output protection. */
+	section, after the position: it carries the artifact's share of the crossfade (full on its
+	marker, fading toward the neighbors, silent elsewhere), with its own 10 V output protection. */
 	void getDirect(int m, float* l, float* r) const {
 		*l = directL[m];
 		*r = directR[m];
@@ -366,6 +368,8 @@ private:
 			heard[m] = 0.f;
 		heard[a] += 1.f - w;
 		heard[b] += w;
+		// The position crossfade share, before patched artifact outputs take their part out of the mix.
+		std::copy(heard, heard + NUM_MARKERS, posWeight);
 
 		auto readMarker = [&](int m) {
 			// The LFO is already inside s.cur (it moves the glide target), so SMOOTH shapes it too.
@@ -445,7 +449,8 @@ private:
 	}
 
 	/** The artifacts' own outputs. Each patched artifact runs its own chain with its own settings
-	(no interpolation with a neighbor): GAIN, DRIVE, filter, PAN, then a safety limiter. It fades
+	(no interpolation with a neighbor): GAIN, DRIVE, filter, its position share (posWeight, so the
+	outputs follow the playhead like the main mix), PAN, then a safety limiter. It fades
 	(5 ms) when the artifact is switched off, and with the structural declick when the bank changes. */
 	void renderDirect(const EngineInput& in) {
 		for (int m = 0; m < NUM_MARKERS; m++) {
@@ -497,7 +502,7 @@ private:
 				d.svf.reset();
 				y = 0.f;
 			}
-			y *= d.env * gain;
+			y *= d.env * gain * posWeight[m];
 			float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
 			d.limiter.process(y * std::cos(angle) * SQRT2, y * std::sin(angle) * SQRT2, LIMIT, &directL[m], &directR[m]);
 		}
@@ -633,6 +638,8 @@ private:
 	float playedIndex[NUM_MARKERS] = {};
 	/** Morph weight of each marker in the current output (0..1, sums to 1) */
 	float heard[NUM_MARKERS] = {1.f, 0.f, 0.f, 0.f, 0.f};
+	/** Position crossfade weight of each marker (heard before patched outputs leave the mix) */
+	float posWeight[NUM_MARKERS] = {1.f, 0.f, 0.f, 0.f, 0.f};
 	/** Each artifact's share of the main mix: 0 while its own output is patched (see renderMorph) */
 	float mainShare[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 

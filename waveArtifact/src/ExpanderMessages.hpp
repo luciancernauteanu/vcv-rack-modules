@@ -52,7 +52,7 @@ struct ToExpanderMessage {
 struct ToMainMessage {
 	/** Volts x AMT, summed over every linked expander assigned to the marker (GAIN excluded) */
 	float mod[NUM_MARKERS][NUM_MOD_TARGETS] = {};
-	/** Product of every linked expander's VCA level for the marker (1 = untouched) */
+	/** Product of every linked expander's VCA level and GATE (0 while a patched gate is low) for the marker (1 = untouched) */
 	float gainMul[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	/** Volts on the expanders' V/OCT inputs, summed per artifact (added to the main V/OCT) */
 	float voct[NUM_MARKERS] = {};

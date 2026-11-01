@@ -44,6 +44,7 @@ WaveArtifactExpander::WaveArtifactExpander() {
 		configOutput(LFO_OUTPUT + k, name + " (+-5 V)");
 	}
 	configInput(VOCT_INPUT, "V/OCT for this artifact (1 V/oct, added to the main V/OCT)");
+	configInput(GATE_INPUT, "Gate for this artifact (patched: it sounds only while the gate is high)");
 	configLight(LINK_LIGHT, "Connected to Wave Artifacts");
 
 	leftExpander.producerMessage = new wa::ToExpanderMessage;
@@ -73,12 +74,26 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 	int index = fromLeft.linked ? fromLeft.index + 1 : 0;
 	bool active = fromLeft.linked && index <= wa::MAX_EXPANDERS;
 
+	// GATE: Schmitt trigger (high at 1 V, low below 0.1 V). Tracked even while unlinked so the state
+	// is right the moment the expander snaps on.
+	bool gatePatched = inputs[GATE_INPUT].isConnected();
+	if (gatePatched)
+		gateTrigger.process(inputs[GATE_INPUT].getVoltage(), 0.1f, 1.f);
+
 	// Modulation: what the expanders to our right sent, plus ours.
 	wa::ToMainMessage acc;
 	if (rightIsExp)
 		acc = *(const wa::ToMainMessage*) rightExpander.consumerMessage;
 	if (active) {
 		int m = getMarker();
+		// A patched GATE closes the artifact's level while low, through the same multiplier as the
+		// GAIN VCA, so the main module's 5 ms gain smoothing makes the open/close click-free. Two
+		// expanders gating the same artifact multiply: it sounds only while both gates are high.
+		if (gatePatched) {
+			if (!gateTrigger.isHigh())
+				acc.gainMul[m] = 0.f;
+			acc.modulated[m] = true;
+		}
 		if (inputs[VOCT_INPUT].isConnected()) {
 			acc.voct[m] += inputs[VOCT_INPUT].getVoltage();
 			acc.modulated[m] = true;
@@ -143,10 +158,11 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 // Panel: 10 HP. Geometry matches res/waveArtifactExpander.svg.
 namespace xlayout {
 static const float W = 50.8f;
-static const Vec MARKER_BUTTON = Vec(17.f, 16.5f);
+static const Vec MARKER_BUTTON = Vec(13.f, 16.5f);
 static const Vec MARKER_BUTTON_SIZE = Vec(16.f, 6.5f);
-// V/OCT jack in the header; the LINK light sits next to the title.
-static const Vec VOCT_JACK = Vec(38.f, 17.4f);
+// V/OCT and GATE jacks in the header; the LINK light sits next to the title.
+static const Vec VOCT_JACK = Vec(29.5f, 17.4f);
+static const Vec GATE_JACK = Vec(40.5f, 17.4f);
 static const Vec LINK_LIGHT_POS = Vec(44.5f, 6.f);
 static const float TOP_LABEL_Y = 22.4f;
 static const float CV_HEADER_Y = 27.4f;
@@ -186,6 +202,7 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->add(Vec(W / 2.f, 6.f), "wA EXPANDER", 9.f);
 		labels->add(Vec(MARKER_BUTTON.x, TOP_LABEL_Y), "MARKER", 6.f);
 		labels->add(Vec(VOCT_JACK.x, TOP_LABEL_Y + 1.f), "V/OCT", 6.f);
+		labels->add(Vec(GATE_JACK.x, TOP_LABEL_Y + 1.f), "GATE", 6.f);
 		labels->add(Vec(JACK_X, CV_HEADER_Y), "CV", 6.f);
 		labels->add(Vec(AMT_X, CV_HEADER_Y), "AMT", 6.f);
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++)
@@ -206,6 +223,7 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		addParam(marker);
 		addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(LINK_LIGHT_POS), module, WaveArtifactExpander::LINK_LIGHT));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(VOCT_JACK), module, WaveArtifactExpander::VOCT_INPUT));
+		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(GATE_JACK), module, WaveArtifactExpander::GATE_INPUT));
 
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
 			float y = ROW0_Y + t * ROW_STEP;
