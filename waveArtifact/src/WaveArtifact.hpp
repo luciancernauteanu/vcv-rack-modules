@@ -81,6 +81,8 @@ struct WaveArtifact : Module {
 		/** Position LFO smoothing 0..1 -> 20 ms * 100^v (20 ms .. 2 s): a one-pole on the LFO alone, so the
 		knob and CV stay fast and a saw / square edge becomes a ramp instead of a jump of the playhead */
 		POS_LFO_SMOOTH_PARAM,
+		/** Master GAIN CV amount -100%..100% (default 0): 10 V at 100% = the whole knob range (+200%) */
+		MASTER_GAIN_AMT_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -95,6 +97,8 @@ struct WaveArtifact : Module {
 		MASTER_FDBK_INPUT,
 		/** Restarts the beat count and every LFO (next clock pulse = start of a bar) */
 		RESET_INPUT,
+		/** Master GAIN CV (scaled by MASTER_GAIN_AMT_PARAM): a VCA on the main outputs */
+		MASTER_GAIN_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -156,6 +160,10 @@ struct WaveArtifact : Module {
 	std::thread worker;
 	std::vector<uint8_t> wavBytes;
 	std::string fileName;
+	/** Full path of the last WAV asked for (even if it failed to load), for previous / next in its folder */
+	std::string filePath;
+	/** WAVs in filePath's folder, sorted; scanned on each load (not per frame) */
+	std::vector<std::string> folderWavs;
 	wa::TableCountMode tableCountMode = wa::TABLES_AUTO;
 	/** How soft the artifacts are (see wa::TableTone); re-analyzes when changed. */
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
@@ -190,6 +198,11 @@ struct WaveArtifact : Module {
 	void loadFile(const std::string& path);
 	/** UI thread. Re-runs analysis on the loaded bytes, e.g. after the table count changes. */
 	void startAnalysis();
+	/** UI thread. Loads the previous (dir = -1) or next (dir = +1) WAV in filePath's folder,
+	sorted by name, wrapping around. Does nothing without a path. */
+	void loadSibling(int dir);
+	/** UI thread. True when filePath's folder holds another WAV to step to. */
+	bool hasSiblings();
 	/** UI thread. Frees a bank that process() has retired. */
 	void uiStep();
 	/** UI thread. All 5 markers on, evenly spaced left to right, wavetables spread from the start
