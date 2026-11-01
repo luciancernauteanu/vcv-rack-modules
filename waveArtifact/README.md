@@ -66,6 +66,9 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
 Useful to know:
 
 - **POS CV / CV AMT** move the playhead from a CV (0-10 V sweeps the whole bar).
+- **NOTCH** (artifact and master filter) cuts a wide hole at CUTOFF. RES adds two resonant
+  peaks on its sides (up to about +7.6 dB at full RES) while the hole stays fully deep. Sweep
+  CUTOFF slowly (or modulate it from the expander) to hear it move through the harmonics.
 - **RESET** (or a gate on the RESET jack) restarts the beat grid and every LFO; **CLK OUT**
   sends a 10 V trigger per beat.
 - Right-click menu: *Artifact count* (50 / 64 / 100 or Auto), *Artifact tone* (Natural /
