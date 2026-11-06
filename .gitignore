@@ -21,3 +21,5 @@ waveArtifact/tests/test_lfo
 waveArtifact/tests/test_lfo.exe
 waveArtifact/tests/test_sound
 waveArtifact/tests/test_sound.exe
+waveArtifact/tests/test_granular
+waveArtifact/tests/test_granular.exe

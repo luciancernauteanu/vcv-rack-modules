@@ -54,6 +54,10 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
    SMOOTH, the WAVE LFO, GAIN and PAN, CUTOFF / DRIVE / RES / filter TYPE, and PITCH / FINE.
    You can also click the wavetable map along the bottom to give the selected marker that
    artifact; double-click an artifact to audition it, right-click it to assign it to a marker.
+   To start a marker from another one, right-click the first (its slot or bullet), choose **Copy
+   settings**, then right-click the other and choose **Paste settings of marker N**. Every setting
+   of both engines is overwritten, including WAVE / START; the marker keeps its on/off state and its
+   place on the bar. Ctrl+Z undoes a paste. CV patched on an expander stays with its marker.
 8. **Play it.** Cable a keyboard or sequencer's **1V/oct** to **V/OCT** (0 V is C4). Turn the
    POSITION LFO's AMT up to have the playhead move on its own; with SYNC on it follows the
    internal tempo (BPM) or a clock patched to **CLOCK**.
@@ -77,6 +81,62 @@ Useful to know:
   expanders snapped on to the right.
 - To use the artifacts as separate voices, patch **ARTIFACT OUT 1-5**: each artifact then
   leaves the main L/R and plays on its own jacks, following the position.
+
+## The granular engine (GRAIN)
+
+The toggle in the header switches the module from the wavetable engine (**WAVE**) to a granular
+engine (**GRAIN**) that plays the same loaded sample. The panel stays the same: the markers, the
+POSITION playhead and its LFO, the master section and the artifact outputs all work as before. Each
+marker is now a **grain cloud** that reads the sample from its own START, and the playhead
+crossfades the two neighboring clouds exactly like the wavetable morph. Several knobs change title
+and meaning (the labels, tooltips and values follow):
+
+| Knob (WAVE) | In GRAIN | What it does |
+|---|---|---|
+| WAVE | **START** | where in the sample the cloud reads (same value, so the wavetable map and bullets still work) |
+| SMOOTH | **DENSITY** | grains per second (0.5-500), or the note value of the grain grid with SYNC |
+| LFO shape | **WINDOW** | grain window: Hann, Tukey, Gauss, Triangle, Percussive, Swell, Box, Smear (click the little screen) |
+| RATE | **SIZE** | grain length (2 ms-1 s), or a multiple of the grain interval with SYNC |
+| AMT | **SPRAY** | random offset of each grain's start (up to 2 s) |
+| SYNC / T / D | **SYNC / T / D** | lock the grains (and SCAN) to the tempo; triplet and dotted note values |
+| DRIVE | **P.SPRD** | random pitch per grain (up to 12 semitones) |
+| FINE | **SCAN** | moves the read position through the marker's slice (see below) |
+| PAN | **SPREAD** | random pan per grain |
+
+GAIN, the filter (CUTOFF / RES / TYPE) and PITCH / FREE work as before, per cloud. The expander's six
+CV inputs follow the new titles (WAVE = START, DRIVE = P.SPRD, FINE = SCAN, PAN = SPREAD).
+
+**Clock-locked grains.** With SYNC on, grains start on a grid of note values locked to the internal
+tempo or CLOCK, with sub-sample timing; RESET is beat 0.
+
+**Scan and loop.** A marker's *slice* is the part of the sample from its START up to the next
+marker's START (in sample order), or to the end of the sample. SCAN at the middle keeps the cloud
+at START. Free: it moves through the slice at -2x to +2x real time (looping at the slice end). With
+SYNC: the slice is fitted to 1/4 to 32 beats, locked to the beat grid, so the sample plays as a
+tempo-locked loop without changing pitch. A negative SCAN runs it backwards.
+
+**Smear.** The Smear window turns a cloud into one continuous sound, with no gaps or jumps between
+grains. Three things change: a grain lasts at least 3 grain intervals (so SIZE becomes a minimum and
+DENSITY sets the smallest length: at 2 grains/s that is 1.5 s, at 8 grains/s it is 375 ms); each
+grain starts where it best matches the grain it fades in over (up to 20 ms from where it would
+start, so tones add up instead of cancelling); and the cloud runs through a short diffuser that
+spreads sharp attacks. Grains with P.SPRD or a random direction cannot always be matched, so they
+shimmer a little more.
+
+**Repeating randomness.** While synced, the random SPRAY / P.SPRD / SPREAD / direction values of a
+grain depend only on its place in the loop cycle, so the pattern repeats every cycle instead of
+drifting (right-click menu: *Grain scatter repeats every loop*).
+
+Pitch: 0 V plays the sample at its original speed; V/OCT, PITCH and the expander's V/OCT transpose
+the grains (up to 3 octaves up without aliasing; the sample is kept low-passed at half rates).
+Level: a dense cloud has about the loudness of the sample whatever DENSITY and SIZE are; sparse
+grains (little overlap) stay lighter, like pulses. Grains that all start at the same place (SCAN
+off, no SPRAY) repeat one short loop, so tonal samples are pulled toward multiples of the grain
+rate: add SPRAY or SCAN for a steady pitch.
+
+Right-click menu: *Engine*, *Grain direction (selected marker)* (forward / reverse / random) and
+*Grain scatter repeats every loop*. The wavetable audition (double-click the map) is for the WAVE
+engine only. Not yet: grain clock from the played pitch (PITCH trigger mode).
 
 ## The expander
 
@@ -113,6 +173,10 @@ From the top of the panel down:
   the whole cutoff range (about 1 V/oct) for CUTOFF, the whole range for DRIVE, 2 semitones
   for FINE and hard left to hard right for PAN. **GAIN works as a VCA**: at AMT 0 it does
   nothing, at 100% the marker's level follows the CV (silent at 0 V, full at 10 V).
+  On the GRAIN engine the inputs become START, GAIN, CUTOFF, P.SPRD, SCAN and SPREAD, and the
+  START, SCAN and SPREAD trimpots go 0-100% (no inverting). They keep their own values, separate
+  from WAVE, FINE and PAN. At 100%, 10 V adds the whole sample to START, the full forward speed to
+  SCAN (from its middle) and full SPREAD.
 - **Two LFOs** (shape, RATE, AMT, SYNC / T / D) with their own outputs at +-5 V. Patch them
   anywhere, including the expander's own CV inputs. Synced LFOs follow Wave Artifacts' tempo
   or CLOCK, and restart on RESET.

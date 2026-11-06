@@ -1,6 +1,7 @@
 #pragma once
 #include "../Layout.hpp"
 #include "../WaveArtifact.hpp"
+#include "MarkerMenu.hpp"
 #include "WaveDraw.hpp"
 
 /** Middle screen.
@@ -9,7 +10,7 @@ WAVE, its LFO and dot assignments. The slot lights up with the marker's share of
 While a table is previewed, it covers the slots; click it to stop the preview.
 Bottom: the marker bar. Click empty bar to add a marker (up to 5; when all 5 are in use it moves
 the playhead instead), drag a bullet to move it (it can pass over other markers), click a bullet or slot to
-edit that marker, right-click a bullet or slot to delete it. Drag the white playhead to set POSITION.
+edit that marker, right-click a bullet or slot to copy, paste or delete. Drag the white playhead to set POSITION.
 */
 struct MarkerBar : widget::Widget {
 	WaveArtifact* module = nullptr;
@@ -87,6 +88,7 @@ struct MarkerBar : widget::Widget {
 		menu->addChild(createMenuItem("Edit", "", [=]() {
 			m->selectedMarker = i;
 		}));
+		addMarkerCopyPasteItems(menu, m, i);
 		menu->addChild(createMenuItem("Delete", "", [=]() {
 			m->deleteMarker(i);
 		}, m->activeMarkerCount() <= 1));
@@ -340,8 +342,15 @@ struct MarkerBar : widget::Widget {
 			nvgStroke(args.vg);
 
 			float index = 0.f;
+			bool grain = module && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+			float readAt = 0.f;
 			if (active) {
-				if (bank) {
+				if (bank && grain) {
+					// Granular: the source around the place this cloud reads (about 6% of the sample wide)
+					readAt = module->shownGrainRead[i].load();
+					wadraw::drawSampleSlice(args.vg, bank->sample, readAt, 0.06f, wr, c);
+				}
+				else if (bank) {
 					index = module->shownIndex[i].load();
 					wadraw::drawTable(args.vg, *bank, index, wr, c, 1.3f);
 				}
@@ -390,6 +399,8 @@ struct MarkerBar : widget::Widget {
 			std::string info;
 			if (!active)
 				info = "off";
+			else if (bank && grain)
+				info = string::f("%.2fs", readAt * bank->sourceSeconds);
 			else if (bank)
 				info = string::f("%d/%d", (int) std::round(index) + 1, bank->numTables);
 			nvgText(args.vg, r.getRight() - pad - 1.f, r.pos.y + pad, info.c_str(), NULL);

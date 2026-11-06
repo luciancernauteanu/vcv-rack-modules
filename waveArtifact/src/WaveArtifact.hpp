@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "plugin.hpp"
+#include "GrainEngine.hpp"
 #include "Lfo.hpp"
 #include "MorphEngine.hpp"
 #include "WavetableBank.hpp"
@@ -83,6 +84,31 @@ struct WaveArtifact : Module {
 		POS_LFO_SMOOTH_PARAM,
 		/** Master GAIN CV amount -100%..100% (default 0): 10 V at 100% = the whole knob range (+200%) */
 		MASTER_GAIN_AMT_PARAM,
+		// ---- Granular engine (appended, so every earlier ID and saved patch stays valid) ----
+		/** 0 = wavetable engine (default), 1 = granular engine: the knobs change meaning */
+		ENGINE_MODE_PARAM,
+		/** DENSITY: grains per second (free) or note value (SYNC), 0..1 */
+		ENUMS(MARKER_GRAIN_DENSITY_PARAM, NUM_MARKERS),
+		/** SIZE: ms (free) or x grain interval (SYNC), 0..1 */
+		ENUMS(MARKER_GRAIN_SIZE_PARAM, NUM_MARKERS),
+		/** SPRAY: random offset of the grain start, 0..1 */
+		ENUMS(MARKER_GRAIN_SPRAY_PARAM, NUM_MARKERS),
+		/** wa::GrainWindow */
+		ENUMS(MARKER_GRAIN_WINDOW_PARAM, NUM_MARKERS),
+		/** Grains on the clock grid / SCAN locked to the beat (default on), note kinds for DENSITY */
+		ENUMS(MARKER_GRAIN_SYNC_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_GRAIN_TRIPLET_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_GRAIN_DOTTED_PARAM, NUM_MARKERS),
+		/** SPREAD: random pan scatter 0..1 */
+		ENUMS(MARKER_GRAIN_SPREAD_PARAM, NUM_MARKERS),
+		/** P.SPRD: random pitch scatter 0..1 (up to +-12 st) */
+		ENUMS(MARKER_GRAIN_PSCATTER_PARAM, NUM_MARKERS),
+		/** SCAN -1..1: speed (free) or slice length in beats (SYNC); 0 = stays at START */
+		ENUMS(MARKER_GRAIN_SCAN_PARAM, NUM_MARKERS),
+		/** wa::GrainDirection (right-click menu) */
+		ENUMS(MARKER_GRAIN_DIR_PARAM, NUM_MARKERS),
+		/** 1 = the random scatter repeats every loop cycle while synced */
+		GRAIN_SEEDED_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -141,9 +167,19 @@ struct WaveArtifact : Module {
 	std::atomic<float> shownPreview{0.f};
 	/** An expander is modulating this artifact (shown as a CV tag on the screen) */
 	std::atomic<bool> shownCv[NUM_MARKERS];
+	/** Granular engine: where each cloud reads (0..1 of the sample), and a counter of its grain starts
+	with the latest start, so the display can flash a grain. */
+	std::atomic<float> shownGrainRead[NUM_MARKERS];
+	std::atomic<float> shownGrainPos[NUM_MARKERS];
+	std::atomic<float> shownGrainSeconds[NUM_MARKERS];
+	std::atomic<uint32_t> shownGrainCount[NUM_MARKERS];
 
 	// Audio thread only
 	wa::MorphEngine engine;
+	wa::GrainEngine grainEngine;
+	/** Engine in use (0 wavetable, 1 granular); follows ENGINE_MODE_PARAM after a fade to silence */
+	int engineApplied = 0;
+	uint32_t grainEventsSeen = 0;
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
 	wa::Lfo posLfo;
@@ -168,6 +204,12 @@ struct WaveArtifact : Module {
 	/** How soft the artifacts are (see wa::TableTone); re-analyzes when changed. */
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
+	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
+	static const int NUM_MARKER_SETTINGS = 28;
+	static const int MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS];
+	/** The settings copied last (not saved with the patch), and the marker they came from, or -1 */
+	float markerClipboard[NUM_MARKER_SETTINGS] = {};
+	int markerClipboardFrom = -1;
 
 
 	WaveArtifact();
@@ -193,6 +235,10 @@ struct WaveArtifact : Module {
 	void assignTable(int i, int t);
 	/** Nearest table to a marker's WAVE value, or -1 without a bank. */
 	int markerTable(int i);
+	/** Remembers all of a marker's settings, as they are now, for pasteMarker. */
+	void copyMarker(int i);
+	/** Overwrites a marker's settings with the copied ones and selects it. Its on/off and bar position stay. */
+	void pasteMarker(int i);
 
 	/** UI thread. Reads the file and starts analysis on the worker thread. */
 	void loadFile(const std::string& path);

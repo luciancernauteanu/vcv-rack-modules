@@ -1,6 +1,7 @@
 #pragma once
 #include "../Layout.hpp"
 #include "../WaveArtifact.hpp"
+#include "MarkerMenu.hpp"
 #include "WaveDraw.hpp"
 
 /** The wavetable map: the whole sample at a glance, left to right. Every artifact's single cycle
@@ -11,7 +12,8 @@ playing now (moves with WAVE, its LFO and expander CV).
 
 - Click: give that artifact to the selected marker. Keep dragging to sweep it through the sample.
 - Drag a bullet: sweep that marker (it becomes the selected one).
-- Double-click: preview that artifact (again to stop). Right-click: preview / assign menu.
+- Double-click: preview that artifact (again to stop). Right-click: preview / assign menu; on a bullet
+  it also offers to copy that marker's settings or paste onto it.
 
 The curve is computed once per bank; drawing it is cheap.
 */
@@ -41,6 +43,11 @@ struct WavetableMap : widget::Widget {
 	}
 	float bulletR() {
 		return std::min(mm2px(layout::BULLET_R), box.size.y * 0.3f);
+	}
+	/** Where a marker's bullet is drawn and clicked: kept fully on the map at its ends. */
+	float bulletX(int marker, int n) {
+		float r = bulletR();
+		return clamp(tableX(module->shownIndex[marker].load(), n), r + 1.f, box.size.x - r - 1.f);
 	}
 
 	/** Each artifact's cycle averaged down to PTS points. Artifacts are loudness-matched, so their
@@ -99,7 +106,7 @@ struct WavetableMap : widget::Widget {
 		for (int i = 0; i < wa::NUM_MARKERS; i++) {
 			if (!module->isMarkerActive(i))
 				continue;
-			float dx = tableX(module->shownIndex[i].load(), n) - p.x;
+			float dx = bulletX(i, n) - p.x;
 			float dy = box.size.y / 2.f - p.y;
 			float d = dx * dx + dy * dy;
 			if (d < bestD || (d <= bestD + 1.f && i == module->selectedMarker)) {
@@ -146,7 +153,7 @@ struct WavetableMap : widget::Widget {
 			e.consume(this);
 		}
 		else if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
-			openMenu(t);
+			openMenu(t, bulletAt(e.pos, n));
 			e.consume(this);
 		}
 	}
@@ -164,30 +171,45 @@ struct WavetableMap : widget::Widget {
 		const wa::WavetableBank* b = bank();
 		if (!module || !b || hovered < 0)
 			return;
+		// (The audition replaces the wavetable engine's output only.)
+		if (module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f)
+			return;
 		int t = hovered;
 		module->previewTable = (module->previewTable.load() == t) ? -1 : t;
 	}
 
-	void openMenu(int t) {
+	/** `marker`: the marker whose bullet was clicked, or -1 */
+	void openMenu(int t, int marker) {
 		WaveArtifact* m = module;
 		const wa::WavetableBank* b = bank();
 		ui::Menu* menu = createMenu();
-		menu->addChild(createMenuLabel(string::f("Artifact %d / %d", t + 1, b->numTables)));
-		menu->addChild(createCheckMenuItem("Preview (replaces the output)", "double-click",
-			[=]() {
-				return m->previewTable.load() == t;
-			},
-			[=]() {
-				m->previewTable = (m->previewTable.load() == t) ? -1 : t;
+		if (marker >= 0) {
+			menu->addChild(createMenuLabel("Marker " + std::to_string(marker + 1)));
+			addMarkerCopyPasteItems(menu, m, marker);
+			menu->addChild(new MenuSeparator);
+		}
+		bool grain = m->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+		if (grain) {
+			menu->addChild(createMenuLabel(string::f("%.2f s of %.2f s", (t + 0.5f) / b->numTables * b->sourceSeconds, b->sourceSeconds)));
+		}
+		else {
+			menu->addChild(createMenuLabel(string::f("Artifact %d / %d", t + 1, b->numTables)));
+			menu->addChild(createCheckMenuItem("Preview (replaces the output)", "double-click",
+				[=]() {
+					return m->previewTable.load() == t;
+				},
+				[=]() {
+					m->previewTable = (m->previewTable.load() == t) ? -1 : t;
+				}
+			));
+			if (m->previewTable.load() >= 0 && m->previewTable.load() != t) {
+				menu->addChild(createMenuItem(string::f("Stop preview of %d", m->previewTable.load() + 1), "", [=]() {
+					m->previewTable = -1;
+				}));
 			}
-		));
-		if (m->previewTable.load() >= 0 && m->previewTable.load() != t) {
-			menu->addChild(createMenuItem(string::f("Stop preview of %d", m->previewTable.load() + 1), "", [=]() {
-				m->previewTable = -1;
-			}));
 		}
 		menu->addChild(new MenuSeparator);
-		menu->addChild(createMenuLabel("Assign to"));
+		menu->addChild(createMenuLabel(grain ? "Set START of" : "Assign to"));
 		for (int i = 0; i < wa::NUM_MARKERS; i++) {
 			std::string right;
 			if (!m->isMarkerActive(i))
@@ -239,6 +261,34 @@ struct WavetableMap : widget::Widget {
 			nvgClosePath(vg);
 		}
 	}
+
+	/** Closed outline of a sample's min / max overview across the widget's width */
+	static void overviewPath(NVGcontext* vg, const wa::SampleBuffer& s, float W, float mid, float amp) {
+		const int cols = wa::OVERVIEW_COLUMNS;
+		float peak = 1e-6f;
+		for (float v : s.overview)
+			peak = std::max(peak, std::fabs(v));
+		int step = std::max(1, (int) (cols / (2.f * W)));
+		nvgBeginPath(vg);
+		for (int c = 0; c < cols; c += step) {
+			float x = (c + 0.5f) / cols * W;
+			float y = mid - s.overview[2 * c + 1] / peak * amp;
+			if (c == 0)
+				nvgMoveTo(vg, x, y);
+			else
+				nvgLineTo(vg, x, y);
+		}
+		for (int c = cols - 1; c >= 0; c -= step)
+			nvgLineTo(vg, (c + 0.5f) / cols * W, mid - s.overview[2 * c] / peak * amp);
+		nvgClosePath(vg);
+	}
+
+	// Granular grain flashes (UI thread only)
+	double lastTime = 0.0;
+	uint32_t lastGrainCount[wa::NUM_MARKERS] = {};
+	float flash[wa::NUM_MARKERS] = {};
+	float flashPos[wa::NUM_MARKERS] = {};
+	float flashLen[wa::NUM_MARKERS] = {};
 
 	void drawMap(const DrawArgs& args) {
 		NVGcontext* vg = args.vg;
@@ -312,9 +362,18 @@ struct WavetableMap : widget::Widget {
 			nvgFill(vg);
 		}
 
+		// Granular engine: the real waveform of the sample (min / max envelope) instead of the artifacts' cycles.
+		bool grain = module && b && b->sample.valid() && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+		auto wavePath = [&](bool closed) {
+			if (grain)
+				overviewPath(vg, b->sample, W, mid, amp);
+			else
+				curvePath(vg, n, mid, amp, closed);
+		};
+
 		// Waveform fill: silver at the peaks fading to smoke at the centre, mirrored for both halves.
 		NVGcolor peakC = nvgRGBA(0xd4, 0xd7, 0xde, 0xd0), centreC = nvgRGBA(0x5c, 0x60, 0x68, 0x40);
-		curvePath(vg, n, mid, amp, true);
+		wavePath(true);
 		nvgSave(vg);
 		nvgIntersectScissor(vg, 0, 0, W, mid);
 		nvgFillPaint(vg, nvgLinearGradient(vg, 0, mid - amp, 0, mid, peakC, centreC));
@@ -327,7 +386,7 @@ struct WavetableMap : widget::Widget {
 		nvgRestore(vg);
 
 		// The line: a wide soft glow under a thin bright stroke.
-		curvePath(vg, n, mid, amp, false);
+		wavePath(false);
 		nvgLineJoin(vg, NVG_ROUND);
 		nvgStrokeColor(vg, nvgRGBA(0xe8, 0xea, 0xf0, 0x1c));
 		nvgStrokeWidth(vg, 3.f);
@@ -353,6 +412,33 @@ struct WavetableMap : widget::Widget {
 			return;
 		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/Nunito-Bold.ttf"));
 
+		// Granular: a flash where each cloud just started a grain, fading out.
+		if (grain) {
+			double now = system::getTime();
+			float dt = (float) std::min(now - lastTime, 0.1);
+			lastTime = now;
+			for (int i = 0; i < wa::NUM_MARKERS; i++) {
+				uint32_t count = module->shownGrainCount[i].load(std::memory_order_relaxed);
+				if (count != lastGrainCount[i]) {
+					lastGrainCount[i] = count;
+					flash[i] = 1.f;
+					flashPos[i] = module->shownGrainPos[i].load(std::memory_order_relaxed);
+					flashLen[i] = module->shownGrainSeconds[i].load(std::memory_order_relaxed);
+				}
+				else {
+					flash[i] = std::max(0.f, flash[i] - dt * 5.f);
+				}
+				if (flash[i] <= 0.f || !module->isMarkerActive(i))
+					continue;
+				float x = flashPos[i] * W;
+				float w = std::max(2.f, flashLen[i] / (float) std::max(b->sourceSeconds, 1e-3) * W);
+				nvgBeginPath(vg);
+				nvgRect(vg, x, H * 0.12f, w, H * 0.76f);
+				nvgFillColor(vg, nvgTransRGBAf(layout::MARKER_COLORS[i], 0.45f * flash[i]));
+				nvgFill(vg);
+			}
+		}
+
 		// Preview: a pulsing white band on the previewed artifact.
 		int p = module->previewTable.load();
 		if (p >= 0 && p < n) {
@@ -370,7 +456,7 @@ struct WavetableMap : widget::Widget {
 			int i = (k < wa::NUM_MARKERS) ? k : sel;
 			if ((k < wa::NUM_MARKERS && i == sel) || !module->isMarkerActive(i))
 				continue;
-			float x = clamp(tableX(module->shownIndex[i].load(), n), br + 1.f, W - br - 1.f);
+			float x = bulletX(i, n);
 			// A dark shadow ring lifts the bullet off the waveform.
 			nvgBeginPath(vg);
 			nvgCircle(vg, x, mid, br + 3.f);

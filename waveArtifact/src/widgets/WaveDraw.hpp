@@ -41,6 +41,49 @@ inline void drawTable(NVGcontext* vg, const wa::WavetableBank& bank, float index
 	nvgStroke(vg);
 }
 
+/** Granular engine: the source sample around `center` (0..1), `span` of it wide (0..1), as a filled
+min / max envelope in `r`, with a cursor at the center. Scaled by the sample's own peak. */
+inline void drawSampleSlice(NVGcontext* vg, const wa::SampleBuffer& s, float center, float span, math::Rect r, NVGcolor color) {
+	if (s.overview.empty())
+		return;
+	const int cols = wa::OVERVIEW_COLUMNS;
+	float peak = 1e-6f;
+	for (float v : s.overview)
+		peak = std::max(peak, std::fabs(v));
+	float midY = r.pos.y + r.size.y / 2.f;
+	float amp = r.size.y * 0.45f / peak;
+	int points = clamp((int) r.size.x, 24, 160);
+	nvgBeginPath(vg);
+	for (int k = 0; k <= points; k++) {
+		float p = center + span * ((float) k / points - 0.5f);
+		int c = clamp((int) (p * cols), 0, cols - 1);
+		float x = r.pos.x + r.size.x * k / points;
+		float y = midY - s.overview[2 * c + 1] * amp;
+		if (k == 0)
+			nvgMoveTo(vg, x, y);
+		else
+			nvgLineTo(vg, x, y);
+	}
+	for (int k = points; k >= 0; k--) {
+		float p = center + span * ((float) k / points - 0.5f);
+		int c = clamp((int) (p * cols), 0, cols - 1);
+		nvgLineTo(vg, r.pos.x + r.size.x * k / points, midY - s.overview[2 * c] * amp);
+	}
+	nvgClosePath(vg);
+	nvgFillColor(vg, nvgTransRGBAf(color, 0.35f));
+	nvgFill(vg);
+	nvgStrokeColor(vg, color);
+	nvgStrokeWidth(vg, 0.9f);
+	nvgStroke(vg);
+	// Cursor: where the cloud reads
+	nvgBeginPath(vg);
+	nvgMoveTo(vg, r.pos.x + r.size.x / 2.f, r.pos.y);
+	nvgLineTo(vg, r.pos.x + r.size.x / 2.f, r.pos.y + r.size.y);
+	nvgStrokeColor(vg, nvgTransRGBAf(color, 0.8f));
+	nvgStrokeWidth(vg, 0.8f);
+	nvgStroke(vg);
+}
+
 /** Stand-in shape for the module browser (no module, no bank). */
 inline void drawSine(NVGcontext* vg, math::Rect r, float harmonic, NVGcolor color, float width) {
 	int points = 64;
