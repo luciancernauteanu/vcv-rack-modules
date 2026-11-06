@@ -47,6 +47,8 @@ struct ToExpanderMessage {
 	bool linked = false;
 	/** RESET arrived this sample: restart the LFOs */
 	bool reset = false;
+	/** The main module runs the granular engine: the CV inputs are labelled START / P.SPRD / SCAN / SPREAD */
+	bool granular = false;
 };
 
 struct ToMainMessage {

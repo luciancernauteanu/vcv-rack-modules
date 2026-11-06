@@ -263,7 +263,98 @@ void buildLevels(const std::vector<float>& raw, int maxHarmonic, WavetableBank& 
 	}
 }
 
+/** Keeps the decoded sample for the granular engine: interleaved mono / stereo, a loudness gain, a
+min / max overview for the display and SAMPLE_LEVELS low-passed, decimated copies (grains played
+faster than the source read the copy with no content above their own Nyquist). */
+void buildSample(const float* pcm, size_t frames, unsigned channels, unsigned sampleRate, SampleBuffer& s) {
+	s.channels = (channels >= 2 && frames * 2 <= MAX_SAMPLE_VALUES) ? 2 : 1;
+	s.sampleRate = sampleRate;
+	s.frames = frames;
+	std::vector<float>& l0 = s.levels[0];
+	l0.resize(frames * s.channels);
+	for (size_t i = 0; i < frames; i++) {
+		if (s.channels == 2) {
+			l0[2 * i] = pcm[i * channels];
+			l0[2 * i + 1] = pcm[i * channels + 1];
+		}
+		else {
+			float sum = 0.f;
+			for (unsigned c = 0; c < channels; c++)
+				sum += pcm[i * channels + c];
+			l0[i] = sum / channels;
+		}
+	}
+
+	// Loudness: RMS 0.3 unless that would clip (gain 0.25 .. 16)
+	double sumSq = 0.0;
+	float peak = 0.f;
+	for (float v : l0) {
+		sumSq += (double) v * v;
+		peak = std::max(peak, std::fabs(v));
+	}
+	double rms = std::sqrt(sumSq / std::max<size_t>(l0.size(), 1));
+	double g = (rms > 1e-9) ? 0.4 / rms : 1.0;
+	if (peak > 1e-9f)
+		g = std::min(g, 1.0 / peak);
+	s.normGain = (float) std::min(std::max(g, 0.25), 16.0);
+
+	// Overview
+	s.overview.assign(2 * OVERVIEW_COLUMNS, 0.f);
+	for (int c = 0; c < OVERVIEW_COLUMNS; c++) {
+		size_t a = frames * c / OVERVIEW_COLUMNS;
+		size_t b = std::max(a + 1, frames * (c + 1) / OVERVIEW_COLUMNS);
+		float lo = 0.f, hi = 0.f;
+		for (size_t i = a; i < b && i < frames; i++) {
+			for (int ch = 0; ch < s.channels; ch++) {
+				float v = l0[i * s.channels + ch];
+				lo = std::min(lo, v);
+				hi = std::max(hi, v);
+			}
+		}
+		s.overview[2 * c] = lo;
+		s.overview[2 * c + 1] = hi;
+	}
+
+	// Half-band style low-pass (windowed sinc, cutoff = 1/4 of the level's rate, 31 taps), then keep
+	// every second frame.
+	const int TAPS = 31, HALF = TAPS / 2;
+	float h[TAPS];
+	double hs = 0.0;
+	for (int k = 0; k < TAPS; k++) {
+		double n = k - HALF;
+		double sinc = (n == 0.0) ? 1.0 : std::sin(PI * n / 2.0) / (PI * n / 2.0);
+		double win = 0.42 - 0.5 * std::cos(2 * PI * k / (TAPS - 1)) + 0.08 * std::cos(4 * PI * k / (TAPS - 1));
+		h[k] = (float) (0.5 * sinc * win);
+		hs += h[k];
+	}
+	for (int k = 0; k < TAPS; k++)
+		h[k] = (float) (h[k] / hs);
+	for (int lv = 1; lv < SAMPLE_LEVELS; lv++) {
+		const std::vector<float>& src = s.levels[lv - 1];
+		size_t sf = src.size() / s.channels;
+		size_t df = (sf + 1) / 2;
+		std::vector<float>& dst = s.levels[lv];
+		dst.assign(df * s.channels, 0.f);
+		for (size_t i = 0; i < df; i++) {
+			for (int ch = 0; ch < s.channels; ch++) {
+				double acc = 0.0;
+				long center = (long) (2 * i);
+				for (int k = 0; k < TAPS; k++) {
+					long idx = center + k - HALF;
+					if (idx >= 0 && idx < (long) sf)
+						acc += h[k] * src[(size_t) idx * s.channels + ch];
+				}
+				dst[i * s.channels + ch] = (float) acc;
+			}
+		}
+	}
+}
+
 } // namespace
+
+void buildSampleBuffer(const float* pcm, size_t frames, unsigned channels, unsigned sampleRate, SampleBuffer& s) {
+	buildSample(pcm, frames, channels, sampleRate, s);
+}
 
 int tableCountFor(TableCountMode mode, double seconds) {
 	switch (mode) {
@@ -305,9 +396,10 @@ WavetableBank* analyzeWav(const uint8_t* bytes, size_t size, TableCountMode mode
 			sum += pcm[i * channels + c];
 		mono[i] = sum / channels;
 	}
-	drwav_free(pcm, NULL);
 
 	std::unique_ptr<WavetableBank> bank(new WavetableBank);
+	buildSample(pcm, (size_t) frames, channels, sampleRate, bank->sample);
+	drwav_free(pcm, NULL);
 	bank->sourceSampleRate = sampleRate;
 	bank->sourceSeconds = (double) frames / sampleRate;
 	bank->numTables = tableCountFor(mode, bank->sourceSeconds);

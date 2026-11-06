@@ -26,6 +26,11 @@ struct WaveArtifactExpander : Module {
 		DECAY_PARAM,
 		/** 0 = gate (holds while high, DECAY after it falls), 1 = percussive AD (decays even while held) */
 		PERC_PARAM,
+		/** Granular engine: 0..100% amounts of the START, SCAN and SPREAD CVs. They take the place of the
+		attenuverters of WAVE, FINE and PAN, which keep their own values for the wavetable engine. */
+		GRAIN_START_AMT_PARAM,
+		GRAIN_SCAN_AMT_PARAM,
+		GRAIN_SPREAD_AMT_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -70,6 +75,8 @@ struct WaveArtifactExpander : Module {
 
 	// For the UI
 	std::atomic<bool> linked{false};
+	/** The main module runs the granular engine (relabels the CV inputs) */
+	std::atomic<bool> granular{false};
 	std::atomic<int> chainIndex{0};
 
 	WaveArtifactExpander();
@@ -77,6 +84,16 @@ struct WaveArtifactExpander : Module {
 	void process(const ProcessArgs& args) override;
 	int getMarker() {
 		return clamp((int) std::round(params[MARKER_PARAM].getValue()), 0, wa::NUM_MARKERS - 1);
+	}
+	/** The amount knob of a CV input for an engine */
+	static int amtParam(int target, bool grain) {
+		if (grain && target == wa::MOD_WAVE)
+			return GRAIN_START_AMT_PARAM;
+		if (grain && target == wa::MOD_FINE)
+			return GRAIN_SCAN_AMT_PARAM;
+		if (grain && target == wa::MOD_PAN)
+			return GRAIN_SPREAD_AMT_PARAM;
+		return AMT_PARAM + target;
 	}
 };
 

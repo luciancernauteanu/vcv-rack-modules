@@ -14,13 +14,17 @@ test_lfo: test_lfo.cpp $(wildcard ../src/*.hpp)
 test_sound: test_sound.cpp ../src/WavetableBank.cpp $(wildcard ../src/*.hpp)
 	$(CXX) $(FLAGS) -o $@ test_sound.cpp ../src/WavetableBank.cpp
 
-run: test_bank test_engine test_lfo test_sound
+test_granular: test_granular.cpp ../src/WavetableBank.cpp $(wildcard ../src/*.hpp)
+	$(CXX) $(FLAGS) -o $@ test_granular.cpp ../src/WavetableBank.cpp
+
+run: test_bank test_engine test_lfo test_sound test_granular
 	./test_bank
 	./test_engine
 	./test_lfo
 	./test_sound
+	./test_granular
 
 clean:
-	rm -f test_bank test_bank.exe test_engine test_engine.exe test_lfo test_lfo.exe test_sound test_sound.exe
+	rm -f test_bank test_bank.exe test_engine test_engine.exe test_lfo test_lfo.exe test_sound test_sound.exe test_granular test_granular.exe
 
 .PHONY: run clean

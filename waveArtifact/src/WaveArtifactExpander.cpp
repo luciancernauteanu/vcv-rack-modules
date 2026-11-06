@@ -25,6 +25,10 @@ WaveArtifactExpander::WaveArtifactExpander() {
 		configParam(AMT_PARAM + t, unipolar ? 0.f : -1.f, 1.f, 0.f, name + ((t == wa::MOD_GAIN) ? " VCA amount (100% = silent at 0 V)" : " CV amount"), "%", 0.f, 100.f);
 		configInput(MOD_INPUT + t, name + " CV");
 	}
+	// Granular engine: START, SCAN and SPREAD are unipolar amounts, shown in place of the attenuverters.
+	configParam(GRAIN_START_AMT_PARAM, 0.f, 1.f, 0.f, "START CV amount", "%", 0.f, 100.f);
+	configParam(GRAIN_SCAN_AMT_PARAM, 0.f, 1.f, 0.f, "SCAN CV amount", "%", 0.f, 100.f);
+	configParam(GRAIN_SPREAD_AMT_PARAM, 0.f, 1.f, 0.f, "SPREAD CV amount", "%", 0.f, 100.f);
 	// LFO 1 defaults to 1 Hz, LFO 2 to 0.2 Hz.
 	const float defaultRate[NUM_LFOS] = {0.606f, 0.394f};
 	for (int k = 0; k < NUM_LFOS; k++) {
@@ -158,7 +162,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
 			if (!inputs[MOD_INPUT + t].isConnected())
 				continue;
-			float amt = params[AMT_PARAM + t].getValue();
+			float amt = params[amtParam(t, fromLeft.granular)].getValue();
 			if (amt != 0.f)
 				acc.modulated[m] = true;
 			float v = inputs[MOD_INPUT + t].getVoltage();
@@ -178,6 +182,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->index = index;
 		out->linked = fromLeft.linked;
 		out->reset = fromLeft.reset;
+		out->granular = fromLeft.granular;
 		right->leftExpander.requestMessageFlip();
 	}
 
@@ -209,6 +214,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		}
 		linked = active;
 		chainIndex = index;
+		granular = fromLeft.linked && fromLeft.granular;
 	}
 }
 
@@ -253,6 +259,22 @@ static const float LFO_OUT_Y = 114.6f;
 } // namespace xlayout
 
 struct WaveArtifactExpanderWidget : ModuleWidget {
+	/** Per CV input with a separate granular amount: the wavetable knob and the granular knob at the same spot */
+	ParamWidget* waveAmtKnobs[wa::NUM_MOD_TARGETS] = {};
+	ParamWidget* grainAmtKnobs[wa::NUM_MOD_TARGETS] = {};
+
+	void step() override {
+		WaveArtifactExpander* m = dynamic_cast<WaveArtifactExpander*>(module);
+		bool grain = m && m->granular.load(std::memory_order_relaxed);
+		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
+			if (!grainAmtKnobs[t])
+				continue;
+			waveAmtKnobs[t]->setVisible(!grain);
+			grainAmtKnobs[t]->setVisible(grain);
+		}
+		ModuleWidget::step();
+	}
+
 	WaveArtifactExpanderWidget(WaveArtifactExpander* module) {
 		using namespace xlayout;
 		setModule(module);
@@ -271,8 +293,11 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->add(Vec(MARKER_BUTTON.x, TOP_LABEL_Y), "MARKER", 6.f);
 		labels->add(Vec(VOCT_JACK.x, TOP_LABEL_Y + 1.f), "V/OCT", 6.f);
 		labels->add(Vec(GATE_JACK.x, TOP_LABEL_Y + 1.f), "GATE", 6.f);
+		// The same six inputs under their granular names while the main module runs the granular engine
+		static const char* const GRAIN_TARGET_NAMES[wa::NUM_MOD_TARGETS] = {"START", "GAIN", "CUTOFF", "P.SPRD", "SCAN", "SPREAD"};
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++)
-			labels->add(Vec(CV_CELL_X[t % 2] + CV_NAME_DX, CV_JACK_Y[t / 2] + CV_NAME_DY), wa::MOD_TARGET_NAMES[t], 6.f);
+			labels->addModal(Vec(CV_CELL_X[t % 2] + CV_NAME_DX, CV_JACK_Y[t / 2] + CV_NAME_DY), wa::MOD_TARGET_NAMES[t], GRAIN_TARGET_NAMES[t], 6.f);
+		labels->grainFlag = module ? &module->granular : nullptr;
 		labels->add(Vec(ATTACK_X, ENV_NAME_Y), "ATTACK", 6.f);
 		labels->add(Vec(DECAY_X, ENV_NAME_Y), "DECAY", 6.f);
 		labels->add(Vec(ENV_OUT_X, ENV_NAME_Y), "ENV", 6.f);
@@ -298,7 +323,15 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 			float cellX = CV_CELL_X[t % 2];
 			float y = CV_JACK_Y[t / 2];
 			addInput(createInputCentered<ThemedPJ301MPort>(mm2px(Vec(cellX + CV_JACK_DX, y)), module, WaveArtifactExpander::MOD_INPUT + t));
-			addParam(createParamCentered<Trimpot>(mm2px(Vec(cellX + CV_AMT_DX, y)), module, WaveArtifactExpander::AMT_PARAM + t));
+			ParamWidget* amt = createParamCentered<Trimpot>(mm2px(Vec(cellX + CV_AMT_DX, y)), module, WaveArtifactExpander::AMT_PARAM + t);
+			addParam(amt);
+			int grainId = WaveArtifactExpander::amtParam(t, true);
+			if (grainId != WaveArtifactExpander::AMT_PARAM + t) {
+				waveAmtKnobs[t] = amt;
+				grainAmtKnobs[t] = createParamCentered<Trimpot>(mm2px(Vec(cellX + CV_AMT_DX, y)), module, grainId);
+				grainAmtKnobs[t]->setVisible(false);
+				addParam(grainAmtKnobs[t]);
+			}
 		}
 
 		addParam(createParamCentered<Trimpot>(mm2px(Vec(ATTACK_X, ENV_Y)), module, WaveArtifactExpander::ATTACK_PARAM));

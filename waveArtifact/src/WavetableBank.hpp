@@ -57,7 +57,38 @@ enum TableTone {
 	TABLE_TONES_LEN
 };
 
+/** The decoded source sample, kept for the granular engine (the wavetables are built from it, then it
+would be thrown away). Mono or stereo float. `levels[k]` is the sample low-passed and decimated by 2^k,
+so a grain played at a high rate reads a level with no content above its own Nyquist (no aliasing). */
+static const int SAMPLE_LEVELS = 4;
+/** Columns of the min / max overview used by the display */
+static const int OVERVIEW_COLUMNS = 1024;
+/** Above this many samples (frames x channels, 64 MB of float) a stereo file is kept as mono. */
+static const size_t MAX_SAMPLE_VALUES = 16u * 1024u * 1024u;
+
+struct SampleBuffer {
+	int channels = 0;
+	unsigned sampleRate = 0;
+	/** Frames of level 0 */
+	size_t frames = 0;
+	/** Gain that brings the sample to a comfortable level (RMS 0.4, no peak above 1) */
+	float normGain = 1.f;
+	/** Interleaved samples of each level; level k has (frames + 2^k - 1) >> k frames */
+	std::vector<float> levels[SAMPLE_LEVELS];
+	/** Per column: minimum, maximum (level 0, before normGain) */
+	std::vector<float> overview;
+
+	bool valid() const {
+		return channels > 0 && frames > 0;
+	}
+	size_t levelFrames(int k) const {
+		return levels[k].size() / (size_t) std::max(channels, 1);
+	}
+};
+
 struct WavetableBank {
+	/** The source sample (granular engine) */
+	SampleBuffer sample;
 	int numTables = 0;
 	/** Layout: [table][level][FRAME_SIZE]. Each table is loudness-normalized at level 0 (ARTIFACT_RMS). */
 	std::vector<float> data;
@@ -75,6 +106,9 @@ struct WavetableBank {
 		return &data[((size_t) table * NUM_LEVELS + level) * FRAME_SIZE];
 	}
 };
+
+/** Fills `s` from interleaved PCM (also used by analyzeWav; public for tests). */
+void buildSampleBuffer(const float* pcm, size_t frames, unsigned channels, unsigned sampleRate, SampleBuffer& s);
 
 int tableCountFor(TableCountMode mode, double seconds);
 
