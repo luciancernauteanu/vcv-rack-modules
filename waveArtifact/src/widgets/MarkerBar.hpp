@@ -11,7 +11,8 @@ While a table is previewed, it covers the slots; click it to stop the preview. I
 that marker.
 Bottom: the marker bar. Click empty bar to add a marker (up to 5; when all 5 are in use it moves
 the playhead instead), drag a bullet to move it (it can pass over other markers), click a bullet or slot to
-edit that marker, right-click a bullet or slot to copy, paste or delete. Drag the white playhead to set POSITION.
+edit that marker, double-click a bullet to mute or unmute it (grey while muted), right-click a bullet or slot to
+copy, paste, mute or delete. Drag the white playhead to set POSITION.
 */
 struct MarkerBar : widget::Widget {
 	WaveArtifact* module = nullptr;
@@ -90,6 +91,9 @@ struct MarkerBar : widget::Widget {
 			m->selectedMarker = i;
 		}));
 		addMarkerCopyPasteItems(menu, m, i);
+		menu->addChild(createMenuItem(m->isMarkerMuted(i) ? "Unmute" : "Mute", "double-click", [=]() {
+			toggleMuteWithUndo(m, i);
+		}));
 		menu->addChild(createMenuItem("Delete", "", [=]() {
 			m->deleteMarker(i);
 		}, m->activeMarkerCount() <= 1));
@@ -126,9 +130,23 @@ struct MarkerBar : widget::Widget {
 	}
 	int hoverArrow = -1;
 
+	/** The bullet under the last two left presses, or -1: a double-click mutes only when both hit the same bullet, so
+	a double-click on the empty bar (which adds a marker on its first press) does not mute the new one. */
+	int pressBullet = -1;
+	int previousPressBullet = -1;
+
+	void onDoubleClick(const DoubleClickEvent& e) override {
+		if (module && pressBullet >= 0 && pressBullet == previousPressBullet)
+			toggleMuteWithUndo(module, pressBullet);
+	}
+
 	void onButton(const ButtonEvent& e) override {
 		if (!module || e.action != GLFW_PRESS)
 			return;
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
+			previousPressBullet = pressBullet;
+			pressBullet = -1;
+		}
 		bool left = e.button == GLFW_MOUSE_BUTTON_LEFT;
 		bool right = e.button == GLFW_MOUSE_BUTTON_RIGHT;
 		if (!left && !right)
@@ -188,6 +206,7 @@ struct MarkerBar : widget::Widget {
 				module->selectedMarker = hit;
 				dragMode = DRAG_MARKER;
 				dragMarker = hit;
+				pressBullet = hit;
 			}
 			e.consume(this);
 			return;
@@ -323,7 +342,8 @@ struct MarkerBar : widget::Widget {
 
 		for (int i = 0; i < wa::NUM_MARKERS; i++) {
 			math::Rect r = slotRect(i);
-			NVGcolor c = layout::MARKER_COLORS[i];
+			bool muted = module && module->isMarkerMuted(i);
+			NVGcolor c = muted ? layout::MUTED_COLOR : layout::MARKER_COLORS[i];
 			bool active = module ? module->isMarkerActive(i) : (i < 3);
 			// While Shift is moving a setting on every marker, they all show as being edited.
 			bool selected = module && (module->selectedMarker == i || module->linkSetting >= 0);
@@ -415,6 +435,8 @@ struct MarkerBar : widget::Widget {
 			std::string info;
 			if (!active)
 				info = "off";
+			else if (muted)
+				info = "muted";
 			else if (bank && grain)
 				info = string::f("%.2fs", readAt * bank->sourceSeconds);
 			else if (bank)
@@ -502,7 +524,8 @@ struct MarkerBar : widget::Widget {
 				continue;
 			float pos = module ? module->params[WaveArtifact::MARKER_POS_PARAM + i].getValue() : i * 0.5f;
 			float x = posToX(pos);
-			NVGcolor c = layout::MARKER_COLORS[i];
+			// Muted: grey, its number still on it.
+			NVGcolor c = (module && module->isMarkerMuted(i)) ? layout::MUTED_COLOR : layout::MARKER_COLORS[i];
 			nvgBeginPath(args.vg);
 			nvgCircle(args.vg, x, y, r);
 			nvgFillColor(args.vg, c);

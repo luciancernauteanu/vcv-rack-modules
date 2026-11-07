@@ -7,3 +7,4 @@ extern Plugin* pluginInstance;
 
 extern Model* modelWaveArtifact;
 extern Model* modelWaveArtifactExpander;
+extern Model* modelWaveArtifactSequencer;

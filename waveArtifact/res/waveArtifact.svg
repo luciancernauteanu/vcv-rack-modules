@@ -81,6 +81,14 @@
     <rect id="DOT_STRIP" x="6" y="108" width="170.88" height="12" fill="#ffff00"/>
     <rect id="PLAY_MODE_PARAM" x="20" y="121.8" width="14" height="5" fill="#ff0000"/>
     <circle id="MARKER_GRAIN_SPREAD_PARAM" cx="142" cy="124.3" r="3" fill="#ff0000"/>
+    <circle id="GRAIN_DENSITY" cx="37.5" cy="19" r="3" fill="#ff0000"/>
+    <circle id="GRAIN_SIZE" cx="46" cy="19" r="3" fill="#ff0000"/>
+    <circle id="GRAIN_SCAN" cx="54.5" cy="19" r="3" fill="#ff0000"/>
+    <circle id="MARKER_GRAIN_SCAN_FADE_PARAM" cx="62.5" cy="19" r="3" fill="#ff0000"/>
+    <rect id="GRAIN_WINDOW" x="20.5" y="31" width="10" height="6" fill="#ff0000"/>
+    <circle id="GRAIN_SPRAY" cx="54.5" cy="34" r="3" fill="#ff0000"/>
+    <rect id="MARKER_GRAIN_SCAN_MODE_PARAM" x="59.1" y="31.8" width="6.8" height="4.4" fill="#ff0000"/>
+    <rect id="MARKER_GRAIN_KEEP_SPEED_PARAM" x="149.5" y="122.1" width="11" height="4.4" fill="#ff0000"/>
     <circle id="MARKER_ATTACK_PARAM" cx="43" cy="124.3" r="3" fill="#ff0000"/>
     <circle id="MARKER_DECAY_PARAM" cx="55" cy="124.3" r="3" fill="#ff0000"/>
     <circle id="MARKER_SUSTAIN_PARAM" cx="67" cy="124.3" r="3" fill="#ff0000"/>

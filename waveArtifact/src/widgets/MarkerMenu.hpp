@@ -87,6 +87,24 @@ inline void copyEnvelopeToAll(WaveArtifact* m, int from) {
 		APP->history->push(action);
 }
 
+/** Mute or unmute a marker, as one undo step. */
+inline void toggleMuteWithUndo(WaveArtifact* m, int i) {
+	int id = WaveArtifact::MARKER_MUTE_PARAM + i;
+	float before = m->params[id].getValue();
+	float after = (before > 0.5f) ? 0.f : 1.f;
+	m->params[id].setValue(after);
+	rack::Context* context = contextGet();
+	if (!context || !context->history)
+		return;
+	history::ParamChange* change = new history::ParamChange;
+	change->name = (after > 0.5f) ? "mute marker" : "unmute marker";
+	change->moduleId = m->id;
+	change->paramId = id;
+	change->oldValue = before;
+	change->newValue = after;
+	context->history->push(change);
+}
+
 /** Copy / paste items of a marker's right-click menus. */
 inline void addMarkerCopyPasteItems(ui::Menu* menu, WaveArtifact* m, int i) {
 	menu->addChild(createMenuItem("Copy settings", "", [=]() {
