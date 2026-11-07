@@ -1,6 +1,7 @@
 #pragma once
 #include "Lfo.hpp"
 #include "MorphEngine.hpp"
+#include "StepLocks.hpp"
 
 // Messages between waveArtifact and its expanders (chained to its right, up to MAX_EXPANDERS).
 // Rack double-buffers them, so each hop adds one sample of latency, irrelevant for CV.
@@ -62,11 +63,16 @@ struct ToSequencerMessage {
 	uint32_t resetCount = 0;
 };
 
-/** Sequencer -> main: which marker was struck last, and how hard */
+/** Sequencer -> main: which marker was struck last, and how hard, with that step's parameter locks */
 struct FromSequencerMessage {
 	bool linked = false;
 	uint32_t fireCount[NUM_MARKERS] = {};
 	float velocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
+	/** The latest played step's locks (see StepLocks.hpp), whether it slides, and one step's length in beats */
+	float lockValue[NUM_MARKERS][NUM_LOCKABLE] = {};
+	uint64_t lockMask[NUM_MARKERS] = {};
+	bool slide[NUM_MARKERS] = {};
+	double stepBeats[NUM_MARKERS] = {0.25, 0.25, 0.25, 0.25, 0.25};
 };
 
 struct ToMainMessage {

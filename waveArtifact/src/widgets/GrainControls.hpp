@@ -135,8 +135,9 @@ struct GrainWindowScreen : LfoShapeScreen {
 	}
 };
 
-inline GrainWindowScreen* createGrainWindowScreen(Vec mmCenter, Vec mmSize, Module* module, int paramId, NVGcolor color) {
-	GrainWindowScreen* s = createParam<GrainWindowScreen>(Vec(0, 0), module, paramId);
+template <class T = GrainWindowScreen>
+T* createGrainWindowScreen(Vec mmCenter, Vec mmSize, Module* module, int paramId, NVGcolor color) {
+	T* s = createParam<T>(Vec(0, 0), module, paramId);
 	s->box.size = mm2px(mmSize);
 	s->box.pos = mm2px(mmCenter).minus(s->box.size.div(2.f));
 	s->color = color;

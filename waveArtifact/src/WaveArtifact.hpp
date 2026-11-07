@@ -9,6 +9,9 @@
 #include "MorphEngine.hpp"
 #include "PolyVoices.hpp"
 #include "WavetableBank.hpp"
+#include "StepLocks.hpp"
+
+struct WaveArtifactSequencer;
 
 struct WaveArtifact : Module {
 	static const int NUM_MARKERS = wa::NUM_MARKERS;
@@ -219,6 +222,18 @@ struct WaveArtifact : Module {
 	float seqVelocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	/** The velocity in use: jumps to a new one while the voice is silent, slews (5 ms) over a sounding one */
 	float seqVelocityUsed[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
+	/** SEQ: each marker's parameter locks, from its row's latest played step (see StepLocks.hpp) */
+	wa::MarkerLocks seqLocks[NUM_MARKERS];
+	/** For each param ID: its index in MARKER_SETTING_PARAMS when it is a setting's first ID, else -1 */
+	int8_t lockIndex[PARAMS_LEN];
+	/** Settings that never glide (switches and lists), bit k = MARKER_SETTING_PARAMS[k] */
+	uint64_t lockJumpMask = 0;
+	/** A marker setting as it plays now: the knob, or in SEQ the playing step's lock. `base` is the setting's first ID. */
+	float mv(int base, int i) {
+		float knob = params[base + i].getValue();
+		int k = lockIndex[base];
+		return k >= 0 ? seqLocks[i].get(k, knob) : knob;
+	}
 	bool polyRunning = false;
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
@@ -307,6 +322,40 @@ struct WaveArtifact : Module {
 	every active marker (the selected one too), as one undo step. False if it is not a per-marker setting. */
 	bool resetSettingOnAllMarkers(int paramId);
 	void linkFinish();
+
+	// Parameter locks from the main module's knobs, UI thread (see WaveArtifactSequencer). While a lit step of the
+	// selected marker's row is selected on the sequencer to the left, that marker's controls edit the step's locks
+	// instead of themselves.
+	/** The sequencer snapped on the left, or null */
+	WaveArtifactSequencer* sequencerOnLeft();
+	/** True while a step is the lock target: its row and step */
+	bool lockTarget(int* row, int* step);
+	/** The setting index (MARKER_SETTING_PARAMS) of a param ID of marker `marker`, or -1 */
+	int settingIndexOf(int paramId, int marker);
+	/** The value the target step plays for `paramId` (its lock, or the knob) and whether it is locked. False when there
+	is no target or the param is not one of the selected marker's settings. */
+	bool stepValueFor(int paramId, float* value, bool* locked);
+	/** Live record (REC on the sequencer, a step of the selected marker's row selected): the row's step playing now
+	(lock edits go there), -1 while the playhead is on an empty step (edits go nowhere), -2 when not recording. */
+	int recordStep();
+	/** A press on one of the selected marker's controls: the sequencer's lane shows that setting for the marker's row
+	(its locks as bars, the other steps at the knob's value). Nothing for a setting that cannot be locked. */
+	void showInLane(int paramId);
+	/** How many lit steps of the selected marker's row lock the setting behind `paramId` (0 without a sequencer) */
+	int stepsLockingInRow(int paramId);
+	/** The step the bars showed last while recording (they keep it while the playhead is on an empty step) */
+	int lastRecordStep = -1;
+	/** The step a lock edit goes into: the playing one while recording, else the selected one. Null when none. */
+	wa::StepData* lockWriteStep(int* row);
+	/** Writes a lock on the target step (while recording: on the step playing now). False when there is no target. */
+	bool setStepLock(int paramId, float value);
+	/** Removes the target step's lock for `paramId` (double-click on a knob). False when there is no target. */
+	bool clearStepLock(int paramId);
+	/** Call every frame: a change to the selected marker's settings while a step is the target becomes a lock, and the
+	control goes back to its own value (switches, buttons, the scroll wheel; knob drags lock directly, see LinkedKnob). */
+	void lockCaptureStep();
+	float lockSnap[NUM_MARKER_SETTINGS] = {};
+	int lockSnapMarker = -1;
 
 	/** UI thread. Reads the file and starts analysis on the worker thread. */
 	void loadFile(const std::string& path);

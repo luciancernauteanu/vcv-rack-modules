@@ -25,3 +25,5 @@ waveArtifact/tests/test_granular
 waveArtifact/tests/test_granular.exe
 waveArtifact/tests/test_poly
 waveArtifact/tests/test_poly.exe
+waveArtifact/tests/test_seq
+waveArtifact/tests/test_seq.exe

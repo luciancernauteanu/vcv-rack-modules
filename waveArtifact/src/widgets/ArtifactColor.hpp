@@ -1,6 +1,7 @@
 #pragma once
 #include "../Layout.hpp"
 #include "../WaveArtifact.hpp"
+#include "AboveTooltip.hpp"
 
 /** Value ring around a per-artifact knob, in the artifact's color: a faint track over the knob's
 travel and a bright arc for the current value (from the left end, or from the middle for bipolar
@@ -17,6 +18,23 @@ struct ValueArc : widget::Widget {
 			if (pq) {
 				float a0 = knob->minAngle, a1 = knob->maxAngle;
 				float v = clamp(pq->getScaledValue(), 0.f, 1.f);
+				// The knob shows a sequencer step's value while it is being locked: the arc follows it in white, and
+				// a dot in the marker's color marks the knob's own value.
+				StepShownValue* shown = dynamic_cast<StepShownValue*>(knob);
+				bool step = shown && shown->stepShowing && pq->getRange() > 0.f;
+				NVGcolor arcColor = color;
+				if (step) {
+					float own = v;
+					v = clamp((shown->stepShownValue - pq->getMinValue()) / pq->getRange(), 0.f, 1.f);
+					arcColor = nvgRGB(0xff, 0xff, 0xff);
+					float ownAt = a0 + (a1 - a0) * own - 0.5f * (float) M_PI;
+					Vec c = box.size.div(2.f);
+					float r = 0.5f * std::min(box.size.x, box.size.y) + 1.6f;
+					nvgBeginPath(args.vg);
+					nvgCircle(args.vg, c.x + r * std::cos(ownAt), c.y + r * std::sin(ownAt), 1.8f);
+					nvgFillColor(args.vg, color);
+					nvgFill(args.vg);
+				}
 				float at = a0 + (a1 - a0) * v;
 				float from = bipolar ? 0.5f * (a0 + a1) : a0;
 				Vec c = box.size.div(2.f);
@@ -31,7 +49,7 @@ struct ValueArc : widget::Widget {
 				if (std::fabs(at - from) > 1e-3f) {
 					nvgBeginPath(args.vg);
 					nvgArc(args.vg, c.x, c.y, r, std::min(at, from) + top, std::max(at, from) + top, NVG_CW);
-					nvgStrokeColor(args.vg, color);
+					nvgStrokeColor(args.vg, arcColor);
 					nvgStrokeWidth(args.vg, 1.6f);
 					nvgLineCap(args.vg, NVG_ROUND);
 					nvgStroke(args.vg);

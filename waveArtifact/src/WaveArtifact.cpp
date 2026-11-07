@@ -16,6 +16,7 @@
 #include "widgets/MarkerBar.hpp"
 #include "widgets/ModeButton.hpp"
 #include "widgets/PanelLabels.hpp"
+#include "widgets/StepValueBars.hpp"
 
 namespace {
 
@@ -59,6 +60,8 @@ std::string shortName(const std::string& name) {
 }
 
 } // namespace
+
+static bool isChoiceSetting(int id);
 
 WaveArtifact::WaveArtifact() {
 	config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -226,6 +229,16 @@ WaveArtifact::WaveArtifact() {
 	// The step sequencer sits on the left.
 	leftExpander.producerMessage = new wa::FromSequencerMessage;
 	leftExpander.consumerMessage = new wa::FromSequencerMessage;
+	// Parameter locks: which params are lockable settings, and which of those jump instead of gliding.
+	static_assert(wa::NUM_LOCKABLE == NUM_MARKER_SETTINGS, "StepLocks.hpp LOCK_NAMES must follow MARKER_SETTING_PARAMS");
+	for (int p = 0; p < PARAMS_LEN; p++)
+		lockIndex[p] = -1;
+	for (int k = 0; k < NUM_MARKER_SETTINGS; k++) {
+		// Not lockable: always the knob, and no step value (see wa::NOT_LOCKABLE)
+		lockIndex[MARKER_SETTING_PARAMS[k]] = wa::isLockable(k) ? (int8_t) k : (int8_t) -1;
+		if (isChoiceSetting(MARKER_SETTING_PARAMS[k]))
+			lockJumpMask |= (uint64_t) 1u << k;
+	}
 	setStatus("Load a WAV (max 10 MB)");
 }
 
@@ -333,10 +346,13 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	}
 	// The step sequencer on the left: which markers it struck this sample, and how hard.
 	bool seqFired[NUM_MARKERS] = {};
+	bool seqMode = params[PLAY_MODE_PARAM].getValue() > 3.5f;
+	bool seqLocksOn = false;
 	{
 		const wa::FromSequencerMessage* sq = (const wa::FromSequencerMessage*) leftExpander.consumerMessage;
 		Module* leftModule = leftExpander.module;
 		if (isWaveArtifactSequencer(leftModule)) {
+			seqLocksOn = seqMode && sq->linked;
 			wa::ToSequencerMessage* out = (wa::ToSequencerMessage*) leftModule->rightExpander.producerMessage;
 			out->beatPos = seqClock.beatPos;
 			out->resetCount = seqResetCount;
@@ -354,6 +370,13 @@ void WaveArtifact::process(const ProcessArgs& args) {
 					// start with the hard one's level.
 					if (voices.env[i] < 1e-3f)
 						seqVelocityUsed[i] = seqVelocity[i];
+					// The step's parameter locks, from now until the row plays another step.
+					if (seqLocksOn) {
+						float knobs[NUM_MARKER_SETTINGS];
+						for (int k = 0; k < NUM_MARKER_SETTINGS; k++)
+							knobs[k] = params[MARKER_SETTING_PARAMS[k] + i].getValue();
+						seqLocks[i].apply(sq->lockValue[i], sq->lockMask[i], sq->slide[i], sq->stepBeats[i], knobs, lockJumpMask);
+					}
 				}
 			}
 			seqLinkedBefore = now;
@@ -362,7 +385,13 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			seqLinkedBefore = false;
 		}
 	}
-	bool seqMode = params[PLAY_MODE_PARAM].getValue() > 3.5f;
+	// Locks only play in SEQ with the sequencer on: otherwise every marker plays its knobs.
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		if (seqLocksOn)
+			seqLocks[i].advance(seqClock.advance);
+		else
+			seqLocks[i].clear();
+	}
 	auto modOf = [&](int marker, int target) {
 		return mod->mod[marker][target] / 10.f * wa::MOD_SCALE_PER_10V[target];
 	};
@@ -372,22 +401,22 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		wa::MarkerInput& m = in.markers[i];
 		m.active = params[MARKER_ACTIVE_PARAM + i].getValue() > 0.5f;
 		m.pos = params[MARKER_POS_PARAM + i].getValue();
-		m.wave = params[MARKER_WAVE_PARAM + i].getValue();
+		m.wave = mv(MARKER_WAVE_PARAM, i);
 		// The engine adds the LFO after WAVE's glide (so SMOOTH does not dull it) and folds it back
 		// at the ends of the sample.
-		bool sync = params[MARKER_LFO_SYNC_PARAM + i].getValue() > 0.5f;
-		bool triplets = params[MARKER_LFO_TRIPLET_PARAM + i].getValue() > 0.5f;
-		bool dotted = params[MARKER_LFO_DOTTED_PARAM + i].getValue() > 0.5f;
-		int shape = (int) std::round(params[MARKER_LFO_SHAPE_PARAM + i].getValue());
-		m.lfo = lfos[i].process(shape, sync, params[MARKER_LFO_RATE_PARAM + i].getValue(), triplets, dotted, clock, args.sampleTime);
-		m.lfoAmount = params[MARKER_LFO_AMT_PARAM + i].getValue();
-		m.waveSmooth = wa::MIN_WAVE_SMOOTH * std::exp(params[MARKER_SMOOTH_PARAM + i].getValue() * LN_100);
-		m.gain = params[MARKER_GAIN_PARAM + i].getValue();
-		m.filterMode = (int) std::round(params[MARKER_FILTER_MODE_PARAM + i].getValue());
-		m.res = params[MARKER_RES_PARAM + i].getValue();
+		bool sync = mv(MARKER_LFO_SYNC_PARAM, i) > 0.5f;
+		bool triplets = mv(MARKER_LFO_TRIPLET_PARAM, i) > 0.5f;
+		bool dotted = mv(MARKER_LFO_DOTTED_PARAM, i) > 0.5f;
+		int shape = (int) std::round(mv(MARKER_LFO_SHAPE_PARAM, i));
+		m.lfo = lfos[i].process(shape, sync, mv(MARKER_LFO_RATE_PARAM, i), triplets, dotted, clock, args.sampleTime);
+		m.lfoAmount = mv(MARKER_LFO_AMT_PARAM, i);
+		m.waveSmooth = wa::MIN_WAVE_SMOOTH * std::exp(mv(MARKER_SMOOTH_PARAM, i) * LN_100);
+		m.gain = mv(MARKER_GAIN_PARAM, i);
+		m.filterMode = (int) std::round(mv(MARKER_FILTER_MODE_PARAM, i));
+		m.res = mv(MARKER_RES_PARAM, i);
 		// Semitone mode plays whole semitones even if the knob holds a fraction (it is re-snapped in uiStep).
-		float pitch = params[MARKER_PITCH_PARAM + i].getValue();
-		m.pitch = (params[MARKER_PITCH_FREE_PARAM + i].getValue() > 0.5f) ? pitch : std::round(pitch);
+		float pitch = mv(MARKER_PITCH_PARAM, i);
+		m.pitch = (mv(MARKER_PITCH_FREE_PARAM, i) > 0.5f) ? pitch : std::round(pitch);
 
 		// Expander CV, added in each param's own units (see MOD_SCALE_PER_10V). WAVE is folded at
 		// the sample's ends by the engine, like the LFO. The filter is always on; CUTOFF CV sweeps it
@@ -400,12 +429,12 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		// SEQ: velocity scales the voice's level (see voiceEnv below) and, here, opens the filter.
 		if (seqMode)
 			seqVelocityUsed[i] += (seqVelocity[i] - seqVelocityUsed[i]) * std::min(1.f, args.sampleTime / 0.005f);
-		m.cutoff = clamp(params[MARKER_CUTOFF_PARAM + i].getValue() + modOf(i, wa::MOD_CUTOFF) - (seqMode ? (1.f - seqVelocityUsed[i]) * 0.25f : 0.f), 0.f, 1.f);
-		m.drive = clamp(params[MARKER_DRIVE_PARAM + i].getValue() + modOf(i, wa::MOD_DRIVE), 0.f, 1.f);
-		m.fine = clamp(params[MARKER_FINE_PARAM + i].getValue() + modOf(i, wa::MOD_FINE), -12.f, 12.f);
+		m.cutoff = clamp(mv(MARKER_CUTOFF_PARAM, i) + modOf(i, wa::MOD_CUTOFF) - (seqMode ? (1.f - seqVelocityUsed[i]) * 0.25f : 0.f), 0.f, 1.f);
+		m.drive = clamp(mv(MARKER_DRIVE_PARAM, i) + modOf(i, wa::MOD_DRIVE), 0.f, 1.f);
+		m.fine = clamp(mv(MARKER_FINE_PARAM, i) + modOf(i, wa::MOD_FINE), -12.f, 12.f);
 		// Expander V/OCT, added to the main V/OCT for this artifact only
 		m.voct = mod->voct[i];
-		m.pan = clamp(params[MARKER_PAN_PARAM + i].getValue() + modOf(i, wa::MOD_PAN), -1.f, 1.f);
+		m.pan = clamp(mv(MARKER_PAN_PARAM, i) + modOf(i, wa::MOD_PAN), -1.f, 1.f);
 	}
 	// 0..10 V on POS CV sweeps the whole bar.
 	// Position: knob + CV (kept in range), then the position LFO sweeps +-amount/2 around it (100% =
@@ -447,11 +476,11 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		for (int i = 0; i < NUM_MARKERS; i++) {
 			markerPos[i] = in.markers[i].pos;
 			markerOn[i] = in.markers[i].active;
-			adsr[i].attack = wa::adsrAttackSeconds(params[MARKER_ATTACK_PARAM + i].getValue());
-			adsr[i].decay = wa::adsrFallSeconds(params[MARKER_DECAY_PARAM + i].getValue());
-			adsr[i].sustain = params[MARKER_SUSTAIN_PARAM + i].getValue();
-			adsr[i].release = wa::adsrFallSeconds(params[MARKER_RELEASE_PARAM + i].getValue());
-			adsr[i].hold = wa::adsrHoldSeconds(params[MARKER_HOLD_PARAM + i].getValue());
+			adsr[i].attack = wa::adsrAttackSeconds(mv(MARKER_ATTACK_PARAM, i));
+			adsr[i].decay = wa::adsrFallSeconds(mv(MARKER_DECAY_PARAM, i));
+			adsr[i].sustain = mv(MARKER_SUSTAIN_PARAM, i);
+			adsr[i].release = wa::adsrFallSeconds(mv(MARKER_RELEASE_PARAM, i));
+			adsr[i].hold = wa::adsrHoldSeconds(mv(MARKER_HOLD_PARAM, i));
 		}
 		// Expander GATEs and a press on a slot play markers directly.
 		wa::VoiceGates direct;
@@ -536,24 +565,24 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			g.start = wa::fold01(wm.wave);
 			// The expander's FINE input is DENSITY here: 0..10 V at AMT 100% adds 0..1 of the knob. (SCAN has no
 			// CV: changing its speed or loop length makes the read position jump. START is for moving by CV.)
-			g.density = clamp(params[MARKER_GRAIN_DENSITY_PARAM + i].getValue() + 0.5f * modOf(i, wa::MOD_FINE), 0.f, 1.f);
-			g.size = params[MARKER_GRAIN_SIZE_PARAM + i].getValue();
-			g.spray = params[MARKER_GRAIN_SPRAY_PARAM + i].getValue();
-			g.window = clamp((int) std::round(params[MARKER_GRAIN_WINDOW_PARAM + i].getValue()), 0, wa::NUM_GRAIN_WINDOWS - 1);
-			g.sync = params[MARKER_GRAIN_SYNC_PARAM + i].getValue() > 0.5f;
-			g.triplet = params[MARKER_GRAIN_TRIPLET_PARAM + i].getValue() > 0.5f;
-			g.dotted = params[MARKER_GRAIN_DOTTED_PARAM + i].getValue() > 0.5f;
+			g.density = clamp(mv(MARKER_GRAIN_DENSITY_PARAM, i) + 0.5f * modOf(i, wa::MOD_FINE), 0.f, 1.f);
+			g.size = mv(MARKER_GRAIN_SIZE_PARAM, i);
+			g.spray = mv(MARKER_GRAIN_SPRAY_PARAM, i);
+			g.window = clamp((int) std::round(mv(MARKER_GRAIN_WINDOW_PARAM, i)), 0, wa::NUM_GRAIN_WINDOWS - 1);
+			g.sync = mv(MARKER_GRAIN_SYNC_PARAM, i) > 0.5f;
+			g.triplet = mv(MARKER_GRAIN_TRIPLET_PARAM, i) > 0.5f;
+			g.dotted = mv(MARKER_GRAIN_DOTTED_PARAM, i) > 0.5f;
 			// The expander's DRIVE input drives P.SPRD while granular. PAN is PAN on both engines.
-			g.pitchScatter = clamp(params[MARKER_GRAIN_PSCATTER_PARAM + i].getValue() + modOf(i, wa::MOD_DRIVE), 0.f, 1.f);
-			g.scan = params[MARKER_GRAIN_SCAN_PARAM + i].getValue();
-			g.spread = params[MARKER_GRAIN_SPREAD_PARAM + i].getValue();
+			g.pitchScatter = clamp(mv(MARKER_GRAIN_PSCATTER_PARAM, i) + modOf(i, wa::MOD_DRIVE), 0.f, 1.f);
+			g.scan = mv(MARKER_GRAIN_SCAN_PARAM, i);
+			g.spread = mv(MARKER_GRAIN_SPREAD_PARAM, i);
 			g.pan = wm.pan;
-			g.direction = clamp((int) std::round(params[MARKER_GRAIN_DIR_PARAM + i].getValue()), 0, wa::NUM_GRAIN_DIRECTIONS - 1);
-			g.keepSpeed = params[MARKER_GRAIN_KEEP_SPEED_PARAM + i].getValue() > 0.5f;
-			g.scanPing = params[MARKER_GRAIN_SCAN_MODE_PARAM + i].getValue() > 0.5f;
-			g.scanFade = params[MARKER_GRAIN_SCAN_FADE_PARAM + i].getValue();
+			g.direction = clamp((int) std::round(mv(MARKER_GRAIN_DIR_PARAM, i)), 0, wa::NUM_GRAIN_DIRECTIONS - 1);
+			g.keepSpeed = mv(MARKER_GRAIN_KEEP_SPEED_PARAM, i) > 0.5f;
+			g.scanPing = mv(MARKER_GRAIN_SCAN_MODE_PARAM, i) > 0.5f;
+			g.scanFade = mv(MARKER_GRAIN_SCAN_FADE_PARAM, i);
 			g.scanLength = (in.bank && in.bank->sample.valid())
-				? wa::grainScanLengthFraction(params[MARKER_GRAIN_SCAN_LENGTH_PARAM + i].getValue(), (double) in.bank->sample.frames / in.bank->sample.sampleRate)
+				? wa::grainScanLengthFraction(mv(MARKER_GRAIN_SCAN_LENGTH_PARAM, i), (double) in.bank->sample.frames / in.bank->sample.sampleRate)
 				: -1.f;
 			g.cutoff = wm.cutoff;
 			g.filterMode = wm.filterMode;
@@ -1061,6 +1090,174 @@ void WaveArtifact::linkFinish() {
 	linkBeyond = 0.f;
 }
 
+WaveArtifactSequencer* WaveArtifact::sequencerOnLeft() {
+	Module* left = leftExpander.module;
+	return isWaveArtifactSequencer(left) ? (WaveArtifactSequencer*) left : nullptr;
+}
+
+bool WaveArtifact::lockTarget(int* row, int* step) {
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	if (!seq || !seq->hasSelection() || seq->selRow != selectedMarker || seq->velocity[seq->selRow][seq->selStep] <= 0.f)
+		return false;
+	*row = seq->selRow;
+	*step = seq->selStep;
+	return true;
+}
+
+int WaveArtifact::settingIndexOf(int paramId, int marker) {
+	int base = paramId - marker;
+	if (marker < 0 || base < 0 || base >= PARAMS_LEN)
+		return -1;
+	return lockIndex[base];
+}
+
+bool WaveArtifact::stepValueFor(int paramId, float* value, bool* locked) {
+	int r, s;
+	if (!lockTarget(&r, &s))
+		return false;
+	int k = settingIndexOf(paramId, r);
+	if (k < 0)
+		return false;
+	// Live record: the step being recorded into (the one playing, or the last one played while the playhead is on an
+	// empty step), so the bars and the held knob follow the recording as it happens.
+	int rec = recordStep();
+	if (rec >= 0)
+		lastRecordStep = rec;
+	if (rec == -2)
+		lastRecordStep = -1;
+	else if (lastRecordStep >= 0 && sequencerOnLeft()->velocity[r][lastRecordStep] > 0.f)
+		s = lastRecordStep;
+	const wa::StepData& d = sequencerOnLeft()->stepData[r][s];
+	*locked = d.locked(k);
+	// Mid-capture the control already shows the edit: lockSnap is the knob's own value.
+	float own = (lockSnapMarker == r) ? lockSnap[k] : params[paramId].getValue();
+	*value = *locked ? d.value[k] : own;
+	return true;
+}
+
+void WaveArtifact::showInLane(int paramId) {
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	int k = settingIndexOf(paramId, selectedMarker);
+	if (!seq || k < 0)
+		return;
+	seq->laneSetting = k;
+	seq->laneRow = selectedMarker;
+}
+
+int WaveArtifact::stepsLockingInRow(int paramId) {
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	int k = settingIndexOf(paramId, selectedMarker);
+	if (!seq || k < 0 || selectedMarker < 0 || selectedMarker >= NUM_MARKERS)
+		return 0;
+	int n = 0;
+	for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
+		if (seq->velocity[selectedMarker][s] > 0.f && seq->stepData[selectedMarker][s].locked(k))
+			n++;
+	return n;
+}
+
+int WaveArtifact::recordStep() {
+	int r, s;
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	if (!lockTarget(&r, &s) || seq->params[WaveArtifactSequencer::REC_PARAM].getValue() <= 0.5f)
+		return -2;
+	int p = seq->playing[r].load();
+	return (p >= 0 && p < WaveArtifactSequencer::STEPS && seq->velocity[r][p] > 0.f) ? p : -1;
+}
+
+wa::StepData* WaveArtifact::lockWriteStep(int* row) {
+	int r, s;
+	if (!lockTarget(&r, &s))
+		return nullptr;
+	int rec = recordStep();
+	// Recording: the step playing now, or nothing while the playhead is on an empty step.
+	if (rec == -1)
+		return nullptr;
+	*row = r;
+	return &sequencerOnLeft()->stepData[r][rec >= 0 ? rec : s];
+}
+
+bool WaveArtifact::setStepLock(int paramId, float value) {
+	int r, s;
+	if (!lockTarget(&r, &s))
+		return false;
+	int k = settingIndexOf(paramId, r);
+	if (k < 0)
+		return false;
+	wa::StepData* d = lockWriteStep(&r);
+	if (d) {
+		ParamQuantity* q = getParamQuantity(paramId);
+		d->setLock(k, clamp(value, q->getMinValue(), q->getMaxValue()));
+	}
+	// The lane shows the setting being locked (unipolar or bipolar as that setting), and while recording the steps filling in.
+	sequencerOnLeft()->laneSetting = k;
+	return true;
+}
+
+bool WaveArtifact::clearStepLock(int paramId) {
+	int r, s;
+	if (!lockTarget(&r, &s))
+		return false;
+	int k = settingIndexOf(paramId, r);
+	if (k < 0)
+		return false;
+	sequencerOnLeft()->stepData[r][s].clearLock(k);
+	sequencerOnLeft()->laneSetting = k;
+	return true;
+}
+
+void WaveArtifact::lockCaptureStep() {
+	int r, s;
+	bool target = lockTarget(&r, &s);
+	if (!target || r != lockSnapMarker) {
+		// Not capturing (or a new target): remember the controls as they are, to see changes from the next frame.
+		int m = target ? r : selectedMarker;
+		for (int k = 0; k < NUM_MARKER_SETTINGS; k++)
+			lockSnap[k] = params[MARKER_SETTING_PARAMS[k] + m].getValue();
+		lockSnapMarker = target ? r : -1;
+		return;
+	}
+	// Recording: into the step playing now (nothing while the playhead is on an empty step); else the selected one.
+	int writeRow = r;
+	wa::StepData* dp = lockWriteStep(&writeRow);
+	wa::StepData none;
+	wa::StepData& d = dp ? *dp : none;
+	for (int k = 0; k < NUM_MARKER_SETTINGS; k++) {
+		int id = MARKER_SETTING_PARAMS[k] + r;
+		float v = params[id].getValue();
+		if (v == lockSnap[k])
+			continue;
+		// Not lockable: the control changes the marker itself, as without a selected step.
+		if (!wa::isLockable(k)) {
+			lockSnap[k] = v;
+			continue;
+		}
+		// A knob moves the lock by as much as the control moved. A switch or list stepped by one (a toggle, a mode
+		// button's next / previous) steps the lock's choice the same way, so clicks keep cycling from what the step
+		// plays; a choice picked further away (a menu) is taken as it is.
+		ParamQuantity* q = getParamQuantity(id);
+		float from = d.locked(k) ? d.value[k] : lockSnap[k];
+		float lock;
+		if (isChoiceSetting(MARKER_SETTING_PARAMS[k])) {
+			int lo = (int) std::round(q->getMinValue()), n = (int) std::round(q->getMaxValue()) - lo + 1;
+			int delta = (int) std::round(v - lockSnap[k]);
+			if (n > 1 && (std::abs(delta) == 1 || std::abs(delta) == n - 1)) {
+				int step = (std::abs(delta) == 1) ? delta : (delta > 0 ? -1 : 1);
+				lock = (float) (lo + ((((int) std::round(from) - lo + step) % n) + n) % n);
+			}
+			else {
+				lock = v;
+			}
+		}
+		else {
+			lock = clamp(from + v - lockSnap[k], q->getMinValue(), q->getMaxValue());
+		}
+		d.setLock(k, lock);
+		sequencerOnLeft()->laneSetting = k; // the lane shows what is being locked
+		params[id].setValue(lockSnap[k]);
+	}
+}
+
 void WaveArtifact::copyMarker(int i) {
 	for (int k = 0; k < NUM_MARKER_SETTINGS; k++)
 		markerClipboard[k] = params[MARKER_SETTING_PARAMS[k] + i].getValue();
@@ -1106,8 +1303,9 @@ void openLoadDialog(WaveArtifact* module) {
 	std::free(path);
 }
 
-static ModeButton* createModeButton(Vec mmCenter, Module* module, int paramId, std::vector<std::string> labels, NVGcolor color) {
-	ModeButton* b = createParam<ModeButton>(Vec(0, 0), module, paramId);
+template <class T = ModeButton>
+static T* createModeButton(Vec mmCenter, Module* module, int paramId, std::vector<std::string> labels, NVGcolor color) {
+	T* b = createParam<T>(Vec(0, 0), module, paramId);
 	b->box.size = mm2px(layout::MODE_BUTTON_SIZE);
 	b->box.pos = mm2px(mmCenter).minus(b->box.size.div(2.f));
 	b->labels = labels;
@@ -1301,19 +1499,19 @@ struct WaveArtifactWidget : ModuleWidget {
 				WaveArtifact::MARKER_LFO_SYNC_PARAM + i, WaveArtifact::MARKER_LFO_TRIPLET_PARAM + i,
 				WaveArtifact::MARKER_LFO_DOTTED_PARAM + i, WaveArtifact::MARKER_LFO_AMT_PARAM + i), MARKER_COLORS[i]), W);
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(LFO_AMT_KNOB), module, WaveArtifact::MARKER_LFO_AMT_PARAM + i), MARKER_COLORS[i]), W);
-			add(createLfoShapeScreen(LFO_SHAPE_SCREEN, LFO_SHAPE_SIZE, module, WaveArtifact::MARKER_LFO_SHAPE_PARAM + i, MARKER_COLORS[i]), W);
-			add(createLitToggle(LFO_SYNC_BUTTON, module, WaveArtifact::MARKER_LFO_SYNC_PARAM + i, "SYNC", MARKER_COLORS[i]), W);
-			add(createLitToggle(LFO_TRIP_BUTTON, module, WaveArtifact::MARKER_LFO_TRIPLET_PARAM + i, "T", MARKER_COLORS[i], LFO_TOGGLE_SMALL), W);
-			add(createLitToggle(LFO_DOT_BUTTON, module, WaveArtifact::MARKER_LFO_DOTTED_PARAM + i, "D", MARKER_COLORS[i], LFO_TOGGLE_SMALL), W);
+			add(createLfoShapeScreen<AboveTooltip<LfoShapeScreen>>(LFO_SHAPE_SCREEN, LFO_SHAPE_SIZE, module, WaveArtifact::MARKER_LFO_SHAPE_PARAM + i, MARKER_COLORS[i]), W);
+			add(createLitToggle<AboveTooltip<LitToggle>>(LFO_SYNC_BUTTON, module, WaveArtifact::MARKER_LFO_SYNC_PARAM + i, "SYNC", MARKER_COLORS[i]), W);
+			add(createLitToggle<AboveTooltip<LitToggle>>(LFO_TRIP_BUTTON, module, WaveArtifact::MARKER_LFO_TRIPLET_PARAM + i, "T", MARKER_COLORS[i], LFO_TOGGLE_SMALL), W);
+			add(createLitToggle<AboveTooltip<LitToggle>>(LFO_DOT_BUTTON, module, WaveArtifact::MARKER_LFO_DOTTED_PARAM + i, "D", MARKER_COLORS[i], LFO_TOGGLE_SMALL), W);
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(SMOOTH_KNOB), module, WaveArtifact::MARKER_SMOOTH_PARAM + i), MARKER_COLORS[i]), W);
 			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(GAIN_KNOB), module, WaveArtifact::MARKER_GAIN_PARAM + i), MARKER_COLORS[i]));
 			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(CUTOFF_KNOB), module, WaveArtifact::MARKER_CUTOFF_PARAM + i), MARKER_COLORS[i]));
 			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(DRIVE_KNOB), module, WaveArtifact::MARKER_DRIVE_PARAM + i), MARKER_COLORS[i]), W);
 			add(withArc(createParamCentered<LinkedKnob<RoundSmallBlackKnob>>(mm2px(RES_KNOB), module, WaveArtifact::MARKER_RES_PARAM + i), MARKER_COLORS[i]));
-			add(createModeButton(FILTER_MODE_BUTTON, module, WaveArtifact::MARKER_FILTER_MODE_PARAM + i, {"LP", "BP", "HP", "NOTCH"}, MARKER_COLORS[i]));
+			add(createModeButton<AboveTooltip<ModeButton>>(FILTER_MODE_BUTTON, module, WaveArtifact::MARKER_FILTER_MODE_PARAM + i, {"LP", "BP", "HP", "NOTCH"}, MARKER_COLORS[i]));
 			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(PITCH_KNOB), module, WaveArtifact::MARKER_PITCH_PARAM + i), MARKER_COLORS[i], true));
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(FINE_KNOB), module, WaveArtifact::MARKER_FINE_PARAM + i), MARKER_COLORS[i], true), W);
-			add(createLitToggle(PITCH_FREE_BUTTON, module, WaveArtifact::MARKER_PITCH_FREE_PARAM + i, "FREE", MARKER_COLORS[i]));
+			add(createLitToggle<AboveTooltip<LitToggle>>(PITCH_FREE_BUTTON, module, WaveArtifact::MARKER_PITCH_FREE_PARAM + i, "FREE", MARKER_COLORS[i]));
 			add(withArc(createParamCentered<LinkedKnob<RoundSmallBlackKnob>>(mm2px(PAN_KNOB), module, WaveArtifact::MARKER_PAN_PARAM + i), MARKER_COLORS[i], true));
 
 			// Granular engine: its own grain group in the WAVE / LFO section (see Layout.hpp), DRIVE -> P.SPRD, and
@@ -1325,29 +1523,40 @@ struct WaveArtifactWidget : ModuleWidget {
 				WaveArtifact::MARKER_GRAIN_SYNC_PARAM + i, WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM + i,
 				WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + i), MARKER_COLORS[i]), G);
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(GRAIN_SPRAY_KNOB), module, WaveArtifact::MARKER_GRAIN_SPRAY_PARAM + i), MARKER_COLORS[i]), G);
-			add(createGrainWindowScreen(GRAIN_WINDOW_SCREEN, GRAIN_WINDOW_SIZE, module, WaveArtifact::MARKER_GRAIN_WINDOW_PARAM + i, MARKER_COLORS[i]), G);
-			add(createLitToggle(GRAIN_SYNC_BUTTON, module, WaveArtifact::MARKER_GRAIN_SYNC_PARAM + i, "SYNC", MARKER_COLORS[i]), G);
-			add(createLitToggle(GRAIN_TRIP_BUTTON, module, WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM + i, "T", MARKER_COLORS[i], LFO_TOGGLE_SMALL), G);
-			add(createLitToggle(GRAIN_DOT_BUTTON, module, WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + i, "D", MARKER_COLORS[i], LFO_TOGGLE_SMALL), G);
+			add(createGrainWindowScreen<AboveTooltip<GrainWindowScreen>>(GRAIN_WINDOW_SCREEN, GRAIN_WINDOW_SIZE, module, WaveArtifact::MARKER_GRAIN_WINDOW_PARAM + i, MARKER_COLORS[i]), G);
+			add(createLitToggle<AboveTooltip<LitToggle>>(GRAIN_SYNC_BUTTON, module, WaveArtifact::MARKER_GRAIN_SYNC_PARAM + i, "SYNC", MARKER_COLORS[i]), G);
+			add(createLitToggle<AboveTooltip<LitToggle>>(GRAIN_TRIP_BUTTON, module, WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM + i, "T", MARKER_COLORS[i], LFO_TOGGLE_SMALL), G);
+			add(createLitToggle<AboveTooltip<LitToggle>>(GRAIN_DOT_BUTTON, module, WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + i, "D", MARKER_COLORS[i], LFO_TOGGLE_SMALL), G);
 			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(DRIVE_KNOB), module, WaveArtifact::MARKER_GRAIN_PSCATTER_PARAM + i), MARKER_COLORS[i]), G);
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(GRAIN_SCAN_KNOB), module, WaveArtifact::MARKER_GRAIN_SCAN_PARAM + i), MARKER_COLORS[i], true), G);
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(GRAIN_FADE_KNOB), module, WaveArtifact::MARKER_GRAIN_SCAN_FADE_PARAM + i), MARKER_COLORS[i]), G);
 			// The scan loop's length, in FINE's spot (GRAIN has no FINE): also dragged from the map's loop handle.
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(FINE_KNOB), module, WaveArtifact::MARKER_GRAIN_SCAN_LENGTH_PARAM + i), MARKER_COLORS[i]), G);
 			{
-				ModeButton* loop = createModeButton(GRAIN_SCAN_MODE_BUTTON, module, WaveArtifact::MARKER_GRAIN_SCAN_MODE_PARAM + i, {"LOOP", "PING"}, MARKER_COLORS[i]);
+				ModeButton* loop = createModeButton<AboveTooltip<ModeButton>>(GRAIN_SCAN_MODE_BUTTON, module, WaveArtifact::MARKER_GRAIN_SCAN_MODE_PARAM + i, {"LOOP", "PING"}, MARKER_COLORS[i]);
 				loop->box.size = mm2px(GRAIN_SCAN_MODE_SIZE);
 				loop->box.pos = mm2px(GRAIN_SCAN_MODE_BUTTON).minus(loop->box.size.div(2.f));
 				add(loop, G);
 			}
 			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(SPREAD_KNOB), module, WaveArtifact::MARKER_GRAIN_SPREAD_PARAM + i), MARKER_COLORS[i]), G);
-			add(createLitToggle(KEEP_SPEED_BUTTON, module, WaveArtifact::MARKER_GRAIN_KEEP_SPEED_PARAM + i, "KEEP", MARKER_COLORS[i], KEEP_SPEED_BUTTON_SIZE), G);
+			add(createLitToggle<AboveTooltip<LitToggle>>(KEEP_SPEED_BUTTON, module, WaveArtifact::MARKER_GRAIN_KEEP_SPEED_PARAM + i, "KEEP", MARKER_COLORS[i], KEEP_SPEED_BUTTON_SIZE), G);
 
 			// POLY: the marker's envelope, on both engines.
 			for (int a = 0; a < WaveArtifact::NUM_ENVELOPE_PARAMS; a++) {
 				editKnobPoly[k] = true;
 				add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(ADSR_KNOB_X[a], ADSR_Y)), module, WaveArtifact::MARKER_ENVELOPE_PARAMS[a] + i), MARKER_COLORS[i]));
 			}
+		}
+		// A step selected on the sequencer: its values under the knobs.
+		{
+			StepValueBars* bars = createWidget<StepValueBars>(Vec(0, 0));
+			bars->box.size = box.size;
+			bars->module = module;
+			for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++)
+				for (int k = 0; k < EDIT_KNOBS; k++)
+					if (editKnobs[i][k])
+						bars->controls.push_back(editKnobs[i][k]);
+			addChild(bars);
 		}
 		// MORPH (one voice crossfading between markers) or POLY (each marker its own note).
 		{
@@ -1442,6 +1651,19 @@ struct WaveArtifactWidget : ModuleWidget {
 					held = dynamic_cast<ParamWidget*>(APP->event->getHoveredWidget());
 				}
 			}
+			// A step selected on the sequencer: the selected marker's controls edit that step's locks (no Shift moves then).
+			m->lockCaptureStep();
+			int lockRow, lockStep;
+			if (m->lockTarget(&lockRow, &lockStep))
+				held = nullptr;
+			// Live record: a knob held down (moving or not) writes its value into each step of the row as it plays.
+			if (m->recordStep() >= 0) {
+				widget::Widget* grabbed = APP->event->getDraggedWidget();
+				StepShownValue* shown = dynamic_cast<StepShownValue*>(grabbed);
+				ParamWidget* pw = dynamic_cast<ParamWidget*>(grabbed);
+				if (shown && pw && pw->module == m && shown->stepShowing)
+					m->setStepLock(pw->paramId, shown->stepShownValue);
+			}
 			if (m->linkStep(held && held->module == m ? held->paramId : -1, dragging)) {
 				pushLinkedMoveUndo(m);
 				m->linkFinish();
@@ -1464,6 +1686,19 @@ struct WaveArtifactWidget : ModuleWidget {
 			envelopeScreen->setVisible(poly);
 		}
 		ModuleWidget::step();
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		ModuleWidget::onButton(e);
+		// A left click on the panel itself (no control took it): leave the sequencer step being locked, as a click
+		// outside the steps on the sequencer does. (With "Lock module positions" Rack takes the click with no target.)
+		bool onPanel = e.getTarget() == this || (e.getTarget() == nullptr && e.isConsumed());
+		WaveArtifact* m = getModule<WaveArtifact>();
+		if (m && onPanel && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
+			WaveArtifactSequencer* seq = m->sequencerOnLeft();
+			if (seq)
+				seq->select(-1, -1);
+		}
 	}
 
 	void appendContextMenu(Menu* menu) override {

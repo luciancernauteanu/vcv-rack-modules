@@ -144,8 +144,8 @@ Then press PLAY until it shows **SEQ**. SEQ plays nothing until a sequencer is s
 
 - **The grid:** one row per marker (its color), 16 steps. **Draw steps by dragging**: press on a step and drag along
   the row, and every step you pass is switched on at the height of the mouse (the top of a cell is 100%). Drag up and
-  down to set a velocity. Click a step that is on, without moving, to switch it off, or hold Shift and drag along a
-  row to erase the steps you pass.
+  down to set a velocity; dragged all the way to the bottom of the cell, a step switches off (silent). **Click** a step to select it (see parameter locks below), **double-click** a step to switch
+  it off, or hold Shift and drag along a row to erase the steps you pass. Click outside the steps (or on an empty part of the main module) to deselect.
 - **Clock:** the module's own clock: the **CLOCK input** when something is patched, otherwise the **internal tempo**
   (BPM). The POS LFO is not involved. RESET goes back to step 1 on every row and plays it at once. A white frame
   shows each row's current step.
@@ -154,11 +154,77 @@ Then press PLAY until it shows **SEQ**. SEQ plays nothing until a sequencer is s
   default x4 gives 16th notes, and /2 a step every two beats. Rows at different speeds drift against each other.
 - **Length per row:** Ctrl + click a step to end that row there (1 to 16), or use the right-click menu; rows of
   different lengths drift against each other (polyrhythms). Steps past the end are shown dimmed.
+- **Copy / paste a trig:** with the mouse over a trig (or a trig selected), **Ctrl + C** copies its velocity, locks,
+  condition and slide; **Ctrl + V** pastes them on the trig under the mouse (or the selected one), switching it on,
+  and selects it. It works across rows and between sequencers. Away from the steps, with nothing selected, Ctrl + C /
+  Ctrl + V copy and paste the whole module as usual in Rack.
+- **Copy / paste a whole row:** with the mouse over a row, **Ctrl + A** selects the row (a frame around it), **Ctrl +
+  C** copies it: every step with its velocity, locks, conditions and slide, plus the row's length and CLOCK. Then
+  **Ctrl + V** with the mouse over another row replaces that row with the copy (its locks then act on that row's
+  marker). The row's right-click menu has **Copy row** and **Paste row here** too. Ctrl + V pastes whatever was copied
+  last, a row or a trig.
+- **Shift a row:** the ◀ / ▶ arrows between a row's CLOCK knob and its first step move all its trigs one step left
+  or right, with their velocity, locks, conditions and slide, wrapping around inside the row's length. The left / right
+  arrow keys do the same for the row under the mouse.
 - **Velocity** scales the note's level (linearly: 50% is half the level) and opens the marker's filter, so a soft
   step is quieter and a little darker (at 0% it would be 2.5 octaves lower on the CUTOFF scale).
 - **Sound:** each marker keeps its own ADSR, pitch, filter and everything else; H sets the note length. Muted and off
   markers stay silent. Right-click a row (or the module) for Every 4th / Every 2nd step, Random, Clear and the
   default pattern. The pattern is saved with the patch.
+
+### Parameter locks, trig conditions and slide (Elektron style)
+
+Any step can play its own value for its marker's knobs (WAVE / START, GAIN, CUTOFF, RES, DRIVE, PITCH, FINE, PAN, the
+LFO's RATE / AMT / SMOOTH, the grain knobs, A D S H R...) and for four choices: the **filter type**, the **LFO
+shape**, the grain **window** and the grain **direction**. The other buttons (SYNC / T / D, FREE, KEEP, LOOP / PING)
+are not lockable: they only change how another control is read, so they always act on the marker itself. A locked
+value plays from that step until the row plays another step; that step plays its own locks, or the knobs where it
+has none. Expander CV and the LFOs still move a locked value. Locks only play in SEQ.
+
+- **See a step's values:** click a step. It gets a blue frame, the main module selects its marker, and a thin bar
+  under each of that marker's controls shows the value the step plays: in the marker's color where the step locks
+  it, grey (the knob's own value) where it does not. Bipolar settings (PAN, PITCH, FINE, SCAN...) fill from the
+  middle, the others from the left; a switch or list shows the step's choice as text.
+- **Which settings are locked:** a small dot above a control of the selected marker means some step of its row locks
+  that setting (in the marker's color; white when the selected step itself locks it). No dot: every step plays the
+  knob.
+- **Lock from the knobs:** with a step selected, turn any of that marker's knobs. The step's bar moves, the knob
+  stays where it is. The filter type, LFO shape, window and direction work the same (a click steps the step's own choice); the other buttons change the marker as usual. **Double-click a knob**
+  to remove its lock from the step. Rack has one mouse, so instead of holding a step as on an Elektron, the step
+  stays selected until you click outside the steps or on an empty part of the main module's panel, select another
+  marker, or switch the step off. While a step is
+  selected, Shift moves on every marker are off.
+- **Lock from the lane:** the strip under the grid shows one setting for one row (the row of the selected step).
+  It switches to whatever control of the selected marker you click or lock, with or without a selected step. Steps
+  without a lock show the knob's value, so you see which steps a knob move changes. Unipolar settings fill from the
+  bottom, bipolar ones such as PAN or PITCH from the middle. Click its name on the left to pick another. Drag over the steps to draw their locks at the mouse height, click a
+  locked bar to remove that lock, and hold Shift and drag to remove the locks you pass. Steps without a lock show the
+  knob's value as a thin grey line. Only steps that are on take locks.
+- **Knob feedback:** while you hold a knob with a step selected, the knob shows the step's value and its ring turns
+  white (a dot in the marker's color marks the knob's own value). Let go and it shows its own value again.
+- **Live record (REC, top left):** turn REC on and select a step of a row. While the pattern plays, holding or turning
+  one of that marker's knobs writes its value into each lit step of the row as the playhead passes it (empty steps are
+  skipped); clicks on the filter type, LFO shape, window or direction go into the step playing at that moment. The
+  lane switches to the setting being recorded, so you see the steps fill in. A step plays what was recorded into it
+  from its next pass. Turn REC off to go back to editing only the selected step.
+- **Clearing locks:** the **CLR** button at the left end of the lane clears the lane's setting on every step of its
+  row, so those steps play the knob's own value again (for example a recorded CUTOFF move). **Shift + click** clears
+  every locked setting of that row. CLR is lit while there is something to clear. Velocity, condition and slide stay.
+  Double-clicking a knob clears just that setting on the selected step, and the step's right-click menu has **Clear
+  locks on this step**.
+- **Locked steps** show a white dot in their corner. Right-click a step for its menu: condition, slide, **Clear locks
+  on this step** and **Delete step** (the row's own menu is in its **Row** submenu).
+- **Trig conditions** (right-click a step > Condition) decide whether a step plays this time: **Always**, a
+  **chance** (10 / 25 / 50 / 75 / 90%), **A:B** (plays on pass A of every B passes of its row, B = 2 to 8; pass 1 is
+  the first after RESET), **FILL** (only while FILL is on) and **NOT FILL** (only while it is off). The condition is
+  shown in the step. A step that does not play leaves the locks of the step before in place.
+- **FILL:** the button under the lane latches FILL on and off; the jack next to it turns FILL on while its gate is
+  high.
+- **Slide** (right-click a step): the settings this step changes (lock to lock, knob to lock, lock back to the knob)
+  glide there over one of the row's steps instead of jumping. Switches and lists still jump. A slash in the corner
+  shows slide.
+
+Locks, conditions and slide are saved with the patch; older patches load with plain steps.
 
 ## The granular engine (GRAIN)
 
