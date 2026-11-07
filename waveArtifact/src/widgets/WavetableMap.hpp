@@ -29,6 +29,8 @@ struct WavetableMap : widget::Widget {
 	// Interaction
 	int hovered = -1;
 	int dragMarker = -1;
+	/** GRAIN: the marker whose loop end is being dragged, or -1 */
+	int dragLoopEnd = -1;
 
 	const wa::WavetableBank* bank() {
 		// Safe to read: only the UI thread (this thread) frees banks.
@@ -41,6 +43,13 @@ struct WavetableMap : widget::Widget {
 	float tableX(float index, int n) {
 		return (index + 0.5f) / n * box.size.x;
 	}
+	/** The loop end handles live in the top part of the map, the bullets in the middle */
+	static constexpr float LOOP_HANDLE_SHARE = 0.32f;
+	static constexpr float LOOP_HANDLE_REACH = 5.f;
+	/** Grain flashes: a strip along the bottom of the map */
+	static constexpr float FLASH_TOP = 0.82f;
+	static constexpr float FLASH_HEIGHT = 0.12f;
+
 	float bulletR() {
 		return std::min(mm2px(layout::BULLET_R), box.size.y * 0.3f);
 	}
@@ -132,12 +141,60 @@ struct WavetableMap : widget::Widget {
 		hovered = -1;
 	}
 
+	/** GRAIN: a scanning marker's loop end handle under p (the top part of the map, clear of the bullets), or -1.
+	The selected marker's comes first when two are on top of each other. */
+	int loopEndAt(Vec p) {
+		if (!module || module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() <= 0.5f || p.y > box.size.y * LOOP_HANDLE_SHARE)
+			return -1;
+		int best = -1;
+		float bestD = LOOP_HANDLE_REACH;
+		for (int i = 0; i < wa::NUM_MARKERS; i++) {
+			float end = module->shownScanEnd[i].load();
+			if (!module->isMarkerActive(i) || end < 0.f)
+				continue;
+			float d = std::fabs(end * box.size.x - p.x);
+			if (d < bestD || (d <= bestD + 0.5f && i == module->selectedMarker)) {
+				best = i;
+				bestD = d;
+			}
+		}
+		return best;
+	}
+
+	/** Sets a marker's loop length so its loop ends at x (cut to the sample, at least 10 ms). */
+	void setLoopEnd(int marker, float x) {
+		const wa::WavetableBank* b = bank();
+		if (!module || !b || !b->sample.valid())
+			return;
+		double seconds = (double) b->sample.frames / b->sample.sampleRate;
+		double start = module->shownScanStart[marker].load();
+		double end = std::min(std::max((double) x / box.size.x, 0.0), 1.0);
+		module->params[WaveArtifact::MARKER_GRAIN_SCAN_LENGTH_PARAM + marker].setValue(wa::grainScanLengthKnob(end - start, seconds));
+	}
+
 	void onButton(const ButtonEvent& e) override {
 		const wa::WavetableBank* b = bank();
 		if (!module || !b || e.action != GLFW_PRESS)
 			return;
 		int n = b->numTables;
 		int t = tableAt(e.pos.x, n);
+		int loopEnd = loopEndAt(e.pos);
+		if (loopEnd >= 0) {
+			module->selectedMarker = loopEnd;
+			if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
+				dragLoopEnd = loopEnd;
+			}
+			else if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
+				WaveArtifact* m = module;
+				ui::Menu* menu = createMenu();
+				menu->addChild(createMenuLabel("Marker " + std::to_string(loopEnd + 1) + " scan loop"));
+				menu->addChild(createMenuItem("Up to the next marker", "", [=]() {
+					m->params[WaveArtifact::MARKER_GRAIN_SCAN_LENGTH_PARAM + loopEnd].setValue(1.f);
+				}));
+			}
+			e.consume(this);
+			return;
+		}
 		if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
 			int hit = bulletAt(e.pos, n);
 			if (hit >= 0) {
@@ -159,12 +216,15 @@ struct WavetableMap : widget::Widget {
 	}
 
 	void onDragMove(const DragMoveEvent& e) override {
-		if (module && dragMarker >= 0 && e.button == GLFW_MOUSE_BUTTON_LEFT)
+		if (module && dragLoopEnd >= 0 && e.button == GLFW_MOUSE_BUTTON_LEFT)
+			setLoopEnd(dragLoopEnd, mouseLocal().x);
+		else if (module && dragMarker >= 0 && e.button == GLFW_MOUSE_BUTTON_LEFT)
 			setWave(dragMarker, mouseLocal().x);
 	}
 
 	void onDragEnd(const DragEndEvent& e) override {
 		dragMarker = -1;
+		dragLoopEnd = -1;
 	}
 
 	void onDoubleClick(const DoubleClickEvent& e) override {
@@ -430,11 +490,13 @@ struct WavetableMap : widget::Widget {
 				}
 				if (flash[i] <= 0.f || !module->isMarkerActive(i))
 					continue;
+				// The piece of the sample the grain reads, as a thin strip along the bottom: the full-height shading
+				// is the scan loop, so the two never look alike.
 				float x = flashPos[i] * W;
 				float w = std::max(2.f, flashLen[i] / (float) std::max(b->sourceSeconds, 1e-3) * W);
 				nvgBeginPath(vg);
-				nvgRect(vg, x, H * 0.12f, w, H * 0.76f);
-				nvgFillColor(vg, nvgTransRGBAf(layout::MARKER_COLORS[i], 0.45f * flash[i]));
+				nvgRect(vg, x, H * FLASH_TOP, w, H * FLASH_HEIGHT);
+				nvgFillColor(vg, nvgTransRGBAf(layout::MARKER_COLORS[i], 0.7f * flash[i]));
 				nvgFill(vg);
 			}
 		}
@@ -447,6 +509,42 @@ struct WavetableMap : widget::Widget {
 			nvgRect(vg, (float) p / n * W, 0, std::max(W / n, 2.f), H);
 			nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, 0.2f + 0.3f * pulse));
 			nvgFill(vg);
+		}
+
+		// GRAIN: each scanning marker's loop, shaded from START to its end, with a handle at the end (drag it).
+		if (grain) {
+			int selected = module->selectedMarker;
+			for (int k = 0; k <= wa::NUM_MARKERS; k++) {
+				int i = (k < wa::NUM_MARKERS) ? k : selected;
+				if ((k < wa::NUM_MARKERS && i == selected) || !module->isMarkerActive(i))
+					continue;
+				float end = module->shownScanEnd[i].load();
+				if (end < 0.f)
+					continue;
+				NVGcolor c = layout::MARKER_COLORS[i];
+				float x0 = module->shownScanStart[i].load() * W, x1 = end * W;
+				bool sel = i == selected;
+				nvgBeginPath(vg);
+				nvgRect(vg, x0, 0, std::max(x1 - x0, 1.f), H);
+				nvgFillColor(vg, nvgTransRGBAf(c, sel ? 0.16f : 0.08f));
+				nvgFill(vg);
+				nvgBeginPath(vg);
+				nvgMoveTo(vg, x1, 0);
+				nvgLineTo(vg, x1, H);
+				nvgStrokeColor(vg, nvgTransRGBAf(c, sel ? 0.95f : 0.5f));
+				nvgStrokeWidth(vg, sel ? 1.4f : 1.f);
+				nvgStroke(vg);
+				// The grip: a small flag at the top, pointing back into the loop.
+				float gh = H * LOOP_HANDLE_SHARE, gw = 4.f;
+				nvgBeginPath(vg);
+				nvgMoveTo(vg, x1, 0);
+				nvgLineTo(vg, x1 - gw, 0);
+				nvgLineTo(vg, x1 - gw, gh * 0.7f);
+				nvgLineTo(vg, x1, gh);
+				nvgClosePath(vg);
+				nvgFillColor(vg, nvgTransRGBAf(c, sel ? 1.f : 0.6f));
+				nvgFill(vg);
+			}
 		}
 
 		// Marker bullets on the centre line, like the marker bar's (selected one on top, ringed).
@@ -464,7 +562,7 @@ struct WavetableMap : widget::Widget {
 			nvgFill(vg);
 			nvgBeginPath(vg);
 			nvgCircle(vg, x, mid, br);
-			nvgFillColor(vg, layout::MARKER_COLORS[i]);
+			nvgFillColor(vg, module->isMarkerMuted(i) ? layout::MUTED_COLOR : layout::MARKER_COLORS[i]);
 			nvgFill(vg);
 			if (i == sel) {
 				nvgBeginPath(vg);

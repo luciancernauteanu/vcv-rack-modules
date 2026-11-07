@@ -7,4 +7,5 @@ void init(Plugin* p) {
 
 	p->addModel(modelWaveArtifact);
 	p->addModel(modelWaveArtifactExpander);
+	p->addModel(modelWaveArtifactSequencer);
 }

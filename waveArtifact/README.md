@@ -58,12 +58,15 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
    settings**, then right-click the other and choose **Paste settings of marker N**. Every setting
    of both engines is overwritten, including WAVE / START; the marker keeps its on/off state and its
    place on the bar. Ctrl+Z undoes a paste. CV patched on an expander stays with its marker.
+   **Double-click a marker's bullet on the bar to mute it** (again to unmute; also in its right-click menu). A muted
+   marker turns grey, keeps its number, place and settings, and makes no sound on either engine, its own output
+   included. It fades out and in over 5 ms, so muting while playing does not click. Ctrl+Z undoes it.
    **Shift + a control moves that setting on every marker at once.** Hold Shift and drag any knob in the
    per-marker section (START, GAIN, CUTOFF, the envelope and so on). Every active marker moves by the same
    amount from where it is, so the differences between them stay; if one hits its limit, moving back restores
    the spacing. When the knob you are holding reaches its own limit, keep dragging: it stays there and the
    others carry on until each reaches its limit (not in Rack's rotary knob modes). Shift-clicking a choice (filter TYPE, SYNC, the LFO or WINDOW screen) sets them all to the same
-   value. Knobs keep their normal speed, Ctrl + Shift is the fine version, and Ctrl+Z undoes the whole move.
+   value. **Shift + double-click a knob resets that setting to its default on every active marker.** Knobs keep their normal speed, Ctrl + Shift is the fine version, and Ctrl+Z undoes the whole move.
 8. **Play it.** Cable a keyboard or sequencer's **1V/oct** to **V/OCT** (0 V is C4). Turn the
    POSITION LFO's AMT up to have the playhead move on its own; with SYNC on it follows the
    internal tempo (BPM) or a clock patched to **CLOCK**.
@@ -120,6 +123,43 @@ The **MORPH | POLY** button under the wavetable map chooses what the POSITION pl
 
 Copy / paste carries the ADSR too.
 
+**STEP** (press the PLAY button a second time) plays the markers in turn from the POS LFO's clock instead of the
+playhead: every cycle of the POS LFO is one step, and step 1 plays the leftmost marker on the bar, step 2 the next
+one, and so on, wrapping round. With the POS LFO's SYNC on, RATE sets the step length: at 1/2, marker 1 plays on
+the first half note, marker 2 on the second. POSITION and the POS LFO's AMT do not matter here; the playhead jumps
+to show the marker playing. Markers that are off or muted are skipped, and RESET starts again from the leftmost.
+Each note keeps its marker's own ADSR and sound. H sets its length; **H fully up keeps it on until that marker's next
+turn**, so every marker keeps sounding and each is struck again on its own step.
+
+**ALL** (the fourth press of PLAY) is the same clock, but every cycle plays every marker together: a chord on each
+POS LFO cycle. With H fully up, every marker sounds all the time, struck again on each cycle, whatever the position.
+Off and muted markers stay silent. Expander GATEs and slot presses still
+play their marker directly.
+
+## The step sequencer (SEQ)
+
+For a drum-machine style pattern, right-click Wave Artifacts and choose **Add step sequencer (SEQ mode)** (or add
+*Wave Artifacts Sequencer* from the module browser and snap it to the **left**; the expanders go on the right).
+Then press PLAY until it shows **SEQ**. SEQ plays nothing until a sequencer is snapped on.
+
+- **The grid:** one row per marker (its color), 16 steps. **Draw steps by dragging**: press on a step and drag along
+  the row, and every step you pass is switched on at the height of the mouse (the top of a cell is 100%). Drag up and
+  down to set a velocity. Click a step that is on, without moving, to switch it off, or hold Shift and drag along a
+  row to erase the steps you pass.
+- **Clock:** the module's own clock: the **CLOCK input** when something is patched, otherwise the **internal tempo**
+  (BPM). The POS LFO is not involved. RESET goes back to step 1 on every row and plays it at once. A white frame
+  shows each row's current step.
+- **Clock per row:** the **CLOCK** knob left of each row multiplies (to the right) or divides (to the left) the
+  module's clock for that row: /8 /4 /3 /2 | x1 | x2 x3 x4 x8, where x1 is a step per beat (quarter note), the
+  default x4 gives 16th notes, and /2 a step every two beats. Rows at different speeds drift against each other.
+- **Length per row:** Ctrl + click a step to end that row there (1 to 16), or use the right-click menu; rows of
+  different lengths drift against each other (polyrhythms). Steps past the end are shown dimmed.
+- **Velocity** scales the note's level (linearly: 50% is half the level) and opens the marker's filter, so a soft
+  step is quieter and a little darker (at 0% it would be 2.5 octaves lower on the CUTOFF scale).
+- **Sound:** each marker keeps its own ADSR, pitch, filter and everything else; H sets the note length. Muted and off
+  markers stay silent. Right-click a row (or the module) for Every 4th / Every 2nd step, Random, Clear and the
+  default pattern. The pattern is saved with the patch.
+
 ## The granular engine (GRAIN)
 
 The toggle in the header switches the module from the wavetable engine (**WAVE**) to a granular
@@ -138,9 +178,14 @@ and meaning (the labels, tooltips and values follow):
 | AMT | **SPRAY** | random offset of each grain's start (up to 2 s) |
 | SYNC / T / D | **SYNC / T / D** | lock the grains (and SCAN) to the tempo; triplet and dotted note values |
 | DRIVE | **P.SPRD** | random pitch per grain (up to 12 semitones) |
-| FINE | **SCAN** | moves the read position through the marker's slice (see below) |
+| FINE | (empty) | SCAN now sits with the grain controls |
+| (grain group) | **SCAN** | moves the read position through the marker's slice (see below) |
+| (grain group) | **FADE** | dips the level at both ends of the slice (0-50% of it each side), so the loop never clicks |
+| (grain group) | **LOOP / PING** | at the end of the slice: jump back to START, or turn round and run back |
+| FINE | **LENGTH** | the scan loop's length: 10 ms to the end of the sample, or (fully up, the default) to the next marker |
 | PAN | **PAN** | where the whole cloud sits, after its filter (on a stereo sample it works as a balance) |
 | (bottom strip) | **SPREAD** | random pan per grain, around PAN |
+| (bottom strip) | **KEEP** | keep speed: pitch (PITCH, FREQ, V/OCT) no longer slows down or speeds up the sample |
 
 GAIN, the filter (CUTOFF / RES / TYPE) and PITCH / FREE work as before, per cloud. The expander's six
 CV inputs follow the new titles (WAVE = START, DRIVE = P.SPRD, FINE = DENSITY; PAN stays PAN). SCAN and SPREAD are knob-only:
@@ -150,11 +195,26 @@ there; it scatters left and right best with PAN away from the ends.
 **Clock-locked grains.** With SYNC on, grains start on a grid of note values locked to the internal
 tempo or CLOCK, with sub-sample timing; RESET is beat 0.
 
+In GRAIN the WAVE / LFO section becomes one grain group: START, DENSITY, SIZE, SCAN and FADE on top; the WINDOW
+screen, SYNC / T / D (under DENSITY), SPRAY and LOOP / PING below. WAVE mode keeps its own layout.
+
+**Seeing and setting the loop.** On the wavetable map along the bottom, each scanning marker's loop is shaded in its
+color from START to its end, with a small flag at the end: drag the flag to make the loop shorter or longer (it can
+reach past the next marker, up to the end of the sample), or right-click it for *Up to the next marker*. LENGTH
+(in FINE's spot) sets the same thing, and its tooltip shows the length in seconds.
+
 **Scan and loop.** A marker's *slice* is the part of the sample from its START up to the next
 marker's START (in sample order), or to the end of the sample. SCAN at the middle keeps the cloud
 at START. Free: it moves through the slice at -2x to +2x real time (looping at the slice end). With
 SYNC: the slice is fitted to 1/4 to 32 beats, locked to the beat grid, so the sample plays as a
 tempo-locked loop without changing pitch. A negative SCAN runs it backwards.
+
+**Keep speed.** Normally a lower pitch also plays the sample slower, like tape: with long grains, hits and words
+inside them stretch. With **KEEP** on (per marker), pitch changes only the pitch and the sample keeps its timing.
+The grains are centered on where the sample would be and made short enough to stay within about 20 ms of it, and
+more of them fire (whole subdivisions of the grid with SYNC), so the overlap and level stay as set. The cost: at big
+pitch changes SIZE acts as a maximum (40 ms at an octave up, 80 ms at an octave down, never under 30 ms), so a long
+smeared grain gets shorter and grainier. At the original pitch nothing changes.
 
 **Smear.** The Smear window turns a cloud into one continuous sound, with no gaps or jumps between
 grains. Three things change: a grain lasts at least 3 grain intervals (so SIZE becomes a minimum and

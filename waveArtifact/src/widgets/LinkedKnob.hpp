@@ -7,6 +7,14 @@ extra first, so nothing jumps. Without Shift, or in Rack's rotary knob modes (wh
 there is no "further" to count), it is a plain knob. */
 template <class TKnob>
 struct LinkedKnob : TKnob {
+	/** Shift + double-click: back to the default on every active marker; otherwise the plain knob reset. */
+	void onDoubleClick(const widget::Widget::DoubleClickEvent& e) override {
+		WaveArtifact* m = dynamic_cast<WaveArtifact*>(this->module);
+		if (m && (APP->window->getMods() & RACK_MOD_MASK) == GLFW_MOD_SHIFT && m->resetSettingOnAllMarkers(this->paramId))
+			return;
+		TKnob::onDoubleClick(e);
+	}
+
 	void onDragMove(const widget::Widget::DragMoveEvent& e) override {
 		WaveArtifact* m = dynamic_cast<WaveArtifact*>(this->module);
 		engine::ParamQuantity* pq = this->getParamQuantity();

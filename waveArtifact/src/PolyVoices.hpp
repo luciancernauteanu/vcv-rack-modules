@@ -209,6 +209,63 @@ struct AdsrSettings {
 	float release = 0.3f;
 };
 
+/** STEP play mode: the POS LFO's clock plays the markers in turn. Every LFO cycle is one step; step k plays the k-th
+playable marker from the left on the bar, wrapping round. The first call (and the first after reset(), e.g. RESET)
+plays the leftmost at once. */
+struct MarkerStepper {
+	/** Played on this sample */
+	bool fired[NUM_MARKERS] = {};
+	/** The marker the last step played, or -1 */
+	int current = -1;
+
+	void reset() {
+		count = -1;
+		ready = false;
+		current = -1;
+	}
+
+	/** `phase`: the POS LFO's phase, 0..1. `playable`: on and not muted. `all`: ALL mode, every step plays every
+	playable marker together (`current` stays -1). */
+	void process(double phase, const float* pos, const bool* playable, bool all = false) {
+		for (int m = 0; m < NUM_MARKERS; m++)
+			fired[m] = false;
+		// A forward wrap of the phase is a new cycle (a small backward pull from the clock is not).
+		bool tick = !ready || phase < lastPhase - 0.5;
+		lastPhase = phase;
+		ready = true;
+		if (!tick)
+			return;
+		int order[NUM_MARKERS];
+		int n = 0;
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			if (!playable[m])
+				continue;
+			int j = n++;
+			while (j > 0 && pos[order[j - 1]] > pos[m]) {
+				order[j] = order[j - 1];
+				j--;
+			}
+			order[j] = m;
+		}
+		count++;
+		if (n == 0)
+			return;
+		if (all) {
+			for (int k = 0; k < n; k++)
+				fired[order[k]] = true;
+			current = -1;
+			return;
+		}
+		current = order[count % n];
+		fired[current] = true;
+	}
+
+private:
+	long count = -1;
+	double lastPhase = 0.0;
+	bool ready = false;
+};
+
 /** The five voices: trigger plus one ADSR per marker. Each note from the playhead lasts its own HOLD, whatever the
 playhead does next, so notes overlap; the same marker firing again restarts its note. A note from a gate lasts as
 long as the gate. */
@@ -234,18 +291,30 @@ struct PolyVoices {
 		}
 	}
 
-	void process(const float* pos, const bool* active, float position, const AdsrSettings* settings, float sampleTime, const VoiceGates* direct = nullptr) {
+	/** `steps`: STEP mode, the markers the clock plays on this sample (the playhead is not used then). In STEP a
+	note with HOLD at the top stays on until its own next turn, so every marker can keep sounding. */
+	void process(const float* pos, const bool* active, float position, const AdsrSettings* settings, float sampleTime, const VoiceGates* direct = nullptr, const bool* steps = nullptr) {
 		bool followsPlayhead[NUM_MARKERS];
 		for (int m = 0; m < NUM_MARKERS; m++)
 			followsPlayhead[m] = active[m] && !(direct && direct->patched[m]);
-		trigger.process(pos, followsPlayhead, position);
+		bool fired[NUM_MARKERS];
+		if (steps) {
+			trigger.reset();
+			for (int m = 0; m < NUM_MARKERS; m++)
+				fired[m] = steps[m] && followsPlayhead[m];
+		}
+		else {
+			trigger.process(pos, followsPlayhead, position);
+			for (int m = 0; m < NUM_MARKERS; m++)
+				fired[m] = trigger.fired[m];
+		}
 		bool anyFired = false;
 		for (int m = 0; m < NUM_MARKERS; m++)
-			anyFired = anyFired || trigger.fired[m];
+			anyFired = anyFired || fired[m];
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			const AdsrSettings& s = settings[m];
 			bool on = direct && direct->high[m] && active[m];
-			start[m] = trigger.fired[m] || (on && !directPrev[m]);
+			start[m] = fired[m] || (on && !directPrev[m]);
 			if (start[m]) {
 				gate[m] = true;
 				holdLeft[m] = s.hold;
@@ -262,7 +331,7 @@ struct PolyVoices {
 					gate[m] = false;
 				}
 				else if (s.hold < 0.f) {
-					gate[m] = !anyFired;
+					gate[m] = steps ? true : !anyFired;
 				}
 				else {
 					holdLeft[m] -= sampleTime;

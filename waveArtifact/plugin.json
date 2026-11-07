@@ -31,6 +31,15 @@
         "Expander",
         "Low-frequency oscillator"
       ]
+    },
+    {
+      "slug": "waveArtifactSequencer",
+      "name": "Wave Artifacts Sequencer",
+      "description": "Drum-machine step grid with velocity for Wave Artifacts; place it to the LEFT of the main module",
+      "tags": [
+        "Expander",
+        "Sequencer"
+      ]
     }
   ]
 }

@@ -121,6 +121,16 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_RELEASE_PARAM, NUM_MARKERS),
 		/** How long a marker's note stays on (wa::adsrHoldSeconds); at the top, until another marker starts */
 		ENUMS(MARKER_HOLD_PARAM, NUM_MARKERS),
+		/** GRAIN: pitch changes the pitch but not the sample's timing (off = tape-like, the default) */
+		ENUMS(MARKER_GRAIN_KEEP_SPEED_PARAM, NUM_MARKERS),
+		/** GRAIN SCAN: 0 = LOOP (back to START), 1 = PING (forwards, then backwards) */
+		ENUMS(MARKER_GRAIN_SCAN_MODE_PARAM, NUM_MARKERS),
+		/** GRAIN SCAN: level fade at the slice ends, 0..0.5 of the slice each side */
+		ENUMS(MARKER_GRAIN_SCAN_FADE_PARAM, NUM_MARKERS),
+		/** GRAIN SCAN: loop length, wa::grainScanLengthFraction (top = up to the next marker, the default) */
+		ENUMS(MARKER_GRAIN_SCAN_LENGTH_PARAM, NUM_MARKERS),
+		/** 1 = muted: silent on both engines (its own output too), shown grey; it keeps its place and settings */
+		ENUMS(MARKER_MUTE_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -184,6 +194,9 @@ struct WaveArtifact : Module {
 	/** Granular engine: where each cloud reads (0..1 of the sample), and a counter of its grain starts
 	with the latest start, so the display can flash a grain. */
 	std::atomic<float> shownGrainRead[NUM_MARKERS];
+	/** Each scanning cloud's loop on the sample, 0..1 (end -1 while it does not scan) */
+	std::atomic<float> shownScanStart[NUM_MARKERS];
+	std::atomic<float> shownScanEnd[NUM_MARKERS];
 	std::atomic<float> shownGrainPos[NUM_MARKERS];
 	std::atomic<float> shownGrainSeconds[NUM_MARKERS];
 	std::atomic<uint32_t> shownGrainCount[NUM_MARKERS];
@@ -195,6 +208,17 @@ struct WaveArtifact : Module {
 	int engineApplied = 0;
 	uint32_t grainEventsSeen = 0;
 	wa::PolyVoices voices;
+	wa::MarkerStepper stepper;
+	bool stepRunning = false;
+	// SEQ: the step sequencer on the left of this module
+	uint32_t seqResetCount = 0, seqSeen[NUM_MARKERS] = {};
+	bool seqLinkedBefore = false;
+	/** The beat position the sequencer follows: this module's clock (CLOCK input or internal tempo), locked to it */
+	wa::GrainClock seqClock;
+	/** The velocity of each marker's latest step (scales its level and its cutoff) */
+	float seqVelocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
+	/** The velocity in use: jumps to a new one while the voice is silent, slews (5 ms) over a sounding one */
+	float seqVelocityUsed[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	bool polyRunning = false;
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
@@ -221,7 +245,7 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 33;
+	static const int NUM_MARKER_SETTINGS = 37;
 	static const int MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS];
 	/** The settings copied last (not saved with the patch), and the marker they came from, or -1 */
 	float markerClipboard[NUM_MARKER_SETTINGS] = {};
@@ -255,6 +279,9 @@ struct WaveArtifact : Module {
 
 	// Marker editing, UI thread. All state is in params, so these are saved and undo-free like knobs.
 	bool isMarkerActive(int i);
+	bool isMarkerMuted(int i) {
+		return params[MARKER_MUTE_PARAM + i].getValue() > 0.5f;
+	}
 	int activeMarkerCount();
 	/** Turns on the lowest-numbered free marker at `pos`, with default settings and the wavetable
 	under that bar position. Returns it, or -1 when all 5 are in use. */
@@ -276,6 +303,9 @@ struct WaveArtifact : Module {
 	own limit keeps moving the others (linkBeyond). Switches and lists take the same value instead. Returns true once when a move has ended: the UI makes its undo step, then calls
 	linkFinish(). */
 	bool linkStep(int paramId, bool dragging);
+	/** Shift + double-click: the setting behind `paramId` (a control of the selected marker) back to its default on
+	every active marker (the selected one too), as one undo step. False if it is not a per-marker setting. */
+	bool resetSettingOnAllMarkers(int paramId);
 	void linkFinish();
 
 	/** UI thread. Reads the file and starts analysis on the worker thread. */

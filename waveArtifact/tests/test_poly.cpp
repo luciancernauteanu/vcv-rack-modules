@@ -431,6 +431,125 @@ static void testDirectPlay() {
 	CHECK(w.v.start[0], "the playhead's nearest marker also plays");
 }
 
+static void testStep() {
+	std::printf("STEP\n");
+	const float pos[M] = {0.6f, 0.1f, 0.8f, 0.3f, 0.5f}; // left to right: markers 2, 4, 5, 1, 3
+	bool playable[M] = {true, true, true, true, true};
+	wa::MarkerStepper st;
+	std::vector<int> played;
+	double phase = 0.0;
+	auto cycles = [&](int n) {
+		for (int c = 0; c < n; c++) {
+			for (int k = 0; k < 100; k++) {
+				st.process(phase, pos, playable);
+				for (int m = 0; m < M; m++)
+					if (st.fired[m])
+						played.push_back(m + 1);
+				phase += 0.01;
+				phase -= std::floor(phase);
+			}
+		}
+	};
+	cycles(7);
+	std::printf("  7 cycles: plays");
+	for (int p : played)
+		std::printf(" %d", p);
+	std::printf(" (2 4 5 1 3 2 4: left to right, round again)\n");
+	const int want[] = {2, 4, 5, 1, 3, 2, 4};
+	CHECK(played.size() == 7, "one marker per cycle: %d", (int) played.size());
+	for (int i = 0; i < 7 && i < (int) played.size(); i++)
+		CHECK(played[i] == want[i], "step %d: %d, wanted %d", i + 1, played[i], want[i]);
+	// Off or muted markers are skipped; RESET starts from the leftmost.
+	played.clear();
+	playable[3] = false;
+	st.reset();
+	cycles(4);
+	std::printf("  marker 4 off, after RESET: plays %d %d %d %d (2 5 1 3)\n", played[0], played[1], played[2], played[3]);
+	CHECK(played.size() == 4 && played[0] == 2 && played[1] == 5 && played[2] == 1 && played[3] == 3, "skip and reset");
+	playable[3] = true;
+	// A small backward pull of the phase (the clock correcting) is not a step.
+	{
+		wa::MarkerStepper s2;
+		int fires = 0;
+		double p[] = {0.40, 0.41, 0.405, 0.42, 0.43};
+		for (double x : p) {
+			s2.process(x, pos, playable);
+			for (int m = 0; m < M; m++)
+				fires += s2.fired[m];
+		}
+		CHECK(fires == 1, "only the first call steps: %d", fires);
+	}
+
+	// ALL: every cycle plays every playable marker together.
+	{
+		wa::MarkerStepper all;
+		bool some[M] = {true, false, true, true, true};
+		int perCycle[3] = {};
+		double ph = 0.0;
+		for (int c = 0; c < 3; c++) {
+			for (int k = 0; k < 100; k++) {
+				all.process(ph, pos, some, true);
+				for (int m = 0; m < M; m++)
+					perCycle[c] += all.fired[m];
+				CHECK(!all.fired[1], "an off marker must not play");
+				ph += 0.01;
+				ph -= std::floor(ph);
+			}
+		}
+		std::printf("  ALL, marker 2 off: %d %d %d notes per cycle (4 each)\n", perCycle[0], perCycle[1], perCycle[2]);
+		CHECK(perCycle[0] == 4 && perCycle[1] == 4 && perCycle[2] == 4, "every marker each cycle");
+	}
+
+	// The voices in STEP: H at the top keeps every marker on until its own next turn.
+	{
+		Voices v;
+		bool steps[M] = {};
+		auto stepTo = [&](int marker) {
+			for (int m = 0; m < M; m++)
+				steps[m] = m == marker;
+			v.v.process(v.pos, v.on, 0.f, v.s, 1.f / SR, nullptr, steps);
+			for (int m = 0; m < M; m++)
+				steps[m] = false;
+			for (int i = 0; i < 4800; i++)
+				v.v.process(v.pos, v.on, 0.f, v.s, 1.f / SR, nullptr, steps);
+		};
+		for (int m = 0; m < M; m++)
+			stepTo(m);
+		std::printf("  H at the top, after 5 steps: levels %.2f %.2f %.2f %.2f %.2f (all on)\n", v.v.env[0], v.v.env[1], v.v.env[2], v.v.env[3], v.v.env[4]);
+		for (int m = 0; m < M; m++)
+			CHECK(v.v.gate[m] && v.v.env[m] > 0.99f, "marker %d should still sound", m + 1);
+		// Its turn again: a new attack on a sounding voice.
+		for (int m = 0; m < M; m++)
+			steps[m] = m == 0;
+		v.v.process(v.pos, v.on, 0.f, v.s, 1.f / SR, nullptr, steps);
+		CHECK(v.v.start[0], "struck again on its turn");
+		// The playhead does nothing in STEP.
+		for (int m = 0; m < M; m++)
+			steps[m] = false;
+		int starts = 0;
+		for (int i = 0; i < 48000; i++) {
+			v.v.process(v.pos, v.on, (float) i / 48000.f, v.s, 1.f / SR, nullptr, steps);
+			for (int m = 0; m < M; m++)
+				starts += v.v.start[m];
+		}
+		CHECK(starts == 0, "the playhead must not play notes in STEP: %d", starts);
+	}
+	{
+		// A timed H ends on its own: a melody.
+		Voices v;
+		for (int m = 0; m < M; m++)
+			v.s[m].hold = 0.1f;
+		bool steps[M] = {};
+		steps[1] = true;
+		v.v.process(v.pos, v.on, 0.f, v.s, 1.f / SR, nullptr, steps);
+		steps[1] = false;
+		for (int i = 0; i < 9600; i++)
+			v.v.process(v.pos, v.on, 0.f, v.s, 1.f / SR, nullptr, steps);
+		std::printf("  H 100 ms: marker 2 on after 200 ms %d (0)\n", (int) v.v.gate[1]);
+		CHECK(!v.v.gate[1], "a timed note ends");
+	}
+}
+
 /** Poly wavetable engine with the module's wiring */
 struct WaveRig {
 	std::unique_ptr<wa::MorphEngine> engine{new wa::MorphEngine};
@@ -1047,6 +1166,7 @@ int main() {
 	testTrigger();
 	testHold();
 	testDirectPlay();
+	testStep();
 	testWavePoly();
 	testGrainPoly();
 	testGrainPan();

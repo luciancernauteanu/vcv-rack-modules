@@ -747,6 +747,349 @@ static void testSmear() {
 	}
 }
 
+/** Noise bursts every 400 ms (20 ms long) over a quiet tone: where the sample is in time is easy to see. */
+static std::vector<float> burstSource(double seconds) {
+	std::vector<float> v((size_t) (seconds * SRC_SR));
+	uint32_t s = 4242u;
+	size_t period = (size_t) (0.4 * SRC_SR), burst = (size_t) (0.02 * SRC_SR);
+	for (size_t i = 0; i < v.size(); i++) {
+		s = s * 1664525u + 1013904223u;
+		double noise = (s >> 8) * (1.0 / 8388608.0) - 1.0;
+		v[i] = (float) ((i % period) < burst ? 0.8 * noise : 0.02 * std::sin(2 * PI * 300.0 * i / SRC_SR));
+	}
+	return v;
+}
+
+struct Timing {
+	double lagMs = 0.0, match = 0.0, rmsVolts = 0.0;
+	uint32_t grains = 0;
+};
+
+/** Plays a cloud scanning through the bursts at 1x, and finds how late the output's bursts are against the place
+the cloud is reading (its read position, recorded every sample): 0 = the sample keeps its timing. */
+template <typename Setup>
+static Timing timingOf(Setup setup) {
+	std::vector<float> src = burstSource(8.0);
+	Rig rig(makeBank(src));
+	wa::GrainMarkerInput& m = rig.in.markers[0];
+	m.sync = false;
+	m.start = 0.f;
+	m.scan = 0.5f; // 1x real time
+	m.window = wa::GRAIN_HANN;
+	setup(m);
+	settle(rig, 0.6);
+	const int msN = 4000;
+	std::vector<double> outEnv(msN, 0.0), srcEnv(msN, 0.0);
+	const long perMs = (long) (SR / 1000);
+	uint32_t g0 = rig.engine->eventCount();
+	double all = 0.0;
+	long n = 0;
+	for (int ms = 0; ms < msN; ms++) {
+		double e = 0.0;
+		double read = rig.engine->getReadPosition(0);
+		for (long i = 0; i < perMs; i++) {
+			float l, r;
+			rig.step(&l, &r);
+			e += (double) l * l;
+			all += (double) l * l;
+			n++;
+		}
+		outEnv[ms] = std::sqrt(e / perMs);
+		// Source envelope at the read position (1 ms around it)
+		long at = (long) (read * src.size());
+		double se = 0.0;
+		long w = (long) (SRC_SR / 1000);
+		for (long k = 0; k < w; k++) {
+			long idx = std::min(std::max(at + k, 0L), (long) src.size() - 1);
+			se += (double) src[idx] * src[idx];
+		}
+		srcEnv[ms] = std::sqrt(se / w);
+	}
+	Timing t;
+	t.grains = rig.engine->eventCount() - g0;
+	t.rmsVolts = 5.0 * std::sqrt(all / n);
+	double best = -1e9;
+	for (int lag = -150; lag <= 300; lag++) {
+		double xy = 0.0, xx = 0.0, yy = 0.0;
+		for (int i = 300; i < msN - 300; i++) {
+			double a = outEnv[i + lag], b = srcEnv[i];
+			xy += a * b;
+			xx += a * a;
+			yy += b * b;
+		}
+		double c = xy / std::sqrt(xx * yy + 1e-30);
+		if (c > best) {
+			best = c;
+			t.lagMs = lag;
+		}
+	}
+	t.match = best;
+	return t;
+}
+
+static void testKeepSpeed() {
+	std::printf("keep speed\n");
+	CHECK(std::fabs(wa::GrainEngine::keepLengthSecondsForTest(0.4, 1.0) - 0.4) < 1e-9, "no change at the original pitch");
+	std::printf("  grain length under KEEP: an octave up %.0f ms, an octave down %.0f ms, 3 octaves up %.0f ms (SIZE 400 ms)\n",
+		wa::GrainEngine::keepLengthSecondsForTest(0.4, 2.0) * 1000.0, wa::GrainEngine::keepLengthSecondsForTest(0.4, 0.5) * 1000.0,
+		wa::GrainEngine::keepLengthSecondsForTest(0.4, 8.0) * 1000.0);
+	auto settings = [](float pitch, bool keep) {
+		return [=](wa::GrainMarkerInput& m) {
+			m.density = std::log(5.7f / 0.5f) / 6.907755279f; // 5.7 grains/s
+			m.size = std::log(0.432f / 0.002f) / 6.214608098f; // 432 ms, as in the user's patch
+			m.pitch = pitch;
+			m.keepSpeed = keep;
+		};
+	};
+	Timing base = timingOf(settings(0.f, false));
+	Timing baseKeep = timingOf(settings(0.f, true));
+	std::printf("  original pitch: bursts %+.0f ms late (match %.2f); with KEEP %+.0f ms, %u grains either way\n", base.lagMs, base.match, baseKeep.lagMs, baseKeep.grains);
+	CHECK(std::fabs(base.lagMs) <= 3.0, "unpitched should be on time: %+.0f ms", base.lagMs);
+	CHECK(baseKeep.lagMs == base.lagMs && baseKeep.grains == base.grains && baseKeep.rmsVolts == base.rmsVolts, "KEEP must change nothing at the original pitch");
+	for (float pitch : {-12.f, -7.f, 12.f}) {
+		Timing off = timingOf(settings(pitch, false));
+		Timing on = timingOf(settings(pitch, true));
+		double db = 20.0 * std::log10(on.rmsVolts / off.rmsVolts);
+		std::printf("  %+3.0f st: tape %+4.0f ms late (match %.2f), KEEP %+4.0f ms (match %.2f); grains %u -> %u; level %+.1f dB\n", pitch, off.lagMs, off.match, on.lagMs, on.match, off.grains, on.grains, db);
+		CHECK(std::fabs(on.lagMs) <= 12.0, "%+.0f st with KEEP: %+.0f ms late", pitch, on.lagMs);
+		// On time is not enough: shortening keeps the bursts sharp (about 0.5 without it, 0.86 with).
+		CHECK(on.match > 0.8, "%+.0f st with KEEP: bursts smeared (match %.2f)", pitch, on.match);
+		CHECK(on.match > off.match, "%+.0f st: KEEP should follow the sample more closely (%.2f against %.2f)", pitch, on.match, off.match);
+		CHECK(on.grains > off.grains * 2, "%+.0f st: more, shorter grains: %u against %u", pitch, on.grains, off.grains);
+		CHECK(std::fabs(db) < 2.5, "%+.0f st: level %+.1f dB", pitch, db);
+	}
+	Timing down = timingOf(settings(-12.f, false));
+	CHECK(down.lagMs > 50.0, "the test must see tape-style slowing: %+.0f ms", down.lagMs);
+
+	// The pitch itself still changes.
+	{
+		Rig rig(makeBank(sineSource(6.0, 1000.0)));
+		wa::GrainMarkerInput& m = rig.in.markers[0];
+		m.density = 0.6f;
+		m.size = 0.6f;
+		m.pitch = -12.f;
+		m.keepSpeed = true;
+		settle(rig, 0.5);
+		std::vector<float> l;
+		rig.run((long) (1.0 * SR), &l);
+		double half = tone(l, 0, l.size(), 500.0), orig = tone(l, 0, l.size(), 1000.0);
+		std::printf("  1 kHz sample, -12 st with KEEP: 500 Hz %.3f, 1 kHz %.4f\n", half, orig);
+		CHECK(half > 0.01 && orig * 20.0 < half, "pitch must still drop an octave");
+	}
+	// Synced: the extra grains are whole subdivisions of the grid.
+	{
+		Rig rig(makeBank(noiseSource(4.0)));
+		wa::GrainMarkerInput& m = rig.in.markers[0];
+		m.sync = true;
+		m.density = 0.65f; // 1/8 notes: 8 grains in 2 s at 120 BPM
+		m.size = 0.5f;
+		m.pitch = -12.f;
+		m.keepSpeed = false;
+		settle(rig, 0.5);
+		uint32_t a = rig.engine->eventCount();
+		rig.run((long) (2.0 * SR));
+		uint32_t tape = rig.engine->eventCount() - a;
+		m.keepSpeed = true;
+		settle(rig, 0.5);
+		a = rig.engine->eventCount();
+		rig.run((long) (2.0 * SR));
+		uint32_t kept = rig.engine->eventCount() - a;
+		std::printf("  synced, -12 st: %u grains in 2 s, with KEEP %u (a whole multiple: %s)\n", tape, kept, (tape > 0 && kept % tape <= 1) ? "yes" : "no");
+		CHECK(tape > 0 && kept > tape && (kept % tape <= 1 || tape - kept % tape <= 1), "subdivision: %u, %u", tape, kept);
+	}
+}
+
+static void testScanLoop() {
+	std::printf("scan loop and fade\n");
+	// Free scan at 2x through a 1 s slice (a second marker at 0.5 of a 2 s sample).
+	auto path = [](bool ping, float fade, std::vector<float>* level) {
+		Rig rig(makeBank(noiseSource(2.0)));
+		rig.in.markers[0].start = 0.f;
+		rig.in.markers[0].scan = 1.f;
+		rig.in.markers[0].sync = false;
+		rig.in.markers[0].density = 0.8f;
+		rig.in.markers[0].size = 0.3f;
+		rig.in.markers[0].scanPing = ping;
+		rig.in.markers[0].scanFade = fade;
+		rig.in.markers[1].active = true;
+		rig.in.markers[1].pos = 1.f;
+		rig.in.markers[1].start = 0.5f;
+		rig.in.position = 0.f;
+		std::vector<double> reads;
+		long ms = (long) (SR / 1000);
+		for (int i = 0; i < 3000; i++) {
+			reads.push_back(rig.engine->getReadPosition(0));
+			std::vector<float> l;
+			rig.run(ms, &l);
+			if (level)
+				level->push_back((float) rms(l, 0, l.size()));
+		}
+		return reads;
+	};
+	auto biggestJump = [](const std::vector<double>& r) {
+		double j = 0.0;
+		for (size_t i = 1; i < r.size(); i++)
+			j = std::max(j, std::fabs(r[i] - r[i - 1]));
+		return j;
+	};
+	auto turns = [](const std::vector<double>& r) {
+		int t = 0;
+		for (size_t i = 2; i < r.size(); i++)
+			if ((r[i] - r[i - 1]) * (r[i - 1] - r[i - 2]) < 0.0)
+				t++;
+		return t;
+	};
+	std::vector<double> loop = path(false, 0.f, nullptr), ping = path(true, 0.f, nullptr);
+	double lo = 1.0, hi = 0.0;
+	for (double v : ping) {
+		lo = std::min(lo, v);
+		hi = std::max(hi, v);
+	}
+	std::printf("  LOOP: biggest step of the read position per ms %.3f (a jump back), PING %.4f, turning %d times in 3 s, range %.3f..%.3f\n", biggestJump(loop), biggestJump(ping), turns(ping), lo, hi);
+	CHECK(biggestJump(loop) > 0.2, "LOOP should jump back: %.3f", biggestJump(loop));
+	CHECK(biggestJump(ping) < 0.002, "PING must not jump: %.4f", biggestJump(ping));
+	CHECK(turns(ping) >= 4 && turns(ping) <= 8 && lo < 0.01 && hi > 0.49 && hi < 0.51, "PING goes there and back within the slice");
+
+	// FADE: the level dips where the slice ends (LOOP jumps back there), not in the middle.
+	std::vector<float> flat, faded;
+	path(false, 0.f, &flat);
+	std::vector<double> r = path(false, 0.15f, &faded);
+	double ends = 0.0, mid = 0.0, endsFlat = 0.0, midFlat = 0.0;
+	int nEnds = 0, nMid = 0;
+	for (size_t i = 200; i < r.size(); i++) {
+		double q = r[i] / 0.5;
+		if (q < 0.03 || q > 0.97) {
+			ends += faded[i];
+			endsFlat += flat[i];
+			nEnds++;
+		}
+		else if (q > 0.4 && q < 0.6) {
+			mid += faded[i];
+			midFlat += flat[i];
+			nMid++;
+		}
+	}
+	double dip = 20.0 * std::log10((ends / nEnds) / (mid / nMid)), dipFlat = 20.0 * std::log10((endsFlat / nEnds) / (midFlat / nMid));
+	std::printf("  LOOP, at the slice ends against its middle: FADE 0 %+.1f dB, FADE 15%% %+.1f dB\n", dipFlat, dip);
+	CHECK(std::fabs(dipFlat) < 2.0, "no fade: %+.1f dB", dipFlat);
+	CHECK(dip < -8.0, "fade should dip the ends: %+.1f dB", dip);
+	CHECK(std::fabs(20.0 * std::log10((mid / nMid) / (midFlat / nMid))) < 1.0, "the middle keeps its level");
+
+	// Synced grains that all land on the loop's start (a loop no longer than the grain grid) must still sound.
+	{
+		auto levelWith = [](float fade) {
+			Rig rig(makeBank(noiseSource(4.0)));
+			wa::GrainMarkerInput& m = rig.in.markers[0];
+			m.sync = true;
+			m.density = 0.41f;   // as in the user's patch
+			m.size = 0.33f;
+			m.scan = 0.031f;     // just past the dead zone: the shortest synced loop, 1/16
+			m.scanFade = fade;
+			m.start = 0.45f;
+			settle(rig, 1.0);
+			std::vector<float> l;
+			rig.run((long) (2.0 * SR), &l);
+			return rms(l, 0, l.size());
+		};
+		double plain = levelWith(0.f), faded = levelWith(0.07f);
+		std::printf("  synced, every grain on the loop's start: FADE 0 %.3f, FADE 7%% %.3f (%.1f dB)\n", plain, faded, 20.0 * std::log10(faded / plain));
+		CHECK(faded > plain * 0.3, "FADE must not silence grains that start on the loop's start: %.4f against %.4f", faded, plain);
+	}
+
+	// Synced PING: one way per loop length, locked to the beat.
+	CHECK(std::fabs(wa::GrainEngine::syncedScanPlaceForTest(0.0, 2.0, 0.5f, true)) < 1e-9, "starts at START");
+	CHECK(std::fabs(wa::GrainEngine::syncedScanPlaceForTest(2.0, 2.0, 0.5f, true) - 1.0) < 1e-9, "at the end after one loop");
+	CHECK(std::fabs(wa::GrainEngine::syncedScanPlaceForTest(3.0, 2.0, 0.5f, true) - 0.5) < 1e-9, "half way back");
+	CHECK(std::fabs(wa::GrainEngine::syncedScanPlaceForTest(4.0, 2.0, 0.5f, true)) < 1e-9, "back at START after two");
+	CHECK(std::fabs(wa::GrainEngine::syncedScanPlaceForTest(3.0, 2.0, 0.5f, false) - 0.5) < 1e-9, "LOOP as before");
+	std::printf("  synced PING over 2 beats: at beat 0, 1, 2, 3, 4: %.2f %.2f %.2f %.2f %.2f\n", wa::GrainEngine::syncedScanPlaceForTest(0.0, 2.0, 0.5f, true),
+		wa::GrainEngine::syncedScanPlaceForTest(1.0, 2.0, 0.5f, true), wa::GrainEngine::syncedScanPlaceForTest(2.0, 2.0, 0.5f, true),
+		wa::GrainEngine::syncedScanPlaceForTest(3.0, 2.0, 0.5f, true), wa::GrainEngine::syncedScanPlaceForTest(4.0, 2.0, 0.5f, true));
+}
+
+/** The display's grain flash shows how much of the sample a grain reads, not how long it plays. */
+static void testGrainEventSpan() {
+	std::printf("grain flash length\n");
+	for (float pitch : {0.f, -24.f, 12.f}) {
+		Rig rig(makeBank(noiseSource(4.0)));
+		wa::GrainMarkerInput& m = rig.in.markers[0];
+		m.start = 0.2f;
+		m.sync = false;
+		m.density = 0.4f;
+		m.size = std::log(0.3f / 0.002f) / 6.214608098f; // 300 ms
+		m.pitch = pitch;
+		settle(rig, 0.5);
+		uint32_t n = rig.engine->eventCount();
+		const wa::GrainEvent& ev = rig.engine->events()[(n - 1) % wa::GrainEngine::NUM_EVENTS];
+		double want = 0.3 * std::exp2(pitch / 12.0);
+		std::printf("  300 ms grains at %+3.0f st: flash %.3f s of the sample (it reads %.3f s)\n", pitch, ev.seconds, want);
+		CHECK(n > 0 && std::fabs(ev.seconds - want) < 0.01 * want + 0.001, "%+.0f st: %.3f against %.3f", pitch, ev.seconds, want);
+	}
+}
+
+static void testScanLength() {
+	std::printf("scan loop length\n");
+	CHECK(wa::grainScanLengthFraction(1.f, 2.0) < 0.f, "the top means to the next marker");
+	CHECK(std::fabs(wa::grainScanLengthFraction(0.f, 2.0) - 0.005f) < 1e-6f, "the shortest is 10 ms");
+	CHECK(std::fabs(wa::grainScanLengthFraction(0.994999f, 2.0) - 1.f) < 1e-3f, "just under the top: the whole sample");
+	float back = wa::grainScanLengthFraction(wa::grainScanLengthKnob(0.3, 2.0), 2.0);
+	std::printf("  knob ends: %.0f ms .. %.2f s; 0.3 of the sample through the knob and back: %.4f\n", wa::grainScanLengthFraction(0.f, 2.0) * 2000.0,
+		wa::grainScanLengthFraction(0.994f, 2.0) * 2.0, back);
+	CHECK(std::fabs(back - 0.3f) < 1e-4f, "round trip %.4f", back);
+
+	// Free scan at 2x, START 0, a second marker at 0.5 of a 2 s sample.
+	auto range = [](float start, float length, float* shownStart, float* shownEnd) {
+		Rig rig(makeBank(noiseSource(2.0)));
+		rig.in.markers[0].start = start;
+		rig.in.markers[0].scan = 1.f;
+		rig.in.markers[0].sync = false;
+		rig.in.markers[0].density = 0.8f;
+		rig.in.markers[0].size = 0.3f;
+		rig.in.markers[0].scanLength = length;
+		rig.in.markers[1].active = true;
+		rig.in.markers[1].pos = 1.f;
+		rig.in.markers[1].start = 0.5f;
+		rig.in.position = 0.f;
+		double lo = 1.0, hi = 0.0;
+		for (int i = 0; i < 3000; i++) {
+			double r = rig.engine->getReadPosition(0);
+			if (i > 100) // after the engine has started
+				lo = std::min(lo, r);
+			hi = std::max(hi, r);
+			rig.run((long) (SR / 1000));
+		}
+		rig.engine->getScanSlice(0, shownStart, shownEnd);
+		return std::make_pair(lo, hi);
+	};
+	struct Case {
+		const char* name;
+		float start, length, lo, hi;
+	};
+	const Case cases[] = {
+		{"default (to the next marker at 0.50)", 0.f, -1.f, 0.f, 0.5f},
+		{"LENGTH 0.10 of the sample", 0.f, 0.1f, 0.f, 0.1f},
+		{"LENGTH 0.80: past the next marker", 0.f, 0.8f, 0.f, 0.8f},
+		{"START 0.70, LENGTH 0.50: cut at the end", 0.7f, 0.5f, 0.7f, 1.f},
+	};
+	for (const Case& c : cases) {
+		float s, e;
+		std::pair<double, double> r = range(c.start, c.length, &s, &e);
+		std::printf("  %-42s reads %.3f .. %.3f; map shows %.3f .. %.3f\n", c.name, r.first, r.second, s, e);
+		CHECK(std::fabs(r.first - c.lo) < 0.01 && std::fabs(r.second - c.hi) < 0.01, "%s: %.3f .. %.3f", c.name, r.first, r.second);
+		CHECK(std::fabs(s - c.start) < 1e-4f && std::fabs(e - c.hi) < 1e-3f, "%s: shown %.3f .. %.3f", c.name, s, e);
+	}
+	// Not scanning: nothing to show.
+	{
+		Rig rig(makeBank(noiseSource(2.0)));
+		rig.in.markers[0].scan = 0.f;
+		rig.in.markers[0].scanLength = 0.2f;
+		rig.run((long) (0.1 * SR));
+		float s, e;
+		rig.engine->getScanSlice(0, &s, &e);
+		CHECK(e < 0.f, "no loop to show while SCAN is off: %.3f", e);
+	}
+}
+
 static void testSafety() {
 	std::printf("everything maxed stays within 10 V\n");
 	Rig rig(makeBank(noiseSource(4.0)));
@@ -890,6 +1233,10 @@ int main() {
 	testSampleEnds();
 	testIdleCloudPosition();
 	testSmear();
+	testKeepSpeed();
+	testScanLoop();
+	testScanLength();
+	testGrainEventSpan();
 	testSafety();
 	testCrossfadeAndSwap();
 	testDirectOutput();

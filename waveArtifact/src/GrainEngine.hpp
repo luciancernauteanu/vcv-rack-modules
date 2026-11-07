@@ -29,9 +29,20 @@
 // - The SCAN knob moves the read position through the marker's slice (START up to the next marker's START
 //   in the sample, or the end). Free: speed in x real-time, 0 = frozen. Synced: the slice is fitted to a
 //   number of beats and its phase is locked to the beat grid (a tempo-locked time stretch, no pitch change).
+//   At the end of the slice it jumps back to START (LOOP) or turns round (PING: forwards, then backwards, each
+//   way taking one loop). FADE lowers the cloud's level while the scan is near either end of its loop (0..50% of
+//   it each side), so the turn or the jump back is a dip instead of an edge. It follows where the scan is, not
+//   where each grain starts: synced grains that all land on the loop's start would otherwise all be silent.
+//   At FADE 0 in LOOP, as before.
 // - Random scatter (SPRAY, pitch, pan, direction) restarts from the same seed at the start of every loop
 //   cycle while synced, so the random pattern repeats like a loop instead of drifting (SEEDED).
 // - Pitch belongs to each cloud: V/OCT (0 V = original speed at C4's default), PITCH, FINE, scatter.
+//
+// KEEP SPEED (per marker): pitch no longer slows down or speeds up the sample. A pitched grain plays its piece of
+// the sample faster or slower than real time, so it drifts from where an unpitched grain would be by |1 - rate| of
+// its length. Each grain is centered on the unpitched grain's place and kept short enough for the drift to stay
+// within +-KEEP_DRIFT_SECONDS / 2; that many more grains fire (whole subdivisions of the grid when synced), so the
+// overlap and level stay as set. At rate 1 nothing changes.
 //
 // POLY play mode (GrainInput::poly): a cloud's weight is its marker's ADSR level instead of its position share
 // (see PolyVoices.hpp). A note from silence starts the cloud as if it had been running (all its overlapping
@@ -115,6 +126,28 @@ inline float grainLoopBeats(float k) {
 	float a = (std::min(std::fabs(k), 1.f) - SCAN_DEADZONE) / (1.f - SCAN_DEADZONE);
 	int i = (int) std::lround(std::min(std::max(a, 0.f), 1.f) * (NUM_LOOP_BEATS - 1));
 	return LOOP_BEATS[i];
+}
+
+/** SCAN LENGTH knob 0..1: the scan loop's length, 10 ms up to the whole sample (log), measured from START and cut at
+the sample's end. At the very top: up to the next marker's START, as before (the default). */
+static const float SCAN_LENGTH_TOP = 0.995f;
+static const double SCAN_LENGTH_MIN_SECONDS = 0.01;
+
+/** The loop length as a share of the sample, or -1 for "up to the next marker" */
+inline float grainScanLengthFraction(float k, double sampleSeconds) {
+	if (k >= SCAN_LENGTH_TOP)
+		return -1.f;
+	double shortest = std::min(1.0, SCAN_LENGTH_MIN_SECONDS / std::max(sampleSeconds, 1e-6));
+	return (float) std::pow(shortest, 1.0 - std::max(k, 0.f) / SCAN_LENGTH_TOP);
+}
+
+/** The knob value for a loop length (share of the sample) */
+inline float grainScanLengthKnob(double fraction, double sampleSeconds) {
+	double shortest = std::min(1.0, SCAN_LENGTH_MIN_SECONDS / std::max(sampleSeconds, 1e-6));
+	if (shortest >= 1.0)
+		return 0.f;
+	fraction = std::min(std::max(fraction, shortest), 1.0);
+	return (float) (SCAN_LENGTH_TOP * (1.0 - std::log(fraction) / std::log(shortest)));
 }
 
 /** Window value at p (0..1 through the grain). All windows are 0 at both ends. */
@@ -271,6 +304,14 @@ struct GrainMarkerInput {
 	/** SCAN knob -1..1 */
 	float scan = 0.f;
 	int direction = GRAIN_FORWARD;
+	/** KEEP SPEED: pitch changes the pitch but not the sample's timing */
+	bool keepSpeed = false;
+	/** SCAN: forwards then backwards (PING) instead of jumping back to START (LOOP) */
+	bool scanPing = false;
+	/** SCAN: share of the slice at each end over which the level fades (0..0.5) */
+	float scanFade = 0.f;
+	/** SCAN: the loop's length as a share of the sample, from START; negative = up to the next marker's START */
+	float scanLength = -1.f;
 	float cutoff = 1.f;
 	int filterMode = MODE_LP;
 	float res = 0.f;
@@ -324,7 +365,7 @@ struct GrainEvent {
 	int marker = 0;
 	/** Start in the sample, 0..1 */
 	float pos = 0.f;
-	/** Length in seconds */
+	/** How much of the sample the grain reads, in seconds of the sample (less than its length when pitched down) */
 	float seconds = 0.f;
 };
 
@@ -388,6 +429,12 @@ public:
 	}
 
 	/** Where the cloud reads now: START plus scan offset, 0..1 of the sample */
+	/** Where a scanning cloud's loop starts and ends, 0..1 of the sample; end is -1 while it does not scan */
+	void getScanSlice(int m, float* start, float* end) const {
+		*start = clouds[m].shownSliceStart;
+		*end = clouds[m].shownSliceEnd;
+	}
+
 	float getReadPosition(int m) const {
 		return clouds[m].shownRead;
 	}
@@ -409,6 +456,14 @@ public:
 	}
 	uint32_t eventCount() const {
 		return eventsWritten;
+	}
+
+	static double syncedScanPlaceForTest(double beat, double loopBeats, float scan, bool ping) {
+		return syncedScanPlace(beat, loopBeats, scan, ping);
+	}
+
+	static double keepLengthSecondsForTest(double size, double rate) {
+		return keepLengthSeconds(size, rate);
 	}
 
 	/** Grain window RMS^2, used for level compensation (tests) */
@@ -536,8 +591,9 @@ public:
 				if (!wanted) {
 					c.running = false;
 					c.triggerFire = false;
-					// Not scheduled (the playhead is elsewhere): the map still shows its bullet at START.
+					// Not scheduled (the playhead is elsewhere): the map still shows its bullet at START, and its loop.
 					c.shownRead = std::min(std::max(in.markers[m].start, 0.f), 1.f);
+					updateShownSlice(m, in, *S);
 					continue;
 				}
 				schedule(m, in, *S, canSync);
@@ -547,6 +603,8 @@ public:
 			for (int m = 0; m < NUM_MARKERS; m++) {
 				clouds[m].running = false;
 				clouds[m].shownRead = std::min(std::max(in.markers[m].start, 0.f), 1.f);
+				if (S)
+					updateShownSlice(m, in, *S);
 			}
 		}
 
@@ -607,6 +665,13 @@ public:
 				c.resS += (std::min(std::max(M.res, 0.f), 1.f) - c.resS) * smoothCoef;
 				float fc = filterHz(c.cutS), q = filterQ(c.resS);
 				float xl = bufL[m], xr = bufR[m];
+				if (c.scanLevelTarget < 1.f || c.scanLevel < 1.f) {
+					c.scanLevel += (c.scanLevelTarget - c.scanLevel) * smoothCoef;
+					if (c.scanLevelTarget >= 1.f && c.scanLevel > 0.99999f)
+						c.scanLevel = 1.f;
+					xl *= c.scanLevel;
+					xr *= c.scanLevel;
+				}
 				float wetT = (M.window == GRAIN_SMEAR) ? 1.f : 0.f;
 				if (wetT > 0.f || c.smearWet > 0.f) {
 					c.smearWet += (wetT - c.smearWet) * smoothCoef;
@@ -688,6 +753,19 @@ private:
 	static const int WINDOW_POINTS = 1024;
 	static const int EDGE = 64;
 	static const int MIN_LENGTH = 128;
+	/** KEEP SPEED: the most a grain may drift from the unpitched timing over its length (centered: half each way) */
+	static constexpr double KEEP_DRIFT_SECONDS = 0.04;
+	/** KEEP SPEED: grains are never made shorter than this (at extreme pitches the drift then grows) */
+	static constexpr double KEEP_MIN_SECONDS = 0.03;
+	static const int KEEP_MAX_SUBDIVISIONS = 16;
+
+	/** A grain's length under KEEP SPEED, at a playback rate relative to the source */
+	static double keepLengthSeconds(double size, double rate) {
+		double off = std::fabs(1.0 - rate);
+		if (off < 1e-4)
+			return size;
+		return std::min(size, std::max(KEEP_MIN_SECONDS, KEEP_DRIFT_SECONDS / off));
+	}
 	/** Most grains started at once when a note starts */
 	static const int MAX_NOTE_GRAINS = 16;
 	/** Frames (of the grain's level) over which a grain fades when it reaches an end of the sample */
@@ -727,6 +805,9 @@ private:
 		float w = 0.f;
 		float gainS = 1.f;
 		float panS = 0.f;
+		/** SCAN FADE: the level for where the scan is now, and its smoothed value */
+		float scanLevelTarget = 1.f;
+		float scanLevel = 1.f;
 		float cutS = 1.f;
 		float resS = 0.f;
 		float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
@@ -743,6 +824,8 @@ private:
 		long lastCycle = LONG_MIN;
 		uint32_t rng = 1u;
 		float shownRead = 0.f;
+		float shownSliceStart = 0.f;
+		float shownSliceEnd = -1.f;
 		/** POLY: a note started; schedule() takes it on this cloud's next turn */
 		bool triggerFire = false;
 		bool triggerFromSilence = false;
@@ -830,27 +913,39 @@ private:
 
 		// Scan offset into the slice (frames of level 0)
 		double sliceLen = sliceFrames(in, m, S);
+		updateShownSlice(m, in, S);
 		double offset = 0.0;
 		if (scanning) {
 			if (sync) {
-				double ph = gclock.beatPos / loopBeats;
-				ph -= std::floor(ph);
-				offset = (scan < 0.f ? 1.0 - ph : ph) * sliceLen;
+				offset = syncedScanPlace(gclock.beatPos, loopBeats, scan, M.scanPing) * sliceLen;
 			}
 			else {
+				// PING runs one cycle there and back: twice the slice.
+				double cycle = std::max(M.scanPing ? 2.0 * sliceLen : sliceLen, 1.0);
 				c.scanAccum += grainScanSpeed(scan) * srcStep;
-				if (c.scanAccum >= sliceLen || c.scanAccum < 0.0) {
-					c.scanAccum = std::fmod(c.scanAccum, std::max(sliceLen, 1.0));
+				if (c.scanAccum >= cycle || c.scanAccum < 0.0) {
+					c.scanAccum = std::fmod(c.scanAccum, cycle);
 					if (c.scanAccum < 0.0)
-						c.scanAccum += sliceLen;
+						c.scanAccum += cycle;
 				}
-				offset = c.scanAccum;
+				offset = (M.scanPing && c.scanAccum > sliceLen) ? 2.0 * sliceLen - c.scanAccum : c.scanAccum;
 			}
 		}
 		else {
 			c.scanAccum = 0.0;
 		}
 		c.shownRead = (float) std::min(std::max((M.start * (double) S.frames + offset) / (double) S.frames, 0.0), 1.0);
+		// FADE: the level follows where the scan is in its loop now (applied to the cloud's sound, smoothed).
+		c.scanLevelTarget = 1.f;
+		if (scanning && M.scanFade > 0.f && sliceLen > 1.0) {
+			float q = (float) std::min(std::max(offset / sliceLen, 0.0), 1.0);
+			float f = std::min(M.scanFade, 0.5f);
+			auto ease = [](float x) {
+				x = std::min(std::max(x, 0.f), 1.f);
+				return x * x * (3.f - 2.f * x);
+			};
+			c.scanLevelTarget = ease(q / f) * ease((1.f - q) / f);
+		}
 
 		// Grain clock
 		double delay = 0.0;
@@ -858,8 +953,17 @@ private:
 		double grainsPerSecond;
 		double sizeSeconds;
 		double gridBeat = 0.0;
+		// KEEP SPEED: how many grains fire for one, so the shortened grains overlap as much as the set ones
+		auto keepFactor = [&](double size) {
+			if (!M.keepSpeed)
+				return 1;
+			double kept = keepLengthSeconds(size, c.liveMul);
+			return std::min(std::max((int) std::ceil(size / kept - 1e-6), 1), KEEP_MAX_SUBDIVISIONS);
+		};
 		if (sync) {
-			float interval = SYNC_DIVISIONS[lfoDivision(M.density, M.triplet, M.dotted)].beats;
+			float division = SYNC_DIVISIONS[lfoDivision(M.density, M.triplet, M.dotted)].beats;
+			sizeSeconds = grainSizeSyncRatio(M.size) * division * beatSec;
+			float interval = division / (float) keepFactor(sizeSeconds);
 			// The epsilon (about 0.001 samples) keeps a position that lands on a grid point up to rounding
 			// from missing it by one sample.
 			double x = gclock.beatPos / interval;
@@ -882,14 +986,14 @@ private:
 				c.lastN = nn;
 			}
 			grainsPerSecond = 1.0 / (interval * beatSec);
-			sizeSeconds = grainSizeSyncRatio(M.size) * interval * beatSec;
 		}
 		else {
 			if (c.syncState != 0) {
 				c.syncState = 0;
 				c.lastCycle = LONG_MIN;
 			}
-			double hz = grainFreeHz(M.density);
+			sizeSeconds = grainSizeFreeSeconds(M.size);
+			double hz = grainFreeHz(M.density) * keepFactor(sizeSeconds);
 			c.gph += hz / sampleRate;
 			if (c.gph >= 1.0) {
 				fire = true;
@@ -899,7 +1003,6 @@ private:
 					c.gph = 0.0;
 			}
 			grainsPerSecond = hz;
-			sizeSeconds = grainSizeFreeSeconds(M.size);
 		}
 		if (startNote) {
 			// Now, not on the next grid point. The grid carries on as usual afterwards.
@@ -915,9 +1018,7 @@ private:
 		if (sync && scanning) {
 			// A synced scan reads the slice at the grain's own grid time, not at the (rounded) beat position
 			// of this sample: a grain on the loop point must always land at the start of the slice.
-			double ph = (gridBeat + 1e-9) / loopBeats;
-			ph -= std::floor(ph);
-			offset = (scan < 0.f ? 1.0 - ph : ph) * sliceLen;
+			offset = syncedScanPlace(gridBeat + 1e-9, loopBeats, scan, M.scanPing) * sliceLen;
 		}
 
 		// One grain, or all the ones a running cloud would have sounding when a note starts.
@@ -940,7 +1041,7 @@ private:
 		// of the beat position. (Not seeded, or not synced: the sequence just continues.)
 		if (sync && in.seeded && k == 0) {
 			double cycleBeats = scanning ? loopBeats : IDLE_CYCLE_BEATS;
-			long perCycle = std::max(1L, std::lround(cycleBeats / SYNC_DIVISIONS[lfoDivision(M.density, M.triplet, M.dotted)].beats));
+			long perCycle = std::max(1L, std::lround(cycleBeats / c.lastInterval));
 			long j = ((c.lastN % perCycle) + perCycle) % perCycle;
 			uint32_t h = (uint32_t) (j + 1) * 0x9E3779B1u ^ (uint32_t) (m + 1) * 0x85EBCA6Bu;
 			h ^= h >> 15;
@@ -966,6 +1067,13 @@ private:
 		// Fit the grain inside the sample, so its window (not an end of the sample) shapes it.
 		double usable = std::max((double) S.frames - 1.0 - FIT_MARGIN, 1.0);
 		double stepNow = stepLevel0 * c.liveMul;
+		if (M.keepSpeed) {
+			// Short enough to drift little, and centered on where the unpitched grain would be.
+			double r = stepNow / srcStep;
+			int kept = (int) std::lround(keepLengthSeconds(len / sampleRate, r) * sampleRate);
+			len = std::max(std::min(len, kept), MIN_LENGTH);
+			startF = std::min(std::max(startF + (1.0 - r) * srcStep * len * 0.5, 0.0), (double) S.frames - 1.0);
+		}
 		if ((double) len * stepNow > usable)
 			len = std::max((int) (usable / stepNow), 1);
 		double maxStart = std::max(usable - (double) len * stepNow, 0.0);
@@ -1026,7 +1134,7 @@ private:
 		GrainEvent& ev = eventRing[eventsWritten % NUM_EVENTS];
 		ev.marker = m;
 		ev.pos = (float) (startF / (double) S.frames);
-		ev.seconds = (float) len / sampleRate;
+		ev.seconds = (float) (span / (double) S.sampleRate);
 		eventsWritten++;
 		}
 	}
@@ -1112,10 +1220,37 @@ private:
 		return startF + (double) fine;
 	}
 
+	/** Where a synced scan is in its slice, 0..1. LOOP: 0 to 1 over loopBeats, again and again. PING: 0 to 1 over
+	loopBeats, then back to 0 over the next loopBeats. A negative SCAN runs it the other way. */
+	static double syncedScanPlace(double beat, double loopBeats, float scan, bool ping) {
+		double ph;
+		if (ping) {
+			ph = beat / (2.0 * loopBeats);
+			ph -= std::floor(ph);
+			ph = (ph < 0.5) ? 2.0 * ph : 2.0 - 2.0 * ph;
+		}
+		else {
+			ph = beat / loopBeats;
+			ph -= std::floor(ph);
+		}
+		return scan < 0.f ? 1.0 - ph : ph;
+	}
+
+	/** For the map: where this cloud's loop is (end -1 while it does not scan). */
+	void updateShownSlice(int m, const GrainInput& in, const SampleBuffer& S) {
+		Cloud& c = clouds[m];
+		float start = std::min(std::max(in.markers[m].start, 0.f), 1.f);
+		c.shownSliceStart = start;
+		c.shownSliceEnd = grainScanActive(in.markers[m].scan) ? (float) std::min(start + sliceFrames(in, m, S) / (double) S.frames, 1.0) : -1.f;
+	}
+
 	/** Frames of level 0 from this marker's START to the next START (in the sample), or to the end. */
 	double sliceFrames(const GrainInput& in, int m, const SampleBuffer& S) const {
 		float start = std::min(std::max(in.markers[m].start, 0.f), 1.f);
 		float end = 1.f;
+		// A set LENGTH: from START, cut at the sample's end, whatever the other markers do.
+		if (in.markers[m].scanLength > 0.f)
+			return std::max((double) (std::min(start + in.markers[m].scanLength, 1.f) - start) * (double) S.frames, 1.0);
 		for (int i = 0; i < NUM_MARKERS; i++) {
 			if (i == m || !in.markers[i].active)
 				continue;

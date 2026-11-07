@@ -183,11 +183,29 @@ static const float ADSR_LABEL_DX = 4.7f;
 static const Vec ADSR_SCREEN_POS = Vec(97.f, 121.5f);
 static const Vec ADSR_SCREEN_SIZE = Vec(25.f, 5.6f);
 
-// SPREAD (GRAIN only) in the same strip, right of the envelope
+// GRAIN: its own grain group in the WAVE / LFO section (18..66), where the wavetable's SMOOTH and LFO are.
+// START stays the WAVE knob. Row 1: START, DENSITY, SIZE, SCAN, FADE. Row 2: the WINDOW screen (under START),
+// SYNC / T / D under DENSITY, SPRAY under SCAN, LOOP | PING under FADE.
+static const Vec GRAIN_DENSITY_KNOB = Vec(37.5f, ROW1_Y);
+static const Vec GRAIN_SIZE_KNOB = Vec(46.f, ROW1_Y);
+static const Vec GRAIN_SCAN_KNOB = Vec(54.5f, ROW1_Y);
+static const Vec GRAIN_FADE_KNOB = Vec(62.5f, ROW1_Y);
+static const Vec GRAIN_WINDOW_SCREEN = Vec(25.5f, ROW2_Y);
+static const Vec GRAIN_WINDOW_SIZE = Vec(10.f, 6.f);
+static const Vec GRAIN_SYNC_BUTTON = Vec(35.f, ROW2_Y);
+static const Vec GRAIN_TRIP_BUTTON = Vec(40.9f, ROW2_Y);
+static const Vec GRAIN_DOT_BUTTON = Vec(45.7f, ROW2_Y);
+static const Vec GRAIN_SPRAY_KNOB = Vec(54.5f, ROW2_Y);
+static const Vec GRAIN_SCAN_MODE_BUTTON = Vec(62.5f, ROW2_Y);
+static const Vec GRAIN_SCAN_MODE_SIZE = Vec(6.8f, 4.4f);
+
+// SPREAD and KEEP (speed) (GRAIN only) in the same strip, right of the envelope, in one box
 static const Vec SPREAD_BOX_POS = Vec(126.f, 120.6f);
-static const Vec SPREAD_BOX_SIZE = Vec(21.f, 7.4f);
+static const Vec SPREAD_BOX_SIZE = Vec(38.f, 7.4f);
 static const float SPREAD_LABEL_X = 132.f;
 static const Vec SPREAD_KNOB = Vec(142.f, ADSR_Y);
+static const Vec KEEP_SPEED_BUTTON = Vec(155.f, ADSR_Y);
+static const Vec KEEP_SPEED_BUTTON_SIZE = Vec(11.f, 4.4f);
 
 // Pastel, blue through purple to red.
 static const NVGcolor MARKER_COLORS[5] = {
@@ -197,6 +215,8 @@ static const NVGcolor MARKER_COLORS[5] = {
 	nvgRGB(0xe6, 0x9a, 0xc8), // orchid
 	nvgRGB(0xff, 0x9a, 0x9e), // rose
 };
+/** A muted marker's bullet and slot */
+static const NVGcolor MUTED_COLOR = nvgRGB(0x7c, 0x80, 0x8a);
 /** Screen text and highlights */
 static const NVGcolor SCREEN_TEXT = nvgRGB(0xb8, 0xc4, 0xff);
 static const NVGcolor SCREEN_DIM = nvgRGB(0x5a, 0x60, 0x80);

@@ -7,7 +7,7 @@ struct AdsrHoldQuantity : ParamQuantity {
 	std::string getDisplayValueString() override {
 		float s = wa::adsrHoldSeconds(getValue());
 		if (s < 0.f)
-			return "until the next marker";
+			return "until the next marker (STEP: until it plays again)";
 		return s < 1.f ? string::f("%.0f ms", s * 1000.f) : string::f("%.2f s", s);
 	}
 	std::string getUnit() override {

@@ -53,6 +53,22 @@ struct ToExpanderMessage {
 	bool poly = false;
 };
 
+/** Main -> sequencer (the sequencer sits on the LEFT of the main module). The beat position is a level and the
+reset a counter, so a message seen twice or missed cannot play or skip a step. */
+struct ToSequencerMessage {
+	/** The module's clock (the CLOCK input, or the internal tempo), in beats (quarter notes) since RESET */
+	double beatPos = 0.0;
+	/** RESET happened: counts up, the sequencer restarts from step 1 */
+	uint32_t resetCount = 0;
+};
+
+/** Sequencer -> main: which marker was struck last, and how hard */
+struct FromSequencerMessage {
+	bool linked = false;
+	uint32_t fireCount[NUM_MARKERS] = {};
+	float velocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
+};
+
 struct ToMainMessage {
 	/** Volts x AMT, summed over every linked expander assigned to the marker (GAIN excluded) */
 	float mod[NUM_MARKERS][NUM_MOD_TARGETS] = {};
