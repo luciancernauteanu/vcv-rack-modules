@@ -25,10 +25,10 @@ WaveArtifactExpander::WaveArtifactExpander() {
 		configParam(AMT_PARAM + t, unipolar ? 0.f : -1.f, 1.f, 0.f, name + ((t == wa::MOD_GAIN) ? " VCA amount (100% = silent at 0 V)" : " CV amount"), "%", 0.f, 100.f);
 		configInput(MOD_INPUT + t, name + " CV");
 	}
-	// Granular engine: START, SCAN and SPREAD are unipolar amounts, shown in place of the attenuverters.
+	// Granular engine: START and DENSITY are unipolar amounts, shown in place of the attenuverters.
 	configParam(GRAIN_START_AMT_PARAM, 0.f, 1.f, 0.f, "START CV amount", "%", 0.f, 100.f);
-	configParam(GRAIN_SCAN_AMT_PARAM, 0.f, 1.f, 0.f, "SCAN CV amount", "%", 0.f, 100.f);
-	configParam(GRAIN_SPREAD_AMT_PARAM, 0.f, 1.f, 0.f, "SPREAD CV amount", "%", 0.f, 100.f);
+	configParam(GRAIN_DENSITY_AMT_PARAM, 0.f, 1.f, 0.f, "DENSITY CV amount", "%", 0.f, 100.f);
+	configParam(GRAIN_SPREAD_AMT_PARAM, 0.f, 1.f, 0.f, "Unused", "%", 0.f, 100.f);
 	// LFO 1 defaults to 1 Hz, LFO 2 to 0.2 Hz.
 	const float defaultRate[NUM_LFOS] = {0.606f, 0.394f};
 	for (int k = 0; k < NUM_LFOS; k++) {
@@ -48,7 +48,7 @@ WaveArtifactExpander::WaveArtifactExpander() {
 		configOutput(LFO_OUTPUT + k, name + " (+-5 V)");
 	}
 	configInput(VOCT_INPUT, "V/OCT for this artifact (1 V/oct, added to the main V/OCT)");
-	configInput(GATE_INPUT, "Gate for this artifact (patched: it sounds only while the gate is high, shaped by ATTACK / DECAY)");
+	configInput(GATE_INPUT, "Gate for this artifact. MORPH: it sounds only while the gate is high, shaped by ATTACK / DECAY. POLY: plays its note with its own ADSR while high, instead of the playhead");
 	// Attack 5 ms..2 s, decay 5 ms..4 s (log). At the minimum a stage is instant (plain gate).
 	configParam(ATTACK_PARAM, 0.f, 1.f, 0.f, "Attack", " s", 2.f / MIN_ENV_TIME, MIN_ENV_TIME);
 	configParam(DECAY_PARAM, 0.f, 1.f, 0.f, "Decay", " s", 4.f / MIN_ENV_TIME, MIN_ENV_TIME);
@@ -151,8 +151,15 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		// A patched GATE shapes the artifact's level with the ATTACK / DECAY envelope, through the
 		// same multiplier as the GAIN VCA, so the main module's 5 ms gain smoothing keeps even the
 		// fastest open/close click-free. Two expanders gating the same artifact multiply.
+		// In POLY the gate plays the marker's own ADSR instead (ATTACK / DECAY then only shape the ENV output).
 		if (gatePatched) {
-			acc.gainMul[m] *= envLevel;
+			if (fromLeft.poly) {
+				acc.gatePatched[m] = true;
+				acc.gateHigh[m] = acc.gateHigh[m] || gateTrigger.isHigh();
+			}
+			else {
+				acc.gainMul[m] *= envLevel;
+			}
 			acc.modulated[m] = true;
 		}
 		if (inputs[VOCT_INPUT].isConnected()) {
@@ -183,6 +190,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->linked = fromLeft.linked;
 		out->reset = fromLeft.reset;
 		out->granular = fromLeft.granular;
+		out->poly = fromLeft.poly;
 		right->leftExpander.requestMessageFlip();
 	}
 
@@ -294,7 +302,7 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->add(Vec(VOCT_JACK.x, TOP_LABEL_Y + 1.f), "V/OCT", 6.f);
 		labels->add(Vec(GATE_JACK.x, TOP_LABEL_Y + 1.f), "GATE", 6.f);
 		// The same six inputs under their granular names while the main module runs the granular engine
-		static const char* const GRAIN_TARGET_NAMES[wa::NUM_MOD_TARGETS] = {"START", "GAIN", "CUTOFF", "P.SPRD", "SCAN", "SPREAD"};
+		static const char* const GRAIN_TARGET_NAMES[wa::NUM_MOD_TARGETS] = {"START", "GAIN", "CUTOFF", "P.SPRD", "DENSITY", "PAN"};
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++)
 			labels->addModal(Vec(CV_CELL_X[t % 2] + CV_NAME_DX, CV_JACK_Y[t / 2] + CV_NAME_DY), wa::MOD_TARGET_NAMES[t], GRAIN_TARGET_NAMES[t], 6.f);
 		labels->grainFlag = module ? &module->granular : nullptr;

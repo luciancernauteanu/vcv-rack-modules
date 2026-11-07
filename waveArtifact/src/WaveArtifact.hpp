@@ -7,6 +7,7 @@
 #include "GrainEngine.hpp"
 #include "Lfo.hpp"
 #include "MorphEngine.hpp"
+#include "PolyVoices.hpp"
 #include "WavetableBank.hpp"
 
 struct WaveArtifact : Module {
@@ -109,6 +110,17 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_GRAIN_DIR_PARAM, NUM_MARKERS),
 		/** 1 = the random scatter repeats every loop cycle while synced */
 		GRAIN_SEEDED_PARAM,
+		// ---- POLY play mode (appended) ----
+		/** 0 = MORPH (the playhead crossfades neighboring markers, default), 1 = POLY (it starts their notes) */
+		PLAY_MODE_PARAM,
+		/** Each marker's ADSR in POLY: attack and decay / release 0..1 on a log scale (wa::adsrAttackSeconds,
+		wa::adsrFallSeconds), sustain 0..1 */
+		ENUMS(MARKER_ATTACK_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_DECAY_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_SUSTAIN_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_RELEASE_PARAM, NUM_MARKERS),
+		/** How long a marker's note stays on (wa::adsrHoldSeconds); at the top, until another marker starts */
+		ENUMS(MARKER_HOLD_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -159,6 +171,8 @@ struct WaveArtifact : Module {
 
 	/** Table auditioned instead of the morph, or -1. Written by the UI, read by process(). Not saved. */
 	std::atomic<int> previewTable{-1};
+	/** POLY: the marker whose slot the mouse is holding down, which plays it, or -1. Written by the UI. */
+	std::atomic<int> pressedMarker{-1};
 
 	// Written by process(), read by the displays.
 	std::atomic<float> shownIndex[NUM_MARKERS];
@@ -180,6 +194,8 @@ struct WaveArtifact : Module {
 	/** Engine in use (0 wavetable, 1 granular); follows ENGINE_MODE_PARAM after a fade to silence */
 	int engineApplied = 0;
 	uint32_t grainEventsSeen = 0;
+	wa::PolyVoices voices;
+	bool polyRunning = false;
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
 	wa::Lfo posLfo;
@@ -205,11 +221,26 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 28;
+	static const int NUM_MARKER_SETTINGS = 33;
 	static const int MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS];
 	/** The settings copied last (not saved with the patch), and the marker they came from, or -1 */
 	float markerClipboard[NUM_MARKER_SETTINGS] = {};
 	int markerClipboardFrom = -1;
+	/** The selected marker's settings at the last linkStep, to see what changed */
+	float linkLast[NUM_MARKER_SETTINGS] = {};
+	int linkSelected = -1;
+	/** First param ID of each part of a marker's envelope */
+	static const int NUM_ENVELOPE_PARAMS = 5;
+	static const int MARKER_ENVELOPE_PARAMS[NUM_ENVELOPE_PARAMS];
+	/** Shift + a per-marker control: the setting being moved on every marker, or -1 (see linkStep) */
+	int linkSetting = -1;
+	/** The marker the move is made on */
+	int linkMarker = -1;
+	/** How far a Shift drag has gone past the moved knob's own limit, in its units (see LinkedKnob) */
+	float linkBeyond = 0.f;
+	/** Each marker's value and the moved marker's own value when the move began */
+	float linkBase[NUM_MARKERS] = {};
+	float linkBaseValue = 0.f;
 
 
 	WaveArtifact();
@@ -239,6 +270,13 @@ struct WaveArtifact : Module {
 	void copyMarker(int i);
 	/** Overwrites a marker's settings with the copied ones and selects it. Its on/off and bar position stay. */
 	void pasteMarker(int i);
+	/** Call every frame, with the param under a Shift-held mouse (-1 if none) and whether its button is down.
+	When the selected marker's setting changes there, every other active marker moves by the same amount from
+	where it was when the move began, so the spacing comes back if one hits a limit. A drag past the moved knob's
+	own limit keeps moving the others (linkBeyond). Switches and lists take the same value instead. Returns true once when a move has ended: the UI makes its undo step, then calls
+	linkFinish(). */
+	bool linkStep(int paramId, bool dragging);
+	void linkFinish();
 
 	/** UI thread. Reads the file and starts analysis on the worker thread. */
 	void loadFile(const std::string& path);

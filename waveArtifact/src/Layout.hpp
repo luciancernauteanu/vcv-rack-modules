@@ -8,6 +8,7 @@
 //  y  46..75.5  screen: marker waveforms, marker bar, file status (click to load)
 //  y  77.5..106 POSITION | FREQ + V/OCT | MASTER (type, cutoff, res, drive, spread, fdbk, each with CV) | outputs
 //  y 108..120   wavetable dots
+//  y 120..128.5 play mode (MORPH | POLY); in POLY the selected marker's envelope; in GRAIN its SPREAD
 
 namespace layout {
 
@@ -168,6 +169,25 @@ static const float ARTOUT_LR_LABEL_Y = 115.5f;
 // Bottom: wavetable dots
 static const Vec DOTS_POS = Vec(6.f, 108.f);
 static const Vec DOTS_SIZE = Vec(170.88f, 12.f);
+
+// Strip under the wavetable dots: play mode, then the selected marker's ADSR. Labels sit left of their trimpots.
+static const float ADSR_Y = 124.3f;
+static const float PLAY_MODE_LABEL_X = 15.5f;
+static const Vec PLAY_MODE_BUTTON = Vec(27.f, ADSR_Y);
+static const Vec PLAY_MODE_BUTTON_SIZE = Vec(14.f, 5.f);
+static const Vec ADSR_BOX_POS = Vec(36.f, 120.6f);
+static const Vec ADSR_BOX_SIZE = Vec(88.f, 7.4f);
+// Attack, decay, sustain, hold (note length), release
+static const float ADSR_KNOB_X[5] = {43.f, 55.f, 67.f, 79.f, 91.f};
+static const float ADSR_LABEL_DX = 4.7f;
+static const Vec ADSR_SCREEN_POS = Vec(97.f, 121.5f);
+static const Vec ADSR_SCREEN_SIZE = Vec(25.f, 5.6f);
+
+// SPREAD (GRAIN only) in the same strip, right of the envelope
+static const Vec SPREAD_BOX_POS = Vec(126.f, 120.6f);
+static const Vec SPREAD_BOX_SIZE = Vec(21.f, 7.4f);
+static const float SPREAD_LABEL_X = 132.f;
+static const Vec SPREAD_KNOB = Vec(142.f, ADSR_Y);
 
 // Pastel, blue through purple to red.
 static const NVGcolor MARKER_COLORS[5] = {

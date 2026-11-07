@@ -18,8 +18,9 @@
 // clouds with equal-power weights, exactly like the wavetable morph, so clouds keep their own SIZE,
 // DENSITY, pitch, filter and gain.
 //
-// Per cloud: grain scheduler -> grains (windowed, cubic reads of the sample, pan, pitch) -> stereo bus ->
-// stereo multimode filter -> GAIN -> position weight. The sum goes through the master filter and the
+// Per cloud: grain scheduler -> grains (windowed, cubic reads of the sample, SPREAD's random pan, pitch) -> stereo
+// bus -> stereo multimode filter -> GAIN -> position weight -> PAN (equal power, unity at center, the same as the
+// wavetable engine; on a stereo sample it works as a balance). The sum goes through the master filter and the
 // safety limiter (same blocks as the wavetable engine); each cloud can also have its own output.
 //
 // Timing (the part that makes it musical):
@@ -31,6 +32,10 @@
 // - Random scatter (SPRAY, pitch, pan, direction) restarts from the same seed at the start of every loop
 //   cycle while synced, so the random pattern repeats like a loop instead of drifting (SEEDED).
 // - Pitch belongs to each cloud: V/OCT (0 V = original speed at C4's default), PITCH, FINE, scatter.
+//
+// POLY play mode (GrainInput::poly): a cloud's weight is its marker's ADSR level instead of its position share
+// (see PolyVoices.hpp). A note from silence starts the cloud as if it had been running (all its overlapping
+// grains at once, each part way through), so a short attack is heard at once and the level does not dip.
 //
 // Click prevention: every grain has a >= 1.3 ms smooth edge and is placed so it fits inside the sample (a
 // live pitch change that still reaches an end fades out there); clouds fade in and out with their weight
@@ -259,6 +264,8 @@ struct GrainMarkerInput {
 	bool dotted = false;
 	/** SPREAD knob 0..1: random pan scatter */
 	float spread = 0.f;
+	/** Where the whole cloud sits, -1 (left) .. 1 (right) */
+	float pan = 0.f;
 	/** P.SPRD knob 0..1 */
 	float pitchScatter = 0.f;
 	/** SCAN knob -1..1 */
@@ -290,6 +297,12 @@ struct GrainInput {
 	bool seeded = true;
 	bool holdSilent = false;
 	bool wantDirect[NUM_MARKERS] = {};
+	/** POLY play mode: each cloud follows voiceEnv instead of the position crossfade */
+	bool poly = false;
+	/** Level of each marker's ADSR, 0..1 */
+	float voiceEnv[NUM_MARKERS] = {};
+	/** The marker started a new note on this sample */
+	bool voiceStart[NUM_MARKERS] = {};
 
 	// Master section: same as EngineInput
 	int masterMode = -1;
@@ -325,9 +338,15 @@ public:
 		const int N = WINDOW_POINTS;
 		for (int s = 0; s < NUM_GRAIN_WINDOWS; s++) {
 			double sum = 0.0;
+			windowPeak[s] = 0.f;
+			float highest = -1.f;
 			for (int i = 0; i <= N; i++) {
 				window[s][i] = grainWindowValue(s, (float) i / N);
 				sum += (double) window[s][i] * window[s][i];
+				if (window[s][i] > highest) {
+					highest = window[s][i];
+					windowPeak[s] = (float) i / N;
+				}
 			}
 			meanSquare[s] = (float) (sum / (N + 1));
 		}
@@ -411,12 +430,13 @@ public:
 		const SampleBuffer* S = (in.bank && in.bank->sample.valid()) ? &in.bank->sample : nullptr;
 
 		// Bank swap: fade out, clear while silent, apply.
-		bool changed = !bankApplied || in.bank != appliedBank;
+		bool changed = !bankApplied || in.bank != appliedBank || in.poly != polyApplied;
 		bool wantSilent = in.holdSilent || changed || !S;
 		gain = wantSilent ? std::max(0.f, gain - fadeStep) : std::min(1.f, gain + fadeStep);
 		if (changed && gain <= 0.f) {
 			appliedBank = in.bank; // identity only: it may already be freed, never read it
 			bankApplied = true;
+			polyApplied = in.poly;
 			clearGrains();
 			for (int m = 0; m < NUM_MARKERS; m++)
 				resetCloud(m);
@@ -479,6 +499,10 @@ public:
 		tw[b] += std::sqrt(w);
 		if (a == b)
 			tw[a] = 1.f;
+		if (polyApplied) {
+			for (int m = 0; m < NUM_MARKERS; m++)
+				heard[m] = tw[m] = std::min(std::max(in.voiceEnv[m], 0.f), 1.f);
+		}
 
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			float t = in.wantDirect[m] ? 0.f : 1.f;
@@ -490,12 +514,28 @@ public:
 		if (S && gain > 0.f) {
 			for (int m = 0; m < NUM_MARKERS; m++) {
 				Cloud& c = clouds[m];
-				c.w += (tw[m] - c.w) * smoothCoef;
+				if (polyApplied) {
+					if (in.voiceStart[m]) {
+						c.triggerFire = true;
+						c.triggerFromSilence = c.w < 1e-4f;
+						// Grains left over from the last note are silent now and must stay that way. Its place is
+						// the one as of now: a CV can change on the very sample a gate starts the note.
+						if (c.triggerFromSilence) {
+							clearCloudGrains(m);
+							c.panS = std::min(std::max(in.markers[m].pan, -1.f), 1.f);
+						}
+					}
+					c.w = tw[m]; // the ADSR is already smooth, and a smoother would hide a short attack
+				}
+				else {
+					c.w += (tw[m] - c.w) * smoothCoef;
+				}
 				float gT = std::min(std::max(in.markers[m].gain, 0.f), (float) MAX_GAIN);
 				c.gainS += (gT - c.gainS) * smoothCoef;
 				bool wanted = (tw[m] > 0.f || c.w > 1e-3f) && gT > 1e-4f;
 				if (!wanted) {
 					c.running = false;
+					c.triggerFire = false;
 					// Not scheduled (the playhead is elsewhere): the map still shows its bullet at START.
 					c.shownRead = std::min(std::max(in.markers[m].start, 0.f), 1.f);
 					continue;
@@ -545,6 +585,11 @@ public:
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			Cloud& c = clouds[m];
 			const GrainMarkerInput& M = in.markers[m];
+			// A silent cloud goes straight to its place, so a new note does not begin with a slide. This runs
+			// even for a cloud idle long enough to skip the block below.
+			float panT = std::min(std::max(M.pan, -1.f), 1.f);
+			if (c.w < 1e-4f)
+				c.panS = panT;
 			bool live = c.running || c.active > 0;
 			if (live) {
 				c.idle = 0;
@@ -585,6 +630,12 @@ public:
 				}
 				yl *= c.gainS * c.w;
 				yr *= c.gainS * c.w;
+				c.panS += (panT - c.panS) * smoothCoef;
+				if (c.panS != 0.f) {
+					float angle = (c.panS + 1.f) * M_PI_4_F;
+					yl *= std::cos(angle) * SQRT2;
+					yr *= std::sin(angle) * SQRT2;
+				}
 			}
 			else if (c.idle == IDLE_RESET) {
 				c.svfL.reset();
@@ -637,6 +688,8 @@ private:
 	static const int WINDOW_POINTS = 1024;
 	static const int EDGE = 64;
 	static const int MIN_LENGTH = 128;
+	/** Most grains started at once when a note starts */
+	static const int MAX_NOTE_GRAINS = 16;
 	/** Frames (of the grain's level) over which a grain fades when it reaches an end of the sample */
 	static constexpr float END_FADE = 32.f;
 	/** Frames of level 0 kept free at the end when placing a grain (covers the sub-sample start delay) */
@@ -673,6 +726,7 @@ private:
 		int idle = IDLE_RESET + 1;
 		float w = 0.f;
 		float gainS = 1.f;
+		float panS = 0.f;
 		float cutS = 1.f;
 		float resS = 0.f;
 		float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
@@ -689,6 +743,9 @@ private:
 		long lastCycle = LONG_MIN;
 		uint32_t rng = 1u;
 		float shownRead = 0.f;
+		/** POLY: a note started; schedule() takes it on this cloud's next turn */
+		bool triggerFire = false;
+		bool triggerFromSilence = false;
 		/** The grain started last (it may have ended since) */
 		int lastGrain = -1;
 		float smearWet = 0.f;
@@ -702,6 +759,14 @@ private:
 			clouds[m].active = 0;
 	}
 
+	void clearCloudGrains(int m) {
+		for (int g = 0; g < MAX_GRAINS; g++) {
+			if (grains[g].marker == m)
+				grains[g].active = false;
+		}
+		clouds[m].active = 0;
+	}
+
 	void resetCloud(int m) {
 		Cloud& c = clouds[m];
 		c.running = false;
@@ -710,6 +775,7 @@ private:
 		c.scanAccum = 0.0;
 		c.lastCycle = LONG_MIN;
 		c.lastGrain = -1;
+		c.triggerFire = false;
 		c.idle = IDLE_RESET + 1;
 		c.w = 0.f;
 		c.svfL.reset();
@@ -748,6 +814,11 @@ private:
 		bool scanning = grainScanActive(scan);
 		float loopBeats = grainLoopBeats(scan);
 		double srcStep = (double) S.sampleRate / sampleRate;
+		// POLY: a new note reads from START again (a synced scan stays locked to the beat).
+		bool startNote = c.triggerFire && c.triggerFromSilence;
+		if (c.triggerFire && !(sync && scanning))
+			c.scanAccum = 0.0;
+		c.triggerFire = false;
 
 		if (!wasRunning) {
 			c.syncState = -1;
@@ -830,6 +901,15 @@ private:
 			grainsPerSecond = hz;
 			sizeSeconds = grainSizeFreeSeconds(M.size);
 		}
+		if (startNote) {
+			// Now, not on the next grid point. The grid carries on as usual afterwards.
+			fire = true;
+			delay = 0.0;
+			if (sync)
+				gridBeat = gclock.beatPos;
+			else
+				c.gph = 0.0;
+		}
 		if (!fire || c.active >= MAX_PER_CLOUD)
 			return;
 		if (sync && scanning) {
@@ -840,6 +920,10 @@ private:
 			offset = (scan < 0.f ? 1.0 - ph : ph) * sliceLen;
 		}
 
+		// One grain, or all the ones a running cloud would have sounding when a note starts.
+		int grainCount = 1;
+		double noteSpacing = 0.0;
+		for (int k = 0; k < grainCount && c.active < MAX_PER_CLOUD; k++) {
 		// Find a free voice
 		Grain* g = nullptr;
 		for (int i = 0; i < MAX_GRAINS; i++) {
@@ -854,7 +938,7 @@ private:
 		// Seeded: the random numbers depend only on the grain's place in the loop cycle (its index modulo
 		// the grains per cycle), so the pattern repeats every cycle whatever the floating point rounding
 		// of the beat position. (Not seeded, or not synced: the sequence just continues.)
-		if (sync && in.seeded) {
+		if (sync && in.seeded && k == 0) {
 			double cycleBeats = scanning ? loopBeats : IDLE_CYCLE_BEATS;
 			long perCycle = std::max(1L, std::lround(cycleBeats / SYNC_DIVISIONS[lfoDivision(M.density, M.triplet, M.dotted)].beats));
 			long j = ((c.lastN % perCycle) + perCycle) % perCycle;
@@ -887,7 +971,7 @@ private:
 		double maxStart = std::max(usable - (double) len * stepNow, 0.0);
 		startF = std::min(startF, maxStart);
 		double correlation = 0.0;
-		if (smear && grainsPerSecond <= SMEAR_ALIGN_MAX_HZ)
+		if (smear && grainsPerSecond <= SMEAR_ALIGN_MAX_HZ && k == 0)
 			startF = matchedStart(c, m, S, startF, maxStart, (double) len * stepNow, reverse, stepLevel0, &correlation);
 		g->active = true;
 		g->marker = m;
@@ -895,10 +979,29 @@ private:
 		g->len = len;
 		g->age = 0;
 		g->window = std::min(std::max(M.window, 0), NUM_GRAIN_WINDOWS - 1);
+		double overlapNow = grainsPerSecond * (len / sampleRate);
+		if (startNote && k == 0 && overlapNow >= 1.0) {
+			grainCount = std::min((int) std::ceil(overlapNow - 1e-6), MAX_NOTE_GRAINS);
+			noteSpacing = (double) len / grainCount;
+			if (grainCount < MAX_NOTE_GRAINS)
+				noteSpacing = sampleRate / grainsPerSecond;
+		}
+		// Sparse grains leave gaps anyway: the first one starts at its window's peak, or a long grain would
+		// hide the attack. Overlapping ones start part way through, as they would be in a running cloud.
+		int startAge = 0;
+		if (startNote && overlapNow < 1.0)
+			startAge = (int) (windowPeak[g->window] * len);
+		else if (startNote)
+			startAge = (int) (k * noteSpacing);
+		g->age = std::min(startAge, std::max(len - 1, 0));
+		// Smear keeps every grain of the note on one read position, so they add up instead of cancelling.
+		bool readAhead = startNote && overlapNow >= 1.0 && !smear;
+		if (startNote && smear && grainCount > 1)
+			correlation = 1.0;
 		g->inc = (reverse ? -1.0 : 1.0) * stepLevel0 * scale;
 		double span = (double) len * stepLevel0 * c.liveMul; // frames of level 0 the grain covers
 		double p0 = reverse ? startF + span : startF;
-		g->pos = p0 * scale + g->inc * c.liveMul * delay;
+		g->pos = p0 * scale + g->inc * c.liveMul * (delay + (readAhead ? (double) g->age : 0.0));
 		float pan = std::min(std::max(rPan * std::min(std::max(M.spread, 0.f), 1.f), -1.f), 1.f);
 		float angle = (pan + 1.f) * M_PI_4_F;
 		g->gl = std::cos(angle) * SQRT2;
@@ -925,6 +1028,7 @@ private:
 		ev.pos = (float) (startF / (double) S.frames);
 		ev.seconds = (float) len / sampleRate;
 		eventsWritten++;
+		}
 	}
 
 	/** Mono value of a level at a frame (the caller keeps the frame in range) */
@@ -1080,6 +1184,9 @@ private:
 	Cloud clouds[NUM_MARKERS];
 	float window[NUM_GRAIN_WINDOWS][WINDOW_POINTS + 1] = {};
 	float meanSquare[NUM_GRAIN_WINDOWS] = {};
+	/** Where each window is highest, 0..1 through the grain */
+	float windowPeak[NUM_GRAIN_WINDOWS] = {};
+	bool polyApplied = false;
 	float heard[NUM_MARKERS] = {1.f, 0.f, 0.f, 0.f, 0.f};
 	float mainShare[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	float directL[NUM_MARKERS] = {};

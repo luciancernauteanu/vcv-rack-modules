@@ -3,10 +3,12 @@
 #include "Layout.hpp"
 #include "WaveArtifact.hpp"
 #include "WaveArtifactExpander.hpp"
+#include "widgets/AdsrScreen.hpp"
 #include "widgets/ArtifactColor.hpp"
 #include "widgets/WavetableMap.hpp"
 #include "widgets/GrainControls.hpp"
 #include "widgets/LfoControls.hpp"
+#include "widgets/LinkedKnob.hpp"
 #include "widgets/LfoWidgets.hpp"
 #include "widgets/MarkerBadge.hpp"
 #include "widgets/MarkerBar.hpp"
@@ -123,11 +125,20 @@ WaveArtifact::WaveArtifact() {
 				getParamQuantity(id + i)->randomizeEnabled = false;
 		}
 
+		// POLY: each marker's note. Defaults: 5 ms attack, 1 s at full level, 300 ms tail.
+		configParam(MARKER_ATTACK_PARAM + i, 0.f, 1.f, 0.18896f, name + " attack (POLY)", " s", wa::ADSR_ATTACK_RATIO, wa::ADSR_ATTACK_MIN);
+		configParam(MARKER_DECAY_PARAM + i, 0.f, 1.f, 0.48533f, name + " decay (POLY)", " s", wa::ADSR_FALL_RATIO, wa::ADSR_FALL_MIN);
+		configParam(MARKER_SUSTAIN_PARAM + i, 0.f, 1.f, 1.f, name + " sustain (POLY)", "%", 0.f, 100.f);
+		configParam(MARKER_RELEASE_PARAM + i, 0.f, 1.f, 0.53866f, name + " release (POLY)", " s", wa::ADSR_FALL_RATIO, wa::ADSR_FALL_MIN);
+		configParam<AdsrHoldQuantity>(MARKER_HOLD_PARAM + i, 0.f, 1.f, 0.66667f, name + " note length (POLY)");
+
 		// Randomizing these would shuffle the bar layout, not the sound.
 		getParamQuantity(MARKER_ACTIVE_PARAM + i)->randomizeEnabled = false;
 		getParamQuantity(MARKER_POS_PARAM + i)->randomizeEnabled = false;
 	}
 
+	configSwitch(PLAY_MODE_PARAM, 0.f, 1.f, 0.f, "Play mode", {"Morph (the playhead crossfades neighboring markers)", "Poly (the playhead starts each marker's own note)"});
+	getParamQuantity(PLAY_MODE_PARAM)->randomizeEnabled = false;
 	configSwitch(ENGINE_MODE_PARAM, 0.f, 1.f, 0.f, "Engine", {"Wavetable (WAVE)", "Granular (GRAIN)"});
 	getParamQuantity(ENGINE_MODE_PARAM)->randomizeEnabled = false;
 	configSwitch(GRAIN_SEEDED_PARAM, 0.f, 1.f, 1.f, "Grain scatter repeats every loop cycle while synced", {"Off (continuous random)", "On (seeded)"});
@@ -294,6 +305,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		out->linked = true;
 		out->reset = reset;
 		out->granular = engineApplied == 1;
+		out->poly = params[PLAY_MODE_PARAM].getValue() > 0.5f;
 		right->leftExpander.requestMessageFlip();
 	}
 	auto modOf = [&](int marker, int target) {
@@ -338,20 +350,59 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	// Position: knob + CV (kept in range), then the position LFO sweeps +-amount/2 around it (100% =
 	// the whole bar). The center is held back from the ends so the whole swing fits.
 	float position = clamp(params[POSITION_PARAM].getValue() + params[POS_ATTEN_PARAM].getValue() * inputs[POS_INPUT].getVoltage() / 10.f, 0.f, 1.f);
+	// POLY listens to the LFO before its SMOOTH: a saw's reset is then one jump that starts one marker, not
+	// a fast sweep that starts them all. (No click to smooth away here: the notes have their own ADSR.)
+	float triggerPosition = position;
 	{
 		int shape = (int) std::round(params[POS_LFO_SHAPE_PARAM].getValue());
 		bool sync = params[POS_LFO_SYNC_PARAM].getValue() > 0.5f;
 		bool triplets = params[POS_LFO_TRIPLET_PARAM].getValue() > 0.5f;
 		bool dotted = params[POS_LFO_DOTTED_PARAM].getValue() > 0.5f;
-		float lfo = posLfo.process(shape, sync, params[POS_LFO_RATE_PARAM].getValue(), triplets, dotted, clock, args.sampleTime);
+		float rawLfo = posLfo.process(shape, sync, params[POS_LFO_RATE_PARAM].getValue(), triplets, dotted, clock, args.sampleTime);
+		float lfo = rawLfo;
 		// SMOOTH acts on the LFO alone (knob and CV stay fast): a saw / square edge would otherwise
 		// throw the playhead across the markers in a few ms, which is heard as a click.
 		lfo = posLfoSmoother.process(lfo, wa::MIN_WAVE_SMOOTH * std::exp(params[POS_LFO_SMOOTH_PARAM].getValue() * LN_100), args.sampleTime);
 		float amt = params[POS_LFO_AMT_PARAM].getValue();
-		if (amt > 0.f)
+		if (amt > 0.f) {
+			triggerPosition = wa::lfoCentered(position, amt, rawLfo);
 			position = wa::lfoCentered(position, amt, lfo);
+		}
 	}
 	in.position = position;
+	// POLY: which markers the playhead starts, and each one's ADSR. Leaving POLY keeps the last levels while
+	// the engine fades out, so nothing is cut off.
+	bool polyWanted = params[PLAY_MODE_PARAM].getValue() > 0.5f;
+	if (polyWanted) {
+		if (!polyRunning)
+			voices.reset();
+		float markerPos[NUM_MARKERS];
+		bool markerOn[NUM_MARKERS];
+		wa::AdsrSettings adsr[NUM_MARKERS];
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			markerPos[i] = in.markers[i].pos;
+			markerOn[i] = in.markers[i].active;
+			adsr[i].attack = wa::adsrAttackSeconds(params[MARKER_ATTACK_PARAM + i].getValue());
+			adsr[i].decay = wa::adsrFallSeconds(params[MARKER_DECAY_PARAM + i].getValue());
+			adsr[i].sustain = params[MARKER_SUSTAIN_PARAM + i].getValue();
+			adsr[i].release = wa::adsrFallSeconds(params[MARKER_RELEASE_PARAM + i].getValue());
+			adsr[i].hold = wa::adsrHoldSeconds(params[MARKER_HOLD_PARAM + i].getValue());
+		}
+		// Expander GATEs and a press on a slot play markers directly.
+		wa::VoiceGates direct;
+		int pressed = pressedMarker.load(std::memory_order_relaxed);
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			direct.patched[i] = mod->gatePatched[i];
+			direct.high[i] = mod->gateHigh[i] || pressed == i;
+		}
+		voices.process(markerPos, markerOn, triggerPosition, adsr, args.sampleTime, &direct);
+	}
+	polyRunning = polyWanted;
+	in.poly = polyWanted;
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		in.voiceEnv[i] = voices.env[i];
+		in.voiceStart[i] = polyWanted && voices.start[i];
+	}
 	in.voct = params[FREQ_PARAM].getValue() + inputs[VOCT_INPUT].getVoltage();
 	in.bank = activeBank.load(std::memory_order_relaxed);
 	// STOP uses the same click-free fade as a bank swap (main, artifact outputs and preview).
@@ -395,18 +446,20 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			g.pos = wm.pos;
 			// START is the marker's WAVE value (plus the expander's WAVE CV), folded at the ends
 			g.start = wa::fold01(wm.wave);
-			g.density = params[MARKER_GRAIN_DENSITY_PARAM + i].getValue();
+			// The expander's FINE input is DENSITY here: 0..10 V at AMT 100% adds 0..1 of the knob. (SCAN has no
+			// CV: changing its speed or loop length makes the read position jump. START is for moving by CV.)
+			g.density = clamp(params[MARKER_GRAIN_DENSITY_PARAM + i].getValue() + 0.5f * modOf(i, wa::MOD_FINE), 0.f, 1.f);
 			g.size = params[MARKER_GRAIN_SIZE_PARAM + i].getValue();
 			g.spray = params[MARKER_GRAIN_SPRAY_PARAM + i].getValue();
 			g.window = clamp((int) std::round(params[MARKER_GRAIN_WINDOW_PARAM + i].getValue()), 0, wa::NUM_GRAIN_WINDOWS - 1);
 			g.sync = params[MARKER_GRAIN_SYNC_PARAM + i].getValue() > 0.5f;
 			g.triplet = params[MARKER_GRAIN_TRIPLET_PARAM + i].getValue() > 0.5f;
 			g.dotted = params[MARKER_GRAIN_DOTTED_PARAM + i].getValue() > 0.5f;
-			// The expander's DRIVE, FINE and PAN inputs drive P.SPRD, SCAN and SPREAD while granular.
-			// Like START, 0..10 V at AMT 100% moves SCAN and SPREAD by 0..1 of the knob's value.
+			// The expander's DRIVE input drives P.SPRD while granular. PAN is PAN on both engines.
 			g.pitchScatter = clamp(params[MARKER_GRAIN_PSCATTER_PARAM + i].getValue() + modOf(i, wa::MOD_DRIVE), 0.f, 1.f);
-			g.scan = clamp(params[MARKER_GRAIN_SCAN_PARAM + i].getValue() + 0.5f * modOf(i, wa::MOD_FINE), -1.f, 1.f);
-			g.spread = clamp(params[MARKER_GRAIN_SPREAD_PARAM + i].getValue() + 0.5f * modOf(i, wa::MOD_PAN), 0.f, 1.f);
+			g.scan = params[MARKER_GRAIN_SCAN_PARAM + i].getValue();
+			g.spread = params[MARKER_GRAIN_SPREAD_PARAM + i].getValue();
+			g.pan = wm.pan;
 			g.direction = clamp((int) std::round(params[MARKER_GRAIN_DIR_PARAM + i].getValue()), 0, wa::NUM_GRAIN_DIRECTIONS - 1);
 			g.cutoff = wm.cutoff;
 			g.filterMode = wm.filterMode;
@@ -422,8 +475,12 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		gin.reset = reset;
 		gin.seeded = params[GRAIN_SEEDED_PARAM].getValue() > 0.5f;
 		gin.holdSilent = in.holdSilent;
-		for (int i = 0; i < NUM_MARKERS; i++)
+		gin.poly = in.poly;
+		for (int i = 0; i < NUM_MARKERS; i++) {
 			gin.wantDirect[i] = in.wantDirect[i];
+			gin.voiceEnv[i] = in.voiceEnv[i];
+			gin.voiceStart[i] = in.voiceStart[i];
+		}
 		gin.masterMode = in.masterMode;
 		gin.masterCutoff = in.masterCutoff;
 		gin.masterRes = in.masterRes;
@@ -678,7 +735,8 @@ static void resetMarkerSettings(WaveArtifact* m, int i) {
 			WaveArtifact::MARKER_LFO_SHAPE_PARAM,
 			WaveArtifact::MARKER_GAIN_PARAM, WaveArtifact::MARKER_CUTOFF_PARAM, WaveArtifact::MARKER_RES_PARAM,
 			WaveArtifact::MARKER_FILTER_MODE_PARAM, WaveArtifact::MARKER_DRIVE_PARAM,
-			WaveArtifact::MARKER_PITCH_PARAM, WaveArtifact::MARKER_PITCH_FREE_PARAM, WaveArtifact::MARKER_FINE_PARAM, WaveArtifact::MARKER_PAN_PARAM})
+			WaveArtifact::MARKER_PITCH_PARAM, WaveArtifact::MARKER_PITCH_FREE_PARAM, WaveArtifact::MARKER_FINE_PARAM, WaveArtifact::MARKER_PAN_PARAM,
+			WaveArtifact::MARKER_ATTACK_PARAM, WaveArtifact::MARKER_DECAY_PARAM, WaveArtifact::MARKER_SUSTAIN_PARAM, WaveArtifact::MARKER_HOLD_PARAM, WaveArtifact::MARKER_RELEASE_PARAM})
 		m->params[id + i].setValue(m->getParamQuantity(id + i)->getDefaultValue());
 }
 
@@ -782,7 +840,90 @@ const int WaveArtifact::MARKER_SETTING_PARAMS[WaveArtifact::NUM_MARKER_SETTINGS]
 	MARKER_GRAIN_DENSITY_PARAM, MARKER_GRAIN_SIZE_PARAM, MARKER_GRAIN_SPRAY_PARAM, MARKER_GRAIN_WINDOW_PARAM,
 	MARKER_GRAIN_SYNC_PARAM, MARKER_GRAIN_TRIPLET_PARAM, MARKER_GRAIN_DOTTED_PARAM,
 	MARKER_GRAIN_SPREAD_PARAM, MARKER_GRAIN_PSCATTER_PARAM, MARKER_GRAIN_SCAN_PARAM, MARKER_GRAIN_DIR_PARAM,
+	MARKER_ATTACK_PARAM, MARKER_DECAY_PARAM, MARKER_SUSTAIN_PARAM, MARKER_HOLD_PARAM, MARKER_RELEASE_PARAM,
 };
+
+const int WaveArtifact::MARKER_ENVELOPE_PARAMS[WaveArtifact::NUM_ENVELOPE_PARAMS] = {
+	MARKER_ATTACK_PARAM, MARKER_DECAY_PARAM, MARKER_SUSTAIN_PARAM, MARKER_HOLD_PARAM, MARKER_RELEASE_PARAM,
+};
+
+/** Settings that are a choice, not an amount: moving "by the same amount" means nothing for these. */
+static bool isChoiceSetting(int id) {
+	for (int choice : {WaveArtifact::MARKER_FILTER_MODE_PARAM, WaveArtifact::MARKER_LFO_SHAPE_PARAM, WaveArtifact::MARKER_LFO_SYNC_PARAM,
+			WaveArtifact::MARKER_LFO_TRIPLET_PARAM, WaveArtifact::MARKER_LFO_DOTTED_PARAM, WaveArtifact::MARKER_PITCH_FREE_PARAM,
+			WaveArtifact::MARKER_GRAIN_WINDOW_PARAM, WaveArtifact::MARKER_GRAIN_SYNC_PARAM, WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM,
+			WaveArtifact::MARKER_GRAIN_DOTTED_PARAM, WaveArtifact::MARKER_GRAIN_DIR_PARAM}) {
+		if (id == choice)
+			return true;
+	}
+	return false;
+}
+
+bool WaveArtifact::linkStep(int paramId, bool dragging) {
+	int sel = selectedMarker;
+	bool sameMarker = sel == linkSelected;
+	int k = -1;
+	if (sameMarker && paramId >= 0) {
+		for (int s = 0; s < NUM_MARKER_SETTINGS; s++) {
+			if (MARKER_SETTING_PARAMS[s] + sel == paramId)
+				k = s;
+		}
+	}
+	bool ended = false;
+	// A move ends when the mouse lets go or leaves that control, or Shift is released. Finished before a new
+	// one can begin on the same frame.
+	if (linkSetting >= 0 && (k != linkSetting || !dragging))
+		ended = true;
+	if (k >= 0 && !ended) {
+		int base = MARKER_SETTING_PARAMS[k];
+		float own = params[base + sel].getValue();
+		float value = own + linkBeyond;
+		if (value != linkLast[k]) {
+			if (linkSetting != k) {
+				linkSetting = k;
+				linkMarker = sel;
+				linkBaseValue = linkLast[k];
+				for (int m = 0; m < NUM_MARKERS; m++)
+					linkBase[m] = params[base + m].getValue();
+				linkBase[sel] = linkLast[k];
+			}
+			// Past the knob's own limit there is only something to do until every other marker is at theirs.
+			float most = 0.f;
+			for (int m = 0; m < NUM_MARKERS; m++) {
+				if (m == sel || !isMarkerActive(m))
+					continue;
+				ParamQuantity* q = getParamQuantity(base + m);
+				float limit = (linkBeyond > 0.f) ? q->getMaxValue() : q->getMinValue();
+				float need = limit - linkBase[m] - own + linkBaseValue;
+				most = (linkBeyond > 0.f) ? std::max(most, need) : std::min(most, need);
+			}
+			linkBeyond = (linkBeyond > 0.f) ? std::min(linkBeyond, most) : std::max(linkBeyond, most);
+			value = own + linkBeyond;
+			for (int m = 0; m < NUM_MARKERS; m++) {
+				if (m == sel || !isMarkerActive(m))
+					continue;
+				ParamQuantity* q = getParamQuantity(base + m);
+				float v = isChoiceSetting(base) ? value : clamp(linkBase[m] + value - linkBaseValue, q->getMinValue(), q->getMaxValue());
+				params[base + m].setValue(v);
+			}
+			// A single click or scroll step: done on this frame.
+			ended = !dragging;
+		}
+	}
+	for (int s = 0; s < NUM_MARKER_SETTINGS; s++)
+		linkLast[s] = params[MARKER_SETTING_PARAMS[s] + sel].getValue();
+	if (linkSetting >= 0 && !ended)
+		linkLast[linkSetting] += linkBeyond;
+	if (linkSetting < 0 && k < 0)
+		linkBeyond = 0.f;
+	linkSelected = sel;
+	return ended;
+}
+
+void WaveArtifact::linkFinish() {
+	linkSetting = -1;
+	linkBeyond = 0.f;
+}
 
 void WaveArtifact::copyMarker(int i) {
 	for (int k = 0; k < NUM_MARKER_SETTINGS; k++)
@@ -899,10 +1040,14 @@ struct StopBullet : LitToggle {
 
 struct WaveArtifactWidget : ModuleWidget {
 	/** Per-marker controls at the same panel spots: shared ones, the wavetable engine's and the granular engine's */
-	static const int EDIT_KNOBS = 27;
+	static const int EDIT_KNOBS = 32;
 	ParamWidget* editKnobs[WaveArtifact::NUM_MARKERS][EDIT_KNOBS] = {};
 	/** 0 = both engines, 1 = wavetable only, 2 = granular only */
 	int editKnobEngine[EDIT_KNOBS] = {};
+	/** Shown only in POLY: the envelope, with its labels and screen */
+	bool editKnobPoly[EDIT_KNOBS] = {};
+	PanelLabels* envelopeLabels = nullptr;
+	widget::Widget* envelopeScreen = nullptr;
 
 	WaveArtifactWidget(WaveArtifact* module) {
 		using namespace layout;
@@ -928,7 +1073,8 @@ struct WaveArtifactWidget : ModuleWidget {
 		labels->add(Vec(CUTOFF_KNOB.x, ROW1_LABEL_Y), "CUTOFF");
 		labels->addModal(Vec(DRIVE_KNOB.x, ROW1_LABEL_Y), "DRIVE", "P.SPRD");
 		labels->add(Vec(PITCH_KNOB.x, ROW1_LABEL_Y), "PITCH");
-		labels->addModal(Vec(PAN_KNOB.x, ROW2_LABEL_Y), "PAN", "SPREAD", 6.f);
+		labels->add(Vec(PAN_KNOB.x, ROW2_LABEL_Y), "PAN", 6.f);
+		labels->addModal(Vec(SPREAD_LABEL_X, ADSR_Y), "", "SPREAD", 6.f);
 		// Row 2
 		labels->addModal(Vec(LFO_SHAPE_SCREEN.x, ROW1_LABEL_Y), "LFO SHAPE", "WINDOW", 6.f);
 		labels->addModal(Vec(LFO_RATE_KNOB.x, ROW1_LABEL_Y), "RATE", "SIZE", 6.f);
@@ -963,7 +1109,16 @@ struct WaveArtifactWidget : ModuleWidget {
 		labels->add(Vec(ARTOUT_BOX_POS.x + ARTOUT_BOX_SIZE.x / 2.f, ARTOUT_HEADER_Y), "ARTIFACT OUT", 5.f, true);
 		labels->add(Vec(ARTOUT_L_X, ARTOUT_LR_LABEL_Y), "L", 6.f, true);
 		labels->add(Vec(ARTOUT_R_X, ARTOUT_LR_LABEL_Y), "R", 6.f, true);
+		// ADSR strip
+		labels->add(Vec(PLAY_MODE_LABEL_X, ADSR_Y), "PLAY", 6.f);
 		addChild(labels);
+		envelopeLabels = createWidget<PanelLabels>(Vec(0, 0));
+		envelopeLabels->box.size = box.size;
+		const char* adsrNames[5] = {"A", "D", "S", "H", "R"};
+		for (int k = 0; k < 5; k++)
+			envelopeLabels->add(Vec(ADSR_KNOB_X[k] - ADSR_LABEL_DX, ADSR_Y), adsrNames[k], 6.f);
+		envelopeLabels->setVisible(false);
+		addChild(envelopeLabels);
 
 		// Per-artifact sections outlined in the selected artifact's color (global controls are not).
 		ArtifactSections* sections = createWidget<ArtifactSections>(Vec(0, 0));
@@ -995,45 +1150,65 @@ struct WaveArtifactWidget : ModuleWidget {
 				editKnobEngine[k] = engine;
 				editKnobs[i][k++] = w;
 				addParam(w);
-				w->setVisible(i == 0 && engine != 2);
+				w->setVisible(i == 0 && engine != 2 && !editKnobPoly[k - 1]);
 			};
 			const int W = 1, G = 2;
-			add(withArc(createParamCentered<RoundBlackKnob>(mm2px(WAVE_KNOB), module, WaveArtifact::MARKER_WAVE_PARAM + i), MARKER_COLORS[i]));
-			add(withArc(createLfoRateKnob<LfoRateKnobT<Trimpot>>(LFO_RATE_KNOB, module, WaveArtifact::MARKER_LFO_RATE_PARAM + i,
+			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(WAVE_KNOB), module, WaveArtifact::MARKER_WAVE_PARAM + i), MARKER_COLORS[i]));
+			add(withArc(createLfoRateKnob<LinkedKnob<LfoRateKnobT<Trimpot>>>(LFO_RATE_KNOB, module, WaveArtifact::MARKER_LFO_RATE_PARAM + i,
 				WaveArtifact::MARKER_LFO_SYNC_PARAM + i, WaveArtifact::MARKER_LFO_TRIPLET_PARAM + i,
 				WaveArtifact::MARKER_LFO_DOTTED_PARAM + i, WaveArtifact::MARKER_LFO_AMT_PARAM + i), MARKER_COLORS[i]), W);
-			add(withArc(createParamCentered<Trimpot>(mm2px(LFO_AMT_KNOB), module, WaveArtifact::MARKER_LFO_AMT_PARAM + i), MARKER_COLORS[i]), W);
+			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(LFO_AMT_KNOB), module, WaveArtifact::MARKER_LFO_AMT_PARAM + i), MARKER_COLORS[i]), W);
 			add(createLfoShapeScreen(LFO_SHAPE_SCREEN, LFO_SHAPE_SIZE, module, WaveArtifact::MARKER_LFO_SHAPE_PARAM + i, MARKER_COLORS[i]), W);
 			add(createLitToggle(LFO_SYNC_BUTTON, module, WaveArtifact::MARKER_LFO_SYNC_PARAM + i, "SYNC", MARKER_COLORS[i]), W);
 			add(createLitToggle(LFO_TRIP_BUTTON, module, WaveArtifact::MARKER_LFO_TRIPLET_PARAM + i, "T", MARKER_COLORS[i], LFO_TOGGLE_SMALL), W);
 			add(createLitToggle(LFO_DOT_BUTTON, module, WaveArtifact::MARKER_LFO_DOTTED_PARAM + i, "D", MARKER_COLORS[i], LFO_TOGGLE_SMALL), W);
-			add(withArc(createParamCentered<Trimpot>(mm2px(SMOOTH_KNOB), module, WaveArtifact::MARKER_SMOOTH_PARAM + i), MARKER_COLORS[i]), W);
-			add(withArc(createParamCentered<RoundBlackKnob>(mm2px(GAIN_KNOB), module, WaveArtifact::MARKER_GAIN_PARAM + i), MARKER_COLORS[i]));
-			add(withArc(createParamCentered<RoundBlackKnob>(mm2px(CUTOFF_KNOB), module, WaveArtifact::MARKER_CUTOFF_PARAM + i), MARKER_COLORS[i]));
-			add(withArc(createParamCentered<RoundBlackKnob>(mm2px(DRIVE_KNOB), module, WaveArtifact::MARKER_DRIVE_PARAM + i), MARKER_COLORS[i]), W);
-			add(withArc(createParamCentered<RoundSmallBlackKnob>(mm2px(RES_KNOB), module, WaveArtifact::MARKER_RES_PARAM + i), MARKER_COLORS[i]));
+			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(SMOOTH_KNOB), module, WaveArtifact::MARKER_SMOOTH_PARAM + i), MARKER_COLORS[i]), W);
+			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(GAIN_KNOB), module, WaveArtifact::MARKER_GAIN_PARAM + i), MARKER_COLORS[i]));
+			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(CUTOFF_KNOB), module, WaveArtifact::MARKER_CUTOFF_PARAM + i), MARKER_COLORS[i]));
+			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(DRIVE_KNOB), module, WaveArtifact::MARKER_DRIVE_PARAM + i), MARKER_COLORS[i]), W);
+			add(withArc(createParamCentered<LinkedKnob<RoundSmallBlackKnob>>(mm2px(RES_KNOB), module, WaveArtifact::MARKER_RES_PARAM + i), MARKER_COLORS[i]));
 			add(createModeButton(FILTER_MODE_BUTTON, module, WaveArtifact::MARKER_FILTER_MODE_PARAM + i, {"LP", "BP", "HP", "NOTCH"}, MARKER_COLORS[i]));
-			add(withArc(createParamCentered<RoundBlackKnob>(mm2px(PITCH_KNOB), module, WaveArtifact::MARKER_PITCH_PARAM + i), MARKER_COLORS[i], true));
-			add(withArc(createParamCentered<Trimpot>(mm2px(FINE_KNOB), module, WaveArtifact::MARKER_FINE_PARAM + i), MARKER_COLORS[i], true), W);
+			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(PITCH_KNOB), module, WaveArtifact::MARKER_PITCH_PARAM + i), MARKER_COLORS[i], true));
+			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(FINE_KNOB), module, WaveArtifact::MARKER_FINE_PARAM + i), MARKER_COLORS[i], true), W);
 			add(createLitToggle(PITCH_FREE_BUTTON, module, WaveArtifact::MARKER_PITCH_FREE_PARAM + i, "FREE", MARKER_COLORS[i]));
-			add(withArc(createParamCentered<RoundSmallBlackKnob>(mm2px(PAN_KNOB), module, WaveArtifact::MARKER_PAN_PARAM + i), MARKER_COLORS[i], true), W);
+			add(withArc(createParamCentered<LinkedKnob<RoundSmallBlackKnob>>(mm2px(PAN_KNOB), module, WaveArtifact::MARKER_PAN_PARAM + i), MARKER_COLORS[i], true));
 
 			// Granular engine: its own controls at the spots of the wavetable-only ones
-			// (SMOOTH -> DENSITY, RATE -> SIZE, AMT -> SPRAY, LFO SHAPE -> WINDOW, SYNC / T / D, DRIVE -> P.SPRD, FINE -> SCAN, PAN -> SPREAD).
-			add(withArc(createLfoRateKnob<LfoRateKnobT<Trimpot>>(SMOOTH_KNOB, module, WaveArtifact::MARKER_GRAIN_DENSITY_PARAM + i,
+			// (SMOOTH -> DENSITY, RATE -> SIZE, AMT -> SPRAY, LFO SHAPE -> WINDOW, SYNC / T / D, DRIVE -> P.SPRD, FINE -> SCAN). SPREAD has its own spot in the bottom strip.
+			add(withArc(createLfoRateKnob<LinkedKnob<LfoRateKnobT<Trimpot>>>(SMOOTH_KNOB, module, WaveArtifact::MARKER_GRAIN_DENSITY_PARAM + i,
 				WaveArtifact::MARKER_GRAIN_SYNC_PARAM + i, WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM + i,
 				WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + i), MARKER_COLORS[i]), G);
-			add(withArc(createLfoRateKnob<LfoRateKnobT<Trimpot>>(LFO_RATE_KNOB, module, WaveArtifact::MARKER_GRAIN_SIZE_PARAM + i,
+			add(withArc(createLfoRateKnob<LinkedKnob<LfoRateKnobT<Trimpot>>>(LFO_RATE_KNOB, module, WaveArtifact::MARKER_GRAIN_SIZE_PARAM + i,
 				WaveArtifact::MARKER_GRAIN_SYNC_PARAM + i, WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM + i,
 				WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + i), MARKER_COLORS[i]), G);
-			add(withArc(createParamCentered<Trimpot>(mm2px(LFO_AMT_KNOB), module, WaveArtifact::MARKER_GRAIN_SPRAY_PARAM + i), MARKER_COLORS[i]), G);
+			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(LFO_AMT_KNOB), module, WaveArtifact::MARKER_GRAIN_SPRAY_PARAM + i), MARKER_COLORS[i]), G);
 			add(createGrainWindowScreen(LFO_SHAPE_SCREEN, LFO_SHAPE_SIZE, module, WaveArtifact::MARKER_GRAIN_WINDOW_PARAM + i, MARKER_COLORS[i]), G);
 			add(createLitToggle(LFO_SYNC_BUTTON, module, WaveArtifact::MARKER_GRAIN_SYNC_PARAM + i, "SYNC", MARKER_COLORS[i]), G);
 			add(createLitToggle(LFO_TRIP_BUTTON, module, WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM + i, "T", MARKER_COLORS[i], LFO_TOGGLE_SMALL), G);
 			add(createLitToggle(LFO_DOT_BUTTON, module, WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + i, "D", MARKER_COLORS[i], LFO_TOGGLE_SMALL), G);
-			add(withArc(createParamCentered<RoundBlackKnob>(mm2px(DRIVE_KNOB), module, WaveArtifact::MARKER_GRAIN_PSCATTER_PARAM + i), MARKER_COLORS[i]), G);
-			add(withArc(createParamCentered<Trimpot>(mm2px(FINE_KNOB), module, WaveArtifact::MARKER_GRAIN_SCAN_PARAM + i), MARKER_COLORS[i], true), G);
-			add(withArc(createParamCentered<RoundSmallBlackKnob>(mm2px(PAN_KNOB), module, WaveArtifact::MARKER_GRAIN_SPREAD_PARAM + i), MARKER_COLORS[i]), G);
+			add(withArc(createParamCentered<LinkedKnob<RoundBlackKnob>>(mm2px(DRIVE_KNOB), module, WaveArtifact::MARKER_GRAIN_PSCATTER_PARAM + i), MARKER_COLORS[i]), G);
+			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(FINE_KNOB), module, WaveArtifact::MARKER_GRAIN_SCAN_PARAM + i), MARKER_COLORS[i], true), G);
+			add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(SPREAD_KNOB), module, WaveArtifact::MARKER_GRAIN_SPREAD_PARAM + i), MARKER_COLORS[i]), G);
+
+			// POLY: the marker's envelope, on both engines.
+			for (int a = 0; a < WaveArtifact::NUM_ENVELOPE_PARAMS; a++) {
+				editKnobPoly[k] = true;
+				add(withArc(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(ADSR_KNOB_X[a], ADSR_Y)), module, WaveArtifact::MARKER_ENVELOPE_PARAMS[a] + i), MARKER_COLORS[i]));
+			}
+		}
+		// MORPH (one voice crossfading between markers) or POLY (each marker its own note).
+		{
+			ModeButton* b = createModeButton(PLAY_MODE_BUTTON, module, WaveArtifact::PLAY_MODE_PARAM, {"MORPH", "POLY"}, SCREEN_TEXT);
+			b->box.size = mm2px(PLAY_MODE_BUTTON_SIZE);
+			b->box.pos = mm2px(PLAY_MODE_BUTTON).minus(b->box.size.div(2.f));
+			b->colors = {SCREEN_TEXT, nvgRGB(0xff, 0xc8, 0x6e)};
+			addParam(b);
+			AdsrScreen* screen = createWidget<AdsrScreen>(mm2px(ADSR_SCREEN_POS));
+			screen->box.size = mm2px(ADSR_SCREEN_SIZE);
+			screen->module = module;
+			screen->setVisible(false);
+			addChild(screen);
+			envelopeScreen = screen;
 		}
 		// Engine switch in the header: WAVE (wavetable) or GRAIN (granular). The knobs keep their places
 		// and change meaning (labels, tooltips and values follow).
@@ -1099,13 +1274,41 @@ struct WaveArtifactWidget : ModuleWidget {
 		WaveArtifact* m = getModule<WaveArtifact>();
 		if (m) {
 			m->uiStep();
+			// Shift + a per-marker control moves it on every marker. A drag counts while the mouse is down;
+			// otherwise the control under the mouse (a scroll step), but not with Ctrl: Ctrl+Shift+Z is redo.
+			int mods = APP->window->getMods() & RACK_MOD_MASK;
+			ParamWidget* held = nullptr;
+			bool dragging = false;
+			if (mods & GLFW_MOD_SHIFT) {
+				widget::Widget* dragged = APP->event->getDraggedWidget();
+				if (dragged) {
+					held = dynamic_cast<ParamWidget*>(dragged);
+					dragging = held != nullptr;
+				}
+				else if (!(mods & RACK_MOD_CTRL)) {
+					held = dynamic_cast<ParamWidget*>(APP->event->getHoveredWidget());
+				}
+			}
+			if (m->linkStep(held && held->module == m ? held->paramId : -1, dragging)) {
+				pushLinkedMoveUndo(m);
+				m->linkFinish();
+			}
+			// Rack makes a Shift drag 4x faster. Here Shift means "all markers", so the speed stays normal.
+			for (int k = 0; k < EDIT_KNOBS; k++) {
+				Knob* knob = dynamic_cast<Knob*>(editKnobs[m->selectedMarker][k]);
+				if (knob)
+					knob->speed = (mods == GLFW_MOD_SHIFT) ? 0.25f : 1.f;
+			}
 			bool grain = m->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+			bool poly = m->params[WaveArtifact::PLAY_MODE_PARAM].getValue() > 0.5f;
 			for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
 				for (int k = 0; k < EDIT_KNOBS; k++) {
 					int e = editKnobEngine[k];
-					editKnobs[i][k]->setVisible(i == m->selectedMarker && (e == 0 || (e == 1) != grain));
+					editKnobs[i][k]->setVisible(i == m->selectedMarker && (e == 0 || (e == 1) != grain) && (poly || !editKnobPoly[k]));
 				}
 			}
+			envelopeLabels->setVisible(poly);
+			envelopeScreen->setVisible(poly);
 		}
 		ModuleWidget::step();
 	}

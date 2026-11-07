@@ -58,6 +58,12 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
    settings**, then right-click the other and choose **Paste settings of marker N**. Every setting
    of both engines is overwritten, including WAVE / START; the marker keeps its on/off state and its
    place on the bar. Ctrl+Z undoes a paste. CV patched on an expander stays with its marker.
+   **Shift + a control moves that setting on every marker at once.** Hold Shift and drag any knob in the
+   per-marker section (START, GAIN, CUTOFF, the envelope and so on). Every active marker moves by the same
+   amount from where it is, so the differences between them stay; if one hits its limit, moving back restores
+   the spacing. When the knob you are holding reaches its own limit, keep dragging: it stays there and the
+   others carry on until each reaches its limit (not in Rack's rotary knob modes). Shift-clicking a choice (filter TYPE, SYNC, the LFO or WINDOW screen) sets them all to the same
+   value. Knobs keep their normal speed, Ctrl + Shift is the fine version, and Ctrl+Z undoes the whole move.
 8. **Play it.** Cable a keyboard or sequencer's **1V/oct** to **V/OCT** (0 V is C4). Turn the
    POSITION LFO's AMT up to have the playhead move on its own; with SYNC on it follows the
    internal tempo (BPM) or a clock patched to **CLOCK**.
@@ -82,6 +88,38 @@ Useful to know:
 - To use the artifacts as separate voices, patch **ARTIFACT OUT 1-5**: each artifact then
   leaves the main L/R and plays on its own jacks, following the position.
 
+## Play modes: MORPH and POLY
+
+The **MORPH | POLY** button under the wavetable map chooses what the POSITION playhead does, on both engines.
+
+**MORPH** (the default) is one voice: the playhead crossfades between the two neighboring markers.
+
+**POLY** makes each marker its own voice, so up to five sound together:
+
+- The playhead **starts a marker's note when it reaches it**, from either direction. A jump (a saw LFO's
+  reset, a square, a fast knob move) starts only the last marker it passes. POS CV and the POS LFO count too;
+  the POS LFO's SMOOTH does not affect the notes.
+- Each note **plays for its own length (H, HOLD), whatever the playhead does next**, so notes sound together.
+  The same marker reached again restarts its note. The marker nearest the playhead plays once when you enter
+  POLY. With H fully up, a note stays on until the playhead starts another marker, so a stopped playhead drones.
+- **A, D, S, H, R** set the selected marker's envelope: attack 1 ms to 5 s, decay and release 5 ms to 10 s,
+  sustain 0-100%, hold 10 ms to 10 s. The little screen shows the shape. For a pluck, turn S down and D short.
+  They only appear in POLY. To use one envelope everywhere, right-click a marker: **Copy ADSR to all markers**.
+- A level bar on each marker's slot shows which voices are sounding.
+- **Play a marker directly, without POSITION.** Patch a gate to the **GATE** of an expander set to that marker:
+  the note starts when the gate rises, holds while it is high (H does not apply) and releases when it falls. That
+  marker then ignores the playhead; the others keep following it. For a keyboard or pads, Rack's MIDI-Gate module
+  gives each note its own gate output. In POLY the expander's ATTACK and DECAY only shape its ENV output.
+- **Or hold a marker's slot down** on the screen: it plays until you let go, and selects the marker as usual.
+- Every marker keeps its own WAVE, filter, drive, pan and pitch, with nothing blended between markers.
+- Markers on the same spot of the bar start together, as a chord. V/OCT still sets one note for the module.
+- An artifact output carries that marker's whole note. As in MORPH, patching it takes the voice out of L/R.
+- On GRAIN, a note starts at once (even with SYNC) with its grains already overlapping, so a short attack is
+  heard however long the grains are. Free SCAN restarts from START with each note.
+- One or two voices play at full level; beyond that they share the headroom.
+
+Copy / paste carries the ADSR too.
+
 ## The granular engine (GRAIN)
 
 The toggle in the header switches the module from the wavetable engine (**WAVE**) to a granular
@@ -101,10 +139,13 @@ and meaning (the labels, tooltips and values follow):
 | SYNC / T / D | **SYNC / T / D** | lock the grains (and SCAN) to the tempo; triplet and dotted note values |
 | DRIVE | **P.SPRD** | random pitch per grain (up to 12 semitones) |
 | FINE | **SCAN** | moves the read position through the marker's slice (see below) |
-| PAN | **SPREAD** | random pan per grain |
+| PAN | **PAN** | where the whole cloud sits, after its filter (on a stereo sample it works as a balance) |
+| (bottom strip) | **SPREAD** | random pan per grain, around PAN |
 
 GAIN, the filter (CUTOFF / RES / TYPE) and PITCH / FREE work as before, per cloud. The expander's six
-CV inputs follow the new titles (WAVE = START, DRIVE = P.SPRD, FINE = SCAN, PAN = SPREAD).
+CV inputs follow the new titles (WAVE = START, DRIVE = P.SPRD, FINE = DENSITY; PAN stays PAN). SCAN and SPREAD are knob-only:
+to move through the sample by CV, use START. At a hard-panned PAN one side is off, so SPREAD can only vary the level
+there; it scatters left and right best with PAN away from the ends.
 
 **Clock-locked grains.** With SYNC on, grains start on a grid of note values locked to the internal
 tempo or CLOCK, with sub-sample timing; RESET is beat 0.
@@ -161,8 +202,8 @@ From the top of the panel down:
 - **V/OCT** adds pitch to this marker only (1 V/oct), on top of the main V/OCT.
 - **GATE** turns the marker into a note: while the jack is patched, the marker sounds only
   while the gate is high (1 V or more) and is silent otherwise. Nothing is gated while it is
-  unpatched.
-- **ATTACK / DECAY** shape the gate (5 ms to 2 s and 5 ms to 4 s). At the minimum the gate
+  unpatched. In POLY it plays the marker's own ADSR instead (see *Play modes*).
+- **ATTACK / DECAY** shape the gate in MORPH, and the ENV output in both modes (5 ms to 2 s and 5 ms to 4 s). At the minimum the gate
   opens and closes instantly (still click-free). The level holds while the gate is high and
   DECAY starts when it falls. **PERC** makes it a true AD: attack then decay even if the
   gate is held.
@@ -173,10 +214,10 @@ From the top of the panel down:
   the whole cutoff range (about 1 V/oct) for CUTOFF, the whole range for DRIVE, 2 semitones
   for FINE and hard left to hard right for PAN. **GAIN works as a VCA**: at AMT 0 it does
   nothing, at 100% the marker's level follows the CV (silent at 0 V, full at 10 V).
-  On the GRAIN engine the inputs become START, GAIN, CUTOFF, P.SPRD, SCAN and SPREAD, and the
-  START, SCAN and SPREAD trimpots go 0-100% (no inverting). They keep their own values, separate
-  from WAVE, FINE and PAN. At 100%, 10 V adds the whole sample to START, the full forward speed to
-  SCAN (from its middle) and full SPREAD.
+  On the GRAIN engine the inputs become START, GAIN, CUTOFF, P.SPRD, DENSITY and PAN, and the
+  START and DENSITY trimpots go 0-100% (no inverting). They keep their own values, separate from
+  WAVE and FINE. At 100%, 10 V adds the whole sample to START and the whole knob to DENSITY. PAN
+  works as on WAVE, with the same trimpot: 10 V at 100% goes hard left to hard right.
 - **Two LFOs** (shape, RATE, AMT, SYNC / T / D) with their own outputs at +-5 V. Patch them
   anywhere, including the expander's own CV inputs. Synced LFOs follow Wave Artifacts' tempo
   or CLOCK, and restart on RESET.
