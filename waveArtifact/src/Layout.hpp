@@ -8,7 +8,7 @@
 //  y  46..75.5  screen: marker waveforms, marker bar, file status (click to load)
 //  y  77.5..106 POSITION | FREQ + V/OCT | MASTER (type, cutoff, res, drive, spread, fdbk, each with CV) | outputs
 //  y 108..120   wavetable dots
-//  y 120..128.5 play mode (MORPH | POLY); in POLY the selected marker's envelope; in GRAIN its SPREAD
+//  y 120..128.5 play mode (MORPH | POLY); in POLY the selected marker's envelope; in GRAIN its SPREAD; in both LATCH
 
 namespace layout {
 
@@ -188,6 +188,10 @@ static const Vec SPREAD_BOX_POS = Vec(126.f, 120.6f);
 static const Vec SPREAD_BOX_SIZE = Vec(21.f, 7.4f);
 static const float SPREAD_LABEL_X = 132.f;
 static const Vec SPREAD_KNOB = Vec(142.f, ADSR_Y);
+
+// LATCH (POLY on GRAIN only), right of SPREAD
+static const Vec LATCH_BUTTON = Vec(156.f, ADSR_Y);
+static const Vec LATCH_BUTTON_SIZE = Vec(13.f, 4.4f);
 
 // Pastel, blue through purple to red.
 static const NVGcolor MARKER_COLORS[5] = {

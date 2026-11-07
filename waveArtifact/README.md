@@ -111,6 +111,11 @@ The **MORPH | POLY** button under the wavetable map chooses what the POSITION pl
   marker then ignores the playhead; the others keep following it. For a keyboard or pads, Rack's MIDI-Gate module
   gives each note its own gate output. In POLY the expander's ATTACK and DECAY only shape its ENV output.
 - **Or hold a marker's slot down** on the screen: it plays until you let go, and selects the marker as usual.
+- **LATCH (GRAIN only) plays the playhead's notes in time.** The playhead still picks which marker plays, but a
+  marker with SYNC on waits for its next beat: its own DENSITY note value on the module's clock, so a 1/8 marker
+  starts on the next 1/8 and its first grain lands on its grid. This works however the playhead moves (POS LFO, CV or
+  the knob). If the playhead reaches another marker while one is waiting, the newest takes its place, so a fast
+  move makes a melody rather than a chord. Markers with SYNC off, gates and slot presses still start at once.
 - Every marker keeps its own WAVE, filter, drive, pan and pitch, with nothing blended between markers.
 - Markers on the same spot of the bar start together, as a chord. V/OCT still sets one note for the module.
 - An artifact output carries that marker's whole note. As in MORPH, patching it takes the voice out of L/R.

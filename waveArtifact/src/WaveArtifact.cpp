@@ -137,6 +137,8 @@ WaveArtifact::WaveArtifact() {
 		getParamQuantity(MARKER_POS_PARAM + i)->randomizeEnabled = false;
 	}
 
+	configSwitch(LATCH_PARAM, 0.f, 1.f, 0.f, "Latch: in POLY on GRAIN, markers with SYNC start on their next DENSITY beat", {"Off (notes start when the playhead arrives)", "On"});
+	getParamQuantity(LATCH_PARAM)->randomizeEnabled = false;
 	configSwitch(PLAY_MODE_PARAM, 0.f, 1.f, 0.f, "Play mode", {"Morph (the playhead crossfades neighboring markers)", "Poly (the playhead starts each marker's own note)"});
 	getParamQuantity(PLAY_MODE_PARAM)->randomizeEnabled = false;
 	configSwitch(ENGINE_MODE_PARAM, 0.f, 1.f, 0.f, "Engine", {"Wavetable (WAVE)", "Granular (GRAIN)"});
@@ -312,6 +314,12 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		return mod->mod[marker][target] / 10.f * wa::MOD_SCALE_PER_10V[target];
 	};
 
+	// The expander's FINE input is DENSITY on the granular engine: 0..10 V at AMT 100% adds 0..1 of the knob. (SCAN has
+	// no CV: changing its speed or loop length makes the read position jump. START is for moving by CV.)
+	auto grainDensity = [&](int marker) {
+		return clamp(params[MARKER_GRAIN_DENSITY_PARAM + marker].getValue() + 0.5f * modOf(marker, wa::MOD_FINE), 0.f, 1.f);
+	};
+
 	wa::EngineInput in;
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		wa::MarkerInput& m = in.markers[i];
@@ -379,6 +387,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		float markerPos[NUM_MARKERS];
 		bool markerOn[NUM_MARKERS];
 		wa::AdsrSettings adsr[NUM_MARKERS];
+		bool latchOn = params[LATCH_PARAM].getValue() > 0.5f && engineApplied == 1;
 		for (int i = 0; i < NUM_MARKERS; i++) {
 			markerPos[i] = in.markers[i].pos;
 			markerOn[i] = in.markers[i].active;
@@ -387,6 +396,12 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			adsr[i].sustain = params[MARKER_SUSTAIN_PARAM + i].getValue();
 			adsr[i].release = wa::adsrFallSeconds(params[MARKER_RELEASE_PARAM + i].getValue());
 			adsr[i].hold = wa::adsrHoldSeconds(params[MARKER_HOLD_PARAM + i].getValue());
+			// LATCH: the playhead picks the marker, its own DENSITY grid picks the moment.
+			if (latchOn && params[MARKER_GRAIN_SYNC_PARAM + i].getValue() > 0.5f) {
+				bool triplets = params[MARKER_GRAIN_TRIPLET_PARAM + i].getValue() > 0.5f;
+				bool dotted = params[MARKER_GRAIN_DOTTED_PARAM + i].getValue() > 0.5f;
+				adsr[i].latchBeats = wa::SYNC_DIVISIONS[wa::lfoDivision(grainDensity(i), triplets, dotted)].beats;
+			}
 		}
 		// Expander GATEs and a press on a slot play markers directly.
 		wa::VoiceGates direct;
@@ -395,7 +410,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			direct.patched[i] = mod->gatePatched[i];
 			direct.high[i] = mod->gateHigh[i] || pressed == i;
 		}
-		voices.process(markerPos, markerOn, triggerPosition, adsr, args.sampleTime, &direct);
+		voices.process(markerPos, markerOn, triggerPosition, adsr, args.sampleTime, &direct, grainEngine.getBeatPos());
 	}
 	polyRunning = polyWanted;
 	in.poly = polyWanted;
@@ -446,9 +461,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			g.pos = wm.pos;
 			// START is the marker's WAVE value (plus the expander's WAVE CV), folded at the ends
 			g.start = wa::fold01(wm.wave);
-			// The expander's FINE input is DENSITY here: 0..10 V at AMT 100% adds 0..1 of the knob. (SCAN has no
-			// CV: changing its speed or loop length makes the read position jump. START is for moving by CV.)
-			g.density = clamp(params[MARKER_GRAIN_DENSITY_PARAM + i].getValue() + 0.5f * modOf(i, wa::MOD_FINE), 0.f, 1.f);
+			g.density = grainDensity(i);
 			g.size = params[MARKER_GRAIN_SIZE_PARAM + i].getValue();
 			g.spray = params[MARKER_GRAIN_SPRAY_PARAM + i].getValue();
 			g.window = clamp((int) std::round(params[MARKER_GRAIN_WINDOW_PARAM + i].getValue()), 0, wa::NUM_GRAIN_WINDOWS - 1);
@@ -1048,6 +1061,8 @@ struct WaveArtifactWidget : ModuleWidget {
 	bool editKnobPoly[EDIT_KNOBS] = {};
 	PanelLabels* envelopeLabels = nullptr;
 	widget::Widget* envelopeScreen = nullptr;
+	/** Shown only in POLY on GRAIN */
+	ParamWidget* latchButton = nullptr;
 
 	WaveArtifactWidget(WaveArtifact* module) {
 		using namespace layout;
@@ -1210,6 +1225,9 @@ struct WaveArtifactWidget : ModuleWidget {
 			addChild(screen);
 			envelopeScreen = screen;
 		}
+		latchButton = createLitToggle(LATCH_BUTTON, module, WaveArtifact::LATCH_PARAM, "LATCH", SCREEN_TEXT, LATCH_BUTTON_SIZE);
+		latchButton->setVisible(false);
+		addParam(latchButton);
 		// Engine switch in the header: WAVE (wavetable) or GRAIN (granular). The knobs keep their places
 		// and change meaning (labels, tooltips and values follow).
 		{
@@ -1309,6 +1327,7 @@ struct WaveArtifactWidget : ModuleWidget {
 			}
 			envelopeLabels->setVisible(poly);
 			envelopeScreen->setVisible(poly);
+			latchButton->setVisible(poly && grain);
 		}
 		ModuleWidget::step();
 	}

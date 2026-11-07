@@ -207,11 +207,17 @@ struct AdsrSettings {
 	/** Seconds the note stays on, or negative: until the playhead starts another marker */
 	float hold = 1.f;
 	float release = 0.3f;
+	/** LATCH: a note from the playhead waits for the next multiple of this many beats. 0 = starts at once. */
+	float latchBeats = 0.f;
 };
 
 /** The five voices: trigger plus one ADSR per marker. Each note from the playhead lasts its own HOLD, whatever the
 playhead does next, so notes overlap; the same marker firing again restarts its note. A note from a gate lasts as
-long as the gate. */
+long as the gate.
+
+LATCH: the playhead still decides which marker plays, but a marker with latchBeats waits for its next beat. If the
+playhead reaches another latched marker meanwhile, the newest replaces the one waiting, so a fast move makes a
+melody rather than a chord (markers on one spot still start together). Gates and slot presses play at once. */
 struct PolyVoices {
 	MarkerTrigger trigger;
 	Adsr adsr[NUM_MARKERS];
@@ -231,21 +237,46 @@ struct PolyVoices {
 			gate[m] = false;
 			holdLeft[m] = 0.f;
 			directPrev[m] = false;
+			waiting[m] = false;
 		}
+		beatReady = false;
 	}
 
-	void process(const float* pos, const bool* active, float position, const AdsrSettings* settings, float sampleTime, const VoiceGates* direct = nullptr) {
+	/** A note is waiting for its beat (LATCH) */
+	bool isWaiting(int m) const {
+		return waiting[m];
+	}
+
+	/** `beat`: the clock's position in beats, for LATCH */
+	void process(const float* pos, const bool* active, float position, const AdsrSettings* settings, float sampleTime, const VoiceGates* direct = nullptr, double beat = 0.0) {
 		bool followsPlayhead[NUM_MARKERS];
 		for (int m = 0; m < NUM_MARKERS; m++)
 			followsPlayhead[m] = active[m] && !(direct && direct->patched[m]);
 		trigger.process(pos, followsPlayhead, position);
+		bool fired[NUM_MARKERS];
+		bool newWaiting = false;
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			fired[m] = trigger.fired[m] && settings[m].latchBeats <= 0.f;
+			newWaiting = newWaiting || (trigger.fired[m] && settings[m].latchBeats > 0.f);
+		}
 		bool anyFired = false;
-		for (int m = 0; m < NUM_MARKERS; m++)
-			anyFired = anyFired || trigger.fired[m];
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			if (newWaiting)
+				waiting[m] = trigger.fired[m] && settings[m].latchBeats > 0.f;
+			if (waiting[m] && !followsPlayhead[m])
+				waiting[m] = false;
+			if (waiting[m] && (settings[m].latchBeats <= 0.f || !beatReady || crossedBeat(beat, settings[m].latchBeats))) {
+				fired[m] = true;
+				waiting[m] = false;
+			}
+			anyFired = anyFired || fired[m];
+		}
+		lastBeat = beat;
+		beatReady = true;
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			const AdsrSettings& s = settings[m];
 			bool on = direct && direct->high[m] && active[m];
-			start[m] = trigger.fired[m] || (on && !directPrev[m]);
+			start[m] = fired[m] || (on && !directPrev[m]);
 			if (start[m]) {
 				gate[m] = true;
 				holdLeft[m] = s.hold;
@@ -279,6 +310,14 @@ struct PolyVoices {
 private:
 	float holdLeft[NUM_MARKERS] = {};
 	bool directPrev[NUM_MARKERS] = {};
+	bool waiting[NUM_MARKERS] = {};
+	double lastBeat = 0.0;
+	bool beatReady = false;
+
+	/** The tiny offset is the one the grain grid uses: a position landing on a grid point up to rounding counts. */
+	bool crossedBeat(double beat, float interval) const {
+		return std::floor(beat / interval + 1e-7) != std::floor(lastBeat / interval + 1e-7);
+	}
 };
 
 } // namespace wa

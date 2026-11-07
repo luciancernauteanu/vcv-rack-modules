@@ -121,6 +121,8 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_RELEASE_PARAM, NUM_MARKERS),
 		/** How long a marker's note stays on (wa::adsrHoldSeconds); at the top, until another marker starts */
 		ENUMS(MARKER_HOLD_PARAM, NUM_MARKERS),
+		/** POLY on GRAIN: notes of markers with SYNC wait for the marker's next DENSITY beat */
+		LATCH_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {

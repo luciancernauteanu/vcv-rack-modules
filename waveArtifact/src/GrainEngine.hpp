@@ -382,6 +382,11 @@ public:
 		return posS;
 	}
 
+	/** The clock position the grain grids follow, in beats */
+	double getBeatPos() const {
+		return gclock.beatPos;
+	}
+
 	/** Share of the position crossfade of a cloud (0..1, sums to 1) */
 	float getHeard(int m) const {
 		return heard[m];

@@ -111,12 +111,13 @@ struct Voices {
 	float pos[M] = {0.f, 0.25f, 0.5f, 0.75f, 1.f};
 	bool on[M] = {true, true, true, true, true};
 	wa::AdsrSettings s[M];
+	double beat = 0.0;
 	Voices() {
 		for (int m = 0; m < M; m++)
 			s[m].hold = -1.f; // until another marker: most of these tests are about one thing at a time
 	}
 	void step(float position) {
-		v.process(pos, on, position, s, 1.f / SR);
+		v.process(pos, on, position, s, 1.f / SR, nullptr, beat);
 	}
 };
 
@@ -495,6 +496,7 @@ struct GrainRig {
 	void run(double seconds, std::vector<float>* l = nullptr, std::vector<float>* r = nullptr) {
 		long n = (long) (seconds * SR);
 		for (long i = 0; i < n; i++) {
+			v.beat = engine->getBeatPos();
 			v.step(position);
 			for (int m = 0; m < M; m++) {
 				in.voiceEnv[m] = v.v.env[m];
@@ -511,6 +513,225 @@ struct GrainRig {
 		}
 	}
 };
+
+static void testLatch() {
+	std::printf("LATCH\n");
+	const double beatsPerSample = 2.0 / SR; // 120 BPM
+	// Advances the clock with the voices; returns the beat position of marker m's next note, or -1.
+	auto runUntil = [&](Voices& v, float p, double seconds, int marker) {
+		for (long i = 0; i < (long) (seconds * SR); i++) {
+			v.beat += beatsPerSample;
+			v.step(p);
+			if (marker >= 0 && v.v.start[marker])
+				return v.beat;
+		}
+		return -1.0;
+	};
+	{
+		Voices v;
+		for (int m = 0; m < M; m++)
+			v.s[m].latchBeats = 0.5f;
+		runUntil(v, 0.1f, 1.0, -1);
+		v.beat = 10.13;
+		runUntil(v, 0.1f, 0.001, -1);
+		// Reaches marker 2 between beats: nothing yet, it is waiting.
+		v.beat = 10.2;
+		v.step(0.25f);
+		std::printf("  reached marker 2 at beat 10.20: started %d, waiting %d, gate %d\n", (int) v.v.start[1], (int) v.v.isWaiting(1), (int) v.v.gate[1]);
+		CHECK(!v.v.start[1] && v.v.isWaiting(1) && !v.v.gate[1], "must wait");
+		double at = runUntil(v, 0.25f, 1.0, 1);
+		std::printf("  it starts at beat %.4f (next 1/8 is 10.5000)\n", at);
+		CHECK(std::fabs(at - 10.5) < 2.0 * beatsPerSample, "start at %.4f", at);
+		CHECK(v.v.gate[1] && !v.v.isWaiting(1), "the note is on");
+		// Landing exactly on a beat does not wait for the one after.
+		v.beat = 10.999;
+		for (int i = 0; i < 20; i++)
+			runUntil(v, 0.3f, 0.001, -1);
+		double before = v.beat;
+		v.step(0.5f);
+		bool immediately = v.v.start[2];
+		if (!immediately) {
+			double at2 = runUntil(v, 0.5f, 1.0, 2);
+			std::printf("  reached marker 3 at beat %.4f: starts at %.4f\n", before, at2);
+			CHECK(std::fabs(at2 - std::ceil(before * 2.0) / 2.0) < 2.0 * beatsPerSample, "next beat: %.4f", at2);
+		}
+	}
+	{
+		// Without LATCH it starts at once, and one marker can latch while another does not.
+		Voices v;
+		v.s[1].latchBeats = 1.f;
+		v.s[2].latchBeats = 0.f;
+		runUntil(v, 0.1f, 0.5, -1);
+		v.beat = 3.2;
+		v.step(0.1f);
+		v.step(0.25f);
+		bool latchedWaits = v.v.isWaiting(1) && !v.v.start[1];
+		runUntil(v, 0.3f, 0.01, -1);
+		bool still = v.v.isWaiting(1);
+		v.step(0.5f);
+		std::printf("  marker 2 latched, marker 3 not: 2 waits %d, 3 starts at once %d, and takes no notice of 2\n", (int) latchedWaits, (int) v.v.start[2]);
+		CHECK(latchedWaits && still, "latched waits");
+		CHECK(v.v.start[2], "not latched: at once");
+		CHECK(v.v.isWaiting(1), "a marker without latch does not replace the waiting note");
+		double at = runUntil(v, 0.5f, 1.0, 1);
+		std::printf("  marker 2 still starts on its beat: %.4f (4.0000)\n", at);
+		CHECK(std::fabs(at - 4.0) < 2.0 * beatsPerSample, "own beat: %.4f", at);
+	}
+	{
+		// A fast move: the newest replaces the one waiting.
+		Voices v;
+		for (int m = 0; m < M; m++)
+			v.s[m].latchBeats = 1.f;
+		runUntil(v, 0.1f, 0.5, -1);
+		v.beat = 5.1;
+		v.step(0.1f);
+		v.step(0.25f);
+		bool first = v.v.isWaiting(1);
+		v.beat = 5.2;
+		v.step(0.5f);
+		std::printf("  markers 2 then 3 before the beat: waiting %d %d (only the newest)\n", (int) v.v.isWaiting(1), (int) v.v.isWaiting(2));
+		CHECK(first && !v.v.isWaiting(1) && v.v.isWaiting(2), "newest replaces");
+		int c[M] = {};
+		for (long i = 0; i < (long) (1.0 * SR); i++) {
+			v.beat += beatsPerSample;
+			v.step(0.5f);
+			for (int m = 0; m < M; m++)
+				c[m] += v.v.start[m];
+		}
+		std::printf("  on the beat: notes %d %d %d (0 0 1)\n", c[0], c[1], c[2]);
+		CHECK(c[1] == 0 && c[2] == 1, "one note");
+	}
+	{
+		// Markers on one spot wait together and start together.
+		Voices v;
+		v.pos[3] = v.pos[2];
+		for (int m = 0; m < M; m++)
+			v.s[m].latchBeats = 1.f;
+		runUntil(v, 0.1f, 0.5, -1);
+		v.beat = 7.1;
+		v.step(0.1f);
+		v.step(0.5f);
+		CHECK(v.v.isWaiting(2) && v.v.isWaiting(3), "one spot waits together");
+		int c[M] = {};
+		for (long i = 0; i < (long) (1.0 * SR); i++) {
+			v.beat += beatsPerSample;
+			v.step(0.5f);
+			for (int m = 0; m < M; m++)
+				c[m] += v.v.start[m];
+		}
+		std::printf("  markers 3 and 4 on one spot: notes %d %d, a chord on the beat\n", c[2], c[3]);
+		CHECK(c[2] == 1 && c[3] == 1, "chord");
+	}
+	{
+		// A held note ends when the next one really starts, not when the playhead arrived, so no gap.
+		Voices v;
+		for (int m = 0; m < M; m++)
+			v.s[m].latchBeats = 1.f;
+		v.step(0.f);
+		runUntil(v, 0.f, 1.0, -1);
+		CHECK(v.v.gate[0], "marker 1 holds");
+		v.beat = 9.1;
+		v.step(0.f);
+		v.step(0.25f);
+		bool heldDuring = v.v.gate[0] && !v.v.gate[1];
+		double at = runUntil(v, 0.25f, 1.0, 1);
+		std::printf("  H up: old note on while the next waits %d; next starts at %.4f and old released %d\n", (int) heldDuring, at, (int) !v.v.gate[0]);
+		CHECK(heldDuring, "held while the next one waits");
+		CHECK(!v.v.gate[0] && v.v.gate[1] && std::fabs(at - 10.0) < 2.0 * beatsPerSample, "handed over on the beat");
+	}
+	{
+		// HOLD runs from the real start.
+		Voices v;
+		for (int m = 0; m < M; m++) {
+			v.s[m].latchBeats = 1.f;
+			v.s[m].hold = 0.1f;
+		}
+		runUntil(v, 0.1f, 0.5, -1);
+		v.beat = 2.1;
+		v.step(0.1f);
+		v.step(0.25f);
+		runUntil(v, 0.25f, 1.0, 1);
+		runUntil(v, 0.25f, 0.09, -1);
+		bool on = v.v.gate[1];
+		runUntil(v, 0.25f, 0.02, -1);
+		std::printf("  100 ms note: on at 90 ms after its beat %d, off at 110 ms %d\n", (int) on, (int) !v.v.gate[1]);
+		CHECK(on && !v.v.gate[1], "hold from the start");
+	}
+	{
+		// Turning LATCH off lets a waiting note go; a marker turned off drops it.
+		Voices v;
+		for (int m = 0; m < M; m++)
+			v.s[m].latchBeats = 1.f;
+		runUntil(v, 0.1f, 0.5, -1);
+		v.beat = 4.1;
+		v.step(0.1f);
+		v.step(0.25f);
+		for (int m = 0; m < M; m++)
+			v.s[m].latchBeats = 0.f;
+		v.step(0.25f);
+		CHECK(v.v.start[1] && !v.v.isWaiting(1), "LATCH off lets it go");
+		Voices w;
+		for (int m = 0; m < M; m++)
+			w.s[m].latchBeats = 1.f;
+		runUntil(w, 0.1f, 0.5, -1);
+		w.beat = 4.1;
+		w.step(0.1f);
+		w.step(0.25f);
+		w.on[1] = false;
+		int notes = 0;
+		for (long i = 0; i < (long) (1.0 * SR); i++) {
+			w.beat += beatsPerSample;
+			w.step(0.25f);
+			notes += w.v.start[1];
+		}
+		std::printf("  marker turned off while waiting: %d notes (0)\n", notes);
+		CHECK(notes == 0 && !w.v.isWaiting(1), "a marker turned off");
+	}
+	{
+		// Gates and presses do not wait.
+		Voices v;
+		for (int m = 0; m < M; m++)
+			v.s[m].latchBeats = 1.f;
+		wa::VoiceGates g;
+		g.patched[1] = true;
+		g.high[1] = true;
+		v.v.process(v.pos, v.on, 0.1f, v.s, 1.f / SR, &g, 3.3);
+		std::printf("  gate with LATCH on, between beats: starts at once %d\n", (int) v.v.start[1]);
+		CHECK(v.v.start[1], "a gate starts at once");
+	}
+	{
+		// The real engine: silent until the beat, then sounding at once, in time with the grain grid.
+		GrainRig r;
+		for (int m = 0; m < M; m++) {
+			r.in.markers[m].sync = true;
+			r.in.markers[m].density = 0.5f;
+			r.in.markers[m].size = 0.5f;
+			r.v.s[m].latchBeats = 1.f;
+			r.v.s[m].release = 0.01f;
+		}
+		r.in.markers[0].gain = 0.f;
+		r.run(0.9);
+		double reached = r.engine->getBeatPos();
+		r.position = 0.25f;
+		std::vector<float> l;
+		std::vector<double> beats;
+		for (long i = 0; i < (long) (1.2 * SR); i++) {
+			r.run(1.0 / SR, &l);
+			beats.push_back(r.engine->getBeatPos());
+		}
+		size_t first = 0;
+		while (first < l.size() && std::fabs(l[first]) < 1e-3f)
+			first++;
+		// Output is 1.5 ms behind (the limiter's look-ahead).
+		double soundBeat = beats[std::min(first, beats.size() - 1)];
+		double expected = std::ceil(reached);
+		double earlyMs = (soundBeat - expected) / 2.0 * 1000.0;
+		double level = rms(l, first + 240, first + 2400), steady = rms(l, (size_t) (l.size() * 0.7), l.size());
+		std::printf("  engine: playhead arrives at beat %.3f, sound at beat %.3f (grid %.0f, %+.2f ms); level soon after %.3f, steady %.3f\n", reached, soundBeat, expected, earlyMs, level, steady);
+		CHECK(std::fabs(earlyMs - 1.5) < 2.0, "%+.2f ms from the beat", earlyMs);
+		CHECK(level > steady * 0.5, "the note should sound at once: %.3f against %.3f", level, steady);
+	}
+}
 
 static void testWavePoly() {
 	std::printf("wavetable voices\n");
@@ -1047,6 +1268,7 @@ int main() {
 	testTrigger();
 	testHold();
 	testDirectPlay();
+	testLatch();
 	testWavePoly();
 	testGrainPoly();
 	testGrainPan();
