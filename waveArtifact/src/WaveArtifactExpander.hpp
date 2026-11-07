@@ -26,10 +26,11 @@ struct WaveArtifactExpander : Module {
 		DECAY_PARAM,
 		/** 0 = gate (holds while high, DECAY after it falls), 1 = percussive AD (decays even while held) */
 		PERC_PARAM,
-		/** Granular engine: 0..100% amounts of the START, SCAN and SPREAD CVs. They take the place of the
-		attenuverters of WAVE, FINE and PAN, which keep their own values for the wavetable engine. */
+		/** Granular engine: 0..100% amounts of the START and DENSITY CVs. They take the place of the attenuverters
+		of WAVE and FINE, which keep their own values for the wavetable engine. (GRAIN_SPREAD_AMT_PARAM is no longer
+		used: PAN is PAN on both engines, with one attenuverter. It stays so later IDs and patches stay valid.) */
 		GRAIN_START_AMT_PARAM,
-		GRAIN_SCAN_AMT_PARAM,
+		GRAIN_DENSITY_AMT_PARAM,
 		GRAIN_SPREAD_AMT_PARAM,
 		PARAMS_LEN
 	};
@@ -90,9 +91,7 @@ struct WaveArtifactExpander : Module {
 		if (grain && target == wa::MOD_WAVE)
 			return GRAIN_START_AMT_PARAM;
 		if (grain && target == wa::MOD_FINE)
-			return GRAIN_SCAN_AMT_PARAM;
-		if (grain && target == wa::MOD_PAN)
-			return GRAIN_SPREAD_AMT_PARAM;
+			return GRAIN_DENSITY_AMT_PARAM;
 		return AMT_PARAM + target;
 	}
 };

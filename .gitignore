@@ -23,3 +23,5 @@ waveArtifact/tests/test_sound
 waveArtifact/tests/test_sound.exe
 waveArtifact/tests/test_granular
 waveArtifact/tests/test_granular.exe
+waveArtifact/tests/test_poly
+waveArtifact/tests/test_poly.exe

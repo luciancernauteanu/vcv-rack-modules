@@ -7,7 +7,8 @@
 /** Middle screen.
 Top: one slot per marker (1..5, side by side) showing the waveform it plays right now, so it follows
 WAVE, its LFO and dot assignments. The slot lights up with the marker's share of the output.
-While a table is previewed, it covers the slots; click it to stop the preview.
+While a table is previewed, it covers the slots; click it to stop the preview. In POLY, holding a slot down plays
+that marker.
 Bottom: the marker bar. Click empty bar to add a marker (up to 5; when all 5 are in use it moves
 the playhead instead), drag a bullet to move it (it can pass over other markers), click a bullet or slot to
 edit that marker, right-click a bullet or slot to copy, paste or delete. Drag the white playhead to set POSITION.
@@ -163,10 +164,14 @@ struct MarkerBar : widget::Widget {
 			for (int i = 0; i < wa::NUM_MARKERS; i++) {
 				if (!slotRect(i).contains(e.pos) || !module->isMarkerActive(i))
 					continue;
-				if (left)
+				if (left) {
 					module->selectedMarker = i;
-				else
+					if (module->params[WaveArtifact::PLAY_MODE_PARAM].getValue() > 0.5f)
+						module->pressedMarker = i;
+				}
+				else {
 					openMarkerMenu(i);
+				}
 				e.consume(this);
 				return;
 			}
@@ -217,6 +222,8 @@ struct MarkerBar : widget::Widget {
 	void onDragEnd(const DragEndEvent& e) override {
 		dragMode = DRAG_NONE;
 		dragMarker = -1;
+		if (module)
+			module->pressedMarker = -1;
 		if (loadOnRelease) {
 			loadOnRelease = false;
 			openLoadDialog(module);
@@ -318,7 +325,8 @@ struct MarkerBar : widget::Widget {
 			math::Rect r = slotRect(i);
 			NVGcolor c = layout::MARKER_COLORS[i];
 			bool active = module ? module->isMarkerActive(i) : (i < 3);
-			bool selected = module && module->selectedMarker == i;
+			// While Shift is moving a setting on every marker, they all show as being edited.
+			bool selected = module && (module->selectedMarker == i || module->linkSetting >= 0);
 			float heard = module ? module->shownHeard[i].load() : (i == 0 ? 1.f : 0.f);
 
 			// Fill grows with this marker's share of the output.
@@ -329,6 +337,14 @@ struct MarkerBar : widget::Widget {
 			nvgStrokeColor(args.vg, nvgTransRGBAf(c, selected ? 1.f : active ? 0.45f : 0.15f));
 			nvgStrokeWidth(args.vg, selected ? 1.5f : 0.75f);
 			nvgStroke(args.vg);
+			// POLY: each voice's level, so you can see which notes are sounding together.
+			if (active && heard > 0.f && module && module->params[WaveArtifact::PLAY_MODE_PARAM].getValue() > 0.5f) {
+				float meter = mm2px(0.8f);
+				nvgBeginPath(args.vg);
+				nvgRect(args.vg, r.pos.x + pad, r.getBottom() - pad - meter, (r.size.x - 2.f * pad) * std::min(heard, 1.f), meter);
+				nvgFillColor(args.vg, c);
+				nvgFill(args.vg);
+			}
 
 			math::Rect wr = r.grow(Vec(-pad, -pad));
 			wr.pos.y += mm2px(2.2f);

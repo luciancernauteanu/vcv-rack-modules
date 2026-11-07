@@ -14,7 +14,7 @@ struct ModeButton : app::ParamWidget {
 	std::vector<NVGcolor> colors;
 
 	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == 0) {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && ((e.mods & RACK_MOD_MASK) & ~GLFW_MOD_SHIFT) == 0) {
 			engine::ParamQuantity* pq = getParamQuantity();
 			if (pq) {
 				float oldValue = pq->getValue();

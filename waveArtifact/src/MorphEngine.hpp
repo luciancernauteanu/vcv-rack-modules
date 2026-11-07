@@ -20,6 +20,9 @@
 // The morph is audio-only: pitch is NOT interpolated between markers, so a marker at -12 st and
 // a marker at 0 st crossfade as two separate pitches, never sliding (glide could be a later option).
 //
+// POLY play mode (EngineInput::poly) replaces the morph: every marker runs its own whole chain at the level of
+// its ADSR (see PolyVoices.hpp), with nothing interpolated between markers, and the voices add up.
+//
 // Click prevention:
 // - Position is slewed (5 ms). The crossfade weight is continuous in position, and so are
 //   cutoff and pan, which are interpolated between the two markers.
@@ -81,6 +84,12 @@ struct EngineInput {
 	int previewTable = -1;
 	/** Render this artifact's own output (see getDirect); only patched outputs cost CPU. */
 	bool wantDirect[NUM_MARKERS] = {};
+	/** POLY play mode: the voices below instead of the morph. Switching fades like a structural change. */
+	bool poly = false;
+	/** Level of each marker's ADSR, 0..1 */
+	float voiceEnv[NUM_MARKERS] = {};
+	/** The marker started a new note on this sample */
+	bool voiceStart[NUM_MARKERS] = {};
 
 	// Master section (stereo, on the whole output): drive -> filter. See MasterFilter. The *Mod values
 	// are CV, added after smoothing so they can run at audio rate.
@@ -185,6 +194,8 @@ public:
 		uint32_t sig = n;
 		for (int i = 0; i < n; i++)
 			sig = sig * 8 + ord[i];
+		if (in.poly)
+			sig |= 0x80000000u;
 
 		bool changed = !structureApplied || sig != appliedSig || in.bank != appliedBank;
 		bool wantSilent = in.holdSilent || changed || !in.bank;
@@ -194,6 +205,14 @@ public:
 			appliedSig = sig;
 			numActive = n;
 			std::copy(ord, ord + n, order);
+			if (in.poly != polyApplied) {
+				polyApplied = in.poly;
+				drive.reset();
+				markerSvf.reset();
+				// The chains start clean in the other mode.
+				for (int m = 0; m < NUM_MARKERS; m++)
+					direct[m].running = false;
+			}
 			if (in.bank != appliedBank) {
 				// appliedBank is only an identity here; it may already be freed. Never read it.
 				appliedBank = in.bank;
@@ -251,8 +270,13 @@ public:
 		}
 
 		float l = 0.f, r = 0.f;
-		if (in.bank && gain > 0.f)
-			renderMorph(in, *in.bank, &l, &r);
+		bool rendered = in.bank && gain > 0.f;
+		if (rendered) {
+			if (polyApplied)
+				renderPoly(in, *in.bank, &l, &r);
+			else
+				renderMorph(in, *in.bank, &l, &r);
+		}
 
 		// Preview (audition) of one table: replaces the morph with a 20 ms crossfade, plays at the
 		// base pitch, centered, unfiltered. A different table while previewing crossfades too.
@@ -310,7 +334,18 @@ public:
 		masterGainS += (std::min(std::max(in.masterGain, 0.f), (float) MAX_MASTER_GAIN) - masterGainS) * smoothCoef;
 		limiter.process(l * masterGainS, r * masterGainS, LIMIT, outL, outR);
 
-		renderDirect(in);
+		if (!polyApplied) {
+			renderDirect(in);
+		}
+		else if (!rendered) {
+			// Fully faded: the limiters look ahead, so they still hold the last faded samples.
+			for (int m = 0; m < NUM_MARKERS; m++) {
+				if (in.wantDirect[m])
+					direct[m].limiter.process(0.f, 0.f, LIMIT, &directL[m], &directR[m]);
+				else
+					directL[m] = directR[m] = 0.f;
+			}
+		}
 	}
 
 	/** An artifact's own output (engine units, x5 V), 0 unless `wantDirect` was set for it.
@@ -448,6 +483,93 @@ private:
 		*outR = out * std::sin(angle) * SQRT2;
 	}
 
+	/** POLY: every sounding marker runs its own chain (the same blocks as an artifact output): GAIN, DRIVE,
+	filter, ADSR level, PAN. The level comes after the filter, so a released note keeps the filter's sound to
+	the end. A patched artifact output takes its voice out of the main mix, as in the morph. */
+	void renderPoly(const EngineInput& in, const WavetableBank& bank, float* outL, float* outR) {
+		float sumL = 0.f, sumR = 0.f;
+		float power = 0.f;
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			const MarkerInput& M = in.markers[m];
+			DirectChain& d = direct[m];
+			float f = FREQ_C4 * std::exp2(in.voct + M.voct + (M.pitch + M.fine) / 12.f);
+			f = std::min(std::max(f, 0.01f), 0.45f * sampleRate);
+			float g = std::min(std::max(M.gain, 0.f), (float) MAX_GAIN);
+			gainS[m] += (g - gainS[m]) * smoothCoef;
+			float t = in.wantDirect[m] ? 0.f : 1.f;
+			mainShare[m] = (t > mainShare[m]) ? std::min(t, mainShare[m] + tableFadeStep) : std::max(t, mainShare[m] - tableFadeStep);
+			float env = std::min(std::max(in.voiceEnv[m], 0.f), 1.f);
+			heard[m] = env;
+			posWeight[m] = env;
+			power += env * env * mainShare[m];
+			// A note from silence always starts the same way. One over a sounding voice keeps its phase.
+			if (in.voiceStart[m] && !d.running)
+				phases[m] = 0.0;
+
+			float yl = 0.f, yr = 0.f;
+			if (env > 0.f) {
+				float target[NUM_MIX];
+				modeWeights(true, M.filterMode, target);
+				float cutT = std::min(std::max(M.cutoff, 0.f), 1.f);
+				float resT = std::min(std::max(M.res, 0.f), 1.f);
+				float driveT = std::min(std::max(M.drive, 0.f), 1.f);
+				float panT = std::min(std::max(M.pan, -1.f), 1.f);
+				if (!d.running) {
+					std::copy(target, target + NUM_MIX, d.mixS);
+					d.cutS = cutT;
+					d.resS = resT;
+					d.driveS = driveT;
+					d.panS = panT;
+					d.drive.reset();
+					d.svf.reset();
+					d.running = true;
+				}
+				for (int k = 0; k < NUM_MIX; k++)
+					d.mixS[k] += (target[k] - d.mixS[k]) * smoothCoef;
+				d.cutS += (cutT - d.cutS) * smoothCoef;
+				d.resS += (resT - d.resS) * smoothCoef;
+				d.driveS += (driveT - d.driveS) * smoothCoef;
+				d.panS += (panT - d.panS) * smoothCoef;
+
+				const TableState& s = tables[m];
+				playedIndex[m] = s.cur;
+				float v = readAt(bank, s.cur, phases[m], f);
+				if (s.fade < 1.f) {
+					float old = readAt(bank, s.prev, phases[m], f);
+					v = old + (v - old) * s.fade;
+				}
+				float y = d.svf.process(d.drive.process(v * gainS[m], d.driveS < 1e-5f ? 0.f : d.driveS), filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
+				if (!std::isfinite(y)) {
+					d.svf.reset();
+					y = 0.f;
+				}
+				y *= env * gain;
+				float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
+				yl = y * std::cos(angle) * SQRT2;
+				yr = y * std::sin(angle) * SQRT2;
+			}
+			else {
+				d.running = false;
+			}
+			phases[m] += f / sampleRate;
+			if (phases[m] >= 1.0)
+				phases[m] -= std::floor(phases[m]);
+
+			sumL += yl * mainShare[m];
+			sumR += yr * mainShare[m];
+			if (in.wantDirect[m])
+				d.limiter.process(yl, yr, LIMIT, &directL[m], &directR[m]);
+			else
+				directL[m] = directR[m] = 0.f;
+		}
+		// One or two voices play at full level. More share the headroom, so a big chord is not all squeezed by
+		// the limiter (full-level tables: 8 dB of limiting with five voices without this, see tests/test_poly.cpp).
+		float trim = (power > POLY_FULL_VOICES) ? std::sqrt(POLY_FULL_VOICES / power) : 1.f;
+		polyTrimS += (trim - polyTrimS) * smoothCoef;
+		*outL = sumL * polyTrimS;
+		*outR = sumR * polyTrimS;
+	}
+
 	/** The artifacts' own outputs. Each patched artifact runs its own chain with its own settings
 	(no interpolation with a neighbor): GAIN, DRIVE, filter, its position share (posWeight, so the
 	outputs follow the playhead like the main mix), PAN, then a safety limiter. It fades
@@ -564,6 +686,8 @@ private:
 	static constexpr float MAX_MASTER_GAIN = 2.f;
 	/** Levels of safety above the exact band limit (see readAt) */
 	static constexpr float MIP_HEADROOM = 1.f;
+	/** POLY: voices (as summed power) that play at full level before they share the headroom */
+	static constexpr float POLY_FULL_VOICES = 2.f;
 
 	struct TableState {
 		/** Fractional table index */
@@ -630,6 +754,8 @@ private:
 	float gain = 0.f;
 
 	bool structureApplied = false;
+	bool polyApplied = false;
+	float polyTrimS = 1.f;
 	uint32_t appliedSig = 0;
 	const WavetableBank* appliedBank = nullptr;
 	int order[NUM_MARKERS] = {0, 1, 2, 3, 4};

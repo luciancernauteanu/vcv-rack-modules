@@ -47,8 +47,10 @@ struct ToExpanderMessage {
 	bool linked = false;
 	/** RESET arrived this sample: restart the LFOs */
 	bool reset = false;
-	/** The main module runs the granular engine: the CV inputs are labelled START / P.SPRD / SCAN / SPREAD */
+	/** The main module runs the granular engine: the CV inputs are labelled START / P.SPRD / DENSITY */
 	bool granular = false;
+	/** The main module is in POLY: GATE plays the marker's own ADSR instead of scaling its level */
+	bool poly = false;
 };
 
 struct ToMainMessage {
@@ -58,6 +60,9 @@ struct ToMainMessage {
 	float gainMul[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	/** Volts on the expanders' V/OCT inputs, summed per artifact (added to the main V/OCT) */
 	float voct[NUM_MARKERS] = {};
+	/** POLY: an expander's GATE is patched to this artifact, and whether any of them is high */
+	bool gatePatched[NUM_MARKERS] = {};
+	bool gateHigh[NUM_MARKERS] = {};
 	/** A linked expander is actively modulating this artifact (a CV with a non-zero amount, or V/OCT) */
 	bool modulated[NUM_MARKERS] = {};
 };

@@ -111,7 +111,7 @@ struct LitToggle : app::ParamWidget {
 	}
 
 	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == 0) {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && ((e.mods & RACK_MOD_MASK) & ~GLFW_MOD_SHIFT) == 0) {
 			engine::ParamQuantity* pq = getParamQuantity();
 			if (pq) {
 				float oldValue = pq->getValue();
@@ -168,7 +168,7 @@ struct LitToggle : app::ParamWidget {
 it is an action, not a setting. */
 struct MomentaryLitButton : LitToggle {
 	void onButton(const ButtonEvent& e) override {
-		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == 0) {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && ((e.mods & RACK_MOD_MASK) & ~GLFW_MOD_SHIFT) == 0) {
 			engine::ParamQuantity* pq = getParamQuantity();
 			if (pq)
 				pq->setValue(1.f);
