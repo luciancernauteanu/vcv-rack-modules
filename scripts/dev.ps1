@@ -18,6 +18,11 @@ function wa-dist    { Invoke-Msys "cd $script:VcvRoot/waveArtifact && RACK_DIR=$
 function wa-clean   { Invoke-Msys "cd $script:VcvRoot/waveArtifact && RACK_DIR=$script:VcvSdk make clean" }
 function wa-test    { Invoke-Msys "cd $script:VcvRoot/waveArtifact/tests && make run" }
 
+# Install into the PUBLIC (downloaded) VCV Rack: builds with MinGW64 in a scratch copy (the normal UCRT build crashes
+# the public Rack), checks the result, removes stale packages and copies it to %LOCALAPPDATA%\Rack2\plugins-win-x64.
+# Close the public Rack first. Never use wa-install for the public Rack.
+function wa-install-public { & "C:\msys64\usr\bin\bash.exe" -lc "bash $script:VcvRoot/scripts/release_public.sh waveArtifact" }
+
 # Rack source build (no RACK_DIR)
 function rack-build { Invoke-Msys "cd $script:VcvRoot/Rack && make -j4" }
 function rack-run   { Invoke-Msys "cd $script:VcvRoot/Rack && make run" }
@@ -28,4 +33,4 @@ function msys       { Invoke-Msys ($args -join ' ') }
 # Interactive MinGW 64-bit shell
 function mingw      { & "C:\msys64\mingw64.exe" -here }
 
-Write-Host "vcv dev helpers loaded: wa-build wa-install wa-dist wa-clean wa-test rack-build rack-run msys mingw"
+Write-Host "vcv dev helpers loaded: wa-build wa-install wa-install-public wa-dist wa-clean wa-test rack-build rack-run msys mingw"

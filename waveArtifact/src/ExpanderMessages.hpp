@@ -1,6 +1,7 @@
 #pragma once
 #include "Lfo.hpp"
 #include "MorphEngine.hpp"
+#include "StepLocks.hpp"
 
 // Messages between waveArtifact and its expanders (chained to its right, up to MAX_EXPANDERS).
 // Rack double-buffers them, so each hop adds one sample of latency, irrelevant for CV.
@@ -62,11 +63,21 @@ struct ToSequencerMessage {
 	uint32_t resetCount = 0;
 };
 
-/** Sequencer -> main: which marker was struck last, and how hard */
+/** Sequencer -> main: which marker was struck last, and how hard, with that step's parameter locks */
 struct FromSequencerMessage {
 	bool linked = false;
 	uint32_t fireCount[NUM_MARKERS] = {};
 	float velocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
+	/** The latest played step's locks (see StepLocks.hpp), its slide (0 = off, else the share of a step it glides
+	over), and one step's length in beats */
+	float lockValue[NUM_MARKERS][NUM_LOCKABLE] = {};
+	uint64_t lockMask[NUM_MARKERS] = {};
+	float slide[NUM_MARKERS] = {};
+	double stepBeats[NUM_MARKERS] = {0.25, 0.25, 0.25, 0.25, 0.25};
+	/** The latest played step is tied to the one before: its note goes on (see PolyVoices legato) */
+	bool legato[NUM_MARKERS] = {};
+	/** The row's next step is tied to the one playing: keep the note on until it comes (long gate). Live. */
+	bool holdOpen[NUM_MARKERS] = {};
 };
 
 struct ToMainMessage {

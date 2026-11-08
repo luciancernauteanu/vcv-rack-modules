@@ -1222,7 +1222,126 @@ static void testCpu() {
 	CHECK(us < 4.0, "%.2f us per sample", us);
 }
 
+/** POLY note `seconds` long from this sample on (env 1, then 0). `direct`: record the cloud's own output (before the
+master section, whose DRIVE path and DC blocker carry the last note's tail for a while) instead of the main one. */
+static void playNote(Rig& rig, double seconds, std::vector<float>* out, bool direct = false) {
+	rig.in.voiceEnv[0] = 1.f;
+	long n = (long) (seconds * SR);
+	for (long i = 0; i < n; i++) {
+		rig.in.voiceStart[0] = i == 0;
+		float a, b;
+		rig.step(&a, &b);
+		if (direct)
+			rig.engine->getDirect(0, &a, &b);
+		if (out)
+			out->push_back(a);
+	}
+	rig.in.voiceStart[0] = false;
+	rig.in.voiceEnv[0] = 0.f;
+}
+
+static double peakOf(const std::vector<float>& v) {
+	double p = 0.0;
+	for (float x : v)
+		p = std::max(p, (double) std::fabs(x));
+	return p;
+}
+
+/** Largest difference between two renders, relative to their peak, over [from, to) */
+static double relDiff(const std::vector<float>& a, const std::vector<float>& b, size_t from, size_t to) {
+	double d = 0.0;
+	to = std::min(to, std::min(a.size(), b.size()));
+	for (size_t i = from; i < to; i++)
+		d = std::max(d, (double) std::fabs(a[i] - b[i]));
+	return d / std::max(peakOf(a), 1e-9);
+}
+
+static void restartSetup(Rig& rig, bool sync, bool restart) {
+	wa::GrainMarkerInput& M = rig.in.markers[0];
+	M.sync = sync;
+	M.density = sync ? 0.5f : densityKnob(20.f);
+	M.size = sync ? 0.5f : sizeKnob(0.15f);
+	M.spray = 0.3f;
+	M.spread = 0.6f;
+	M.pitchScatter = 0.2f;
+	M.scan = 0.5f;
+	M.start = 0.2f;
+	rig.in.seeded = true;
+	rig.in.poly = true;
+	rig.in.noteRestart = restart;
+}
+
+static void testNoteRestart() {
+	std::printf("note restart (same start every trig)\n");
+	// Two equal notes landing at different places on the beat grid (beat 0.26 and 4.74), 1.6 s of silence between.
+	for (int sync = 0; sync < 2; sync++) {
+		double diff[2];
+		for (int restart = 0; restart < 2; restart++) {
+			Rig rig(makeBank(noiseSource(4.0)));
+			restartSetup(rig, sync, restart);
+			std::vector<float> a, b;
+			rig.run((long) (0.13 * SR));
+			playNote(rig, 0.6, &a);
+			rig.run((long) (1.64 * SR));
+			playNote(rig, 0.6, &b);
+			diff[restart] = relDiff(a, b, 0, a.size());
+		}
+		std::printf("  %s: largest difference between the two notes %.2e with RESTART (limit 1e-4), %.2f without (above 0.1)\n",
+			sync ? "synced, scan + scatter" : "free, scan + scatter ", diff[1], diff[0]);
+		CHECK(diff[1] < 1e-4, "restart: notes differ by %.2e", diff[1]);
+		CHECK(diff[0] > 0.1, "the check cannot fail: without restart the notes differ only by %.2e", diff[0]);
+	}
+	// A note over the last one's release: once the old grains have faded (5 ms), it is the same as a note from silence.
+	for (int sync = 0; sync < 2; sync++) {
+		std::vector<float> fresh, again;
+		{
+			Rig rig(makeBank(noiseSource(4.0)));
+			restartSetup(rig, sync, true);
+			rig.in.wantDirect[0] = true;
+			rig.in.markers[0].gain = 0.2f; // under the safety limiters: they would react to the overlap
+			rig.run((long) (1.13 * SR));
+			playNote(rig, 0.6, &fresh, true);
+		}
+		int left = 0;
+		{
+			Rig rig(makeBank(noiseSource(4.0)));
+			restartSetup(rig, sync, true);
+			rig.in.wantDirect[0] = true;
+			rig.in.markers[0].gain = 0.2f;
+			rig.run((long) (0.4 * SR));
+			playNote(rig, 0.35, nullptr);
+			rig.in.voiceEnv[0] = 1.f; // still sounding
+			left = rig.engine->getActiveGrains(0);
+			playNote(rig, 0.6, &again, true);
+		}
+		// After the fade and the limiter's look-ahead (1.5 ms). The output's 4 Hz DC blocker still carries a slow,
+		// inaudible tail of the last note (about 40 ms), so the notes are compared sample to sample (first
+		// difference), which that tail does not reach.
+		size_t from = (size_t) (0.007 * SR);
+		double d = 0.0, ref = 0.0;
+		for (size_t i = from; i < fresh.size(); i++) {
+			double df = fresh[i] - fresh[i - 1], da = again[i] - again[i - 1];
+			d = std::max(d, std::fabs(da - df));
+			ref = std::max(ref, std::fabs(df));
+		}
+		d /= std::max(ref, 1e-9);
+		double plain = relDiff(fresh, again, from, fresh.size());
+		std::printf("  %s retrigger over a sounding note (%d grains): after 7 ms, sample-to-sample difference from a fresh note %.1e (limit 1e-3; level %.1e with the DC tail)\n",
+			sync ? "synced" : "free  ", left, d, plain);
+		CHECK(d < 1e-3, "retrigger differs from a fresh note by %.2e", d);
+		// The old grains fade, not cut: no step bigger than the source allows in the first 6 ms.
+		double jump = 0.0;
+		for (size_t i = 1; i < from; i++)
+			jump = std::max(jump, (double) std::fabs(again[i] - again[i - 1]));
+		double typical = 0.0;
+		for (size_t i = from + 1; i < again.size(); i++)
+			typical = std::max(typical, (double) std::fabs(again[i] - again[i - 1]));
+		std::printf("    largest sample step in the 5 ms fade %.3f, in the note after it %.3f (limit x1.5)\n", jump, typical);
+		CHECK(jump < 1.5 * typical, "fade step %.3f against %.3f", jump, typical);
+	}
+}
 int main() {
+	testNoteRestart();
 	testSampleBuffer();
 	testLevelFlat();
 	testSyncGrid();

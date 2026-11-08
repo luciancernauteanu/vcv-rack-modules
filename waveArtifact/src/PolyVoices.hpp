@@ -292,8 +292,13 @@ struct PolyVoices {
 	}
 
 	/** `steps`: STEP mode, the markers the clock plays on this sample (the playhead is not used then). In STEP a
-	note with HOLD at the top stays on until its own next turn, so every marker can keep sounding. */
-	void process(const float* pos, const bool* active, float position, const AdsrSettings* settings, float sampleTime, const VoiceGates* direct = nullptr, const bool* steps = nullptr) {
+	note with HOLD at the top stays on until its own next turn, so every marker can keep sounding.
+	SEQ's tied steps (a long gate), with `steps`:
+	- `legato`: a marker in `steps` whose note is still on goes on instead of starting again (no new attack, no
+	  restart of the sound); its HOLD counts again from now. A note already over starts as usual.
+	- `holdOpen`: while set, the marker's note stays on whatever its HOLD (the next step of the group is coming). */
+	void process(const float* pos, const bool* active, float position, const AdsrSettings* settings, float sampleTime, const VoiceGates* direct = nullptr,
+		const bool* steps = nullptr, const bool* legato = nullptr, const bool* holdOpen = nullptr) {
 		bool followsPlayhead[NUM_MARKERS];
 		for (int m = 0; m < NUM_MARKERS; m++)
 			followsPlayhead[m] = active[m] && !(direct && direct->patched[m]);
@@ -314,8 +319,12 @@ struct PolyVoices {
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			const AdsrSettings& s = settings[m];
 			bool on = direct && direct->high[m] && active[m];
-			start[m] = fired[m] || (on && !directPrev[m]);
-			if (start[m]) {
+			bool goesOn = steps && legato && legato[m] && fired[m] && gate[m] && !on;
+			start[m] = !goesOn && (fired[m] || (on && !directPrev[m]));
+			if (goesOn) {
+				holdLeft[m] = s.hold;
+			}
+			else if (start[m]) {
 				gate[m] = true;
 				holdLeft[m] = s.hold;
 				adsr[m].gateOn();
@@ -329,6 +338,9 @@ struct PolyVoices {
 			else if (gate[m]) {
 				if (!active[m]) {
 					gate[m] = false;
+				}
+				else if (steps && holdOpen && holdOpen[m]) {
+					gate[m] = true;
 				}
 				else if (s.hold < 0.f) {
 					gate[m] = steps ? true : !anyFired;

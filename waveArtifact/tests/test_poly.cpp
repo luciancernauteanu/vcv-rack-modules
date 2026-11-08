@@ -1161,7 +1161,76 @@ static void testLoudAndCost() {
 	}
 }
 
+/** SEQ long gates: a tied step goes on with the note (no new attack), the gate stays open until it comes whatever
+HOLD says, and HOLD counts again from the last tied step. */
+static void testTiedSteps() {
+	std::printf("tied steps (long gate)\n");
+	const int STEP = 6000; // 125 ms: a 16th at 120 BPM
+	for (int pass = 0; pass < 2; pass++) {
+		// pass 0: two separate trigs; pass 1: the second tied to the first
+		bool tied = pass == 1;
+		Voices v;
+		for (int m = 0; m < M; m++) {
+			v.s[m].hold = 0.05f; // 50 ms: shorter than a step
+			v.s[m].attack = 0.001f;
+			v.s[m].sustain = 1.f;
+		}
+		bool steps[M] = {}, legato[M] = {}, holdOpen[M] = {};
+		int starts = 0;
+		bool gateAlways = true;
+		float lowest = 1.f;
+		long offAt = -1;
+		for (long i = 0; i < 4 * STEP; i++) {
+			for (int m = 0; m < M; m++)
+				steps[m] = legato[m] = false;
+			if (i == 0)
+				steps[0] = true;
+			if (i == STEP) {
+				steps[0] = true;
+				legato[0] = tied && v.v.gate[0];
+			}
+			// The sequencer's live holdOpen: from the head until the tied step plays
+			holdOpen[0] = tied && i < STEP;
+			v.v.process(v.pos, v.on, 0.f, v.s, 1.f / SR, nullptr, steps, legato, holdOpen);
+			starts += v.v.start[0];
+			if (i > 100 && i <= STEP + 100) {
+				gateAlways = gateAlways && v.v.gate[0];
+				lowest = std::min(lowest, v.v.env[0]);
+			}
+			if (offAt < 0 && i > STEP && !v.v.gate[0])
+				offAt = i;
+		}
+		float offMs = (offAt - STEP) * 1000.f / SR;
+		std::printf("  %s: %d note starts, gate open through both steps %d, lowest level %.3f, gate off %.1f ms after step 2 (HOLD 50)\n",
+			tied ? "tied    " : "separate", starts, (int) gateAlways, lowest, offMs);
+		if (tied) {
+			CHECK(starts == 1, "a tied step does not start a new note: %d starts", starts);
+			CHECK(gateAlways && lowest > 0.99f, "the gate stays open across the group: lowest %g", lowest);
+			CHECK(std::fabs(offMs - 50.f) < 1.f, "HOLD counts from the tied step: %g ms", offMs);
+		}
+		else {
+			CHECK(starts == 2, "two trigs, two notes: %d", starts);
+			CHECK(!gateAlways, "a 50 ms note closes before the next step");
+		}
+	}
+	// A tied step whose note is already over (e.g. the gate dropped) starts a note as usual.
+	{
+		Voices v;
+		for (int m = 0; m < M; m++)
+			v.s[m].hold = 0.05f;
+		bool steps[M] = {}, legato[M] = {}, holdOpen[M] = {};
+		for (long i = 0; i <= STEP; i++) {
+			steps[0] = i == 0 || i == STEP;
+			legato[0] = i == STEP;
+			v.v.process(v.pos, v.on, 0.f, v.s, 1.f / SR, nullptr, steps, legato, holdOpen);
+		}
+		std::printf("  legato after the note ended: starts again %d (1)\n", (int) v.v.start[0]);
+		CHECK(v.v.start[0], "a legato fire on a finished note starts it");
+	}
+}
+
 int main() {
+	testTiedSteps();
 	testAdsr();
 	testTrigger();
 	testHold();
