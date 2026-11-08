@@ -186,7 +186,119 @@ static void testSlide() {
 	CHECK(locks.get(11, 0.f) == 3.f, "a switch jumps even on a slide step: %g", locks.get(11, 0.f));
 }
 
+/** SLIDE as an amount: the glide takes that share of a step; 0 = a jump. A tied step keeps the group's locks. */
+static void testSlideAmountAndTie() {
+	std::printf("slide amount, tie\n");
+	float knobs[wa::NUM_LOCKABLE] = {};
+	for (int k = 0; k < wa::NUM_LOCKABLE; k++)
+		knobs[k] = 0.5f;
+	wa::StepData a, b;
+	a.setLock(9, 0.2f);
+	b.setLock(9, 0.8f);
+	// One step = 0.25 beats at 0.0025 beats per sample = 100 samples.
+	const float amounts[4] = {1.f, 0.5f, 0.1f, 0.01f};
+	const int want[4] = {100, 50, 10, 1};
+	for (int i = 0; i < 4; i++) {
+		wa::MarkerLocks locks;
+		locks.apply(a.value, a.mask, 0.f, 0.25, knobs, 0);
+		locks.apply(b.value, b.mask, amounts[i], 0.25, knobs, 0);
+		int samples = 0;
+		while (locks.gliding && samples < 1000) {
+			locks.advance(0.0025);
+			samples++;
+		}
+		std::printf("  slide %3.0f%%: glide %d samples (want %d)\n", amounts[i] * 100.f, samples, want[i]);
+		CHECK(std::abs(samples - want[i]) <= 1, "slide %g: %d samples", amounts[i], samples);
+		CHECK(locks.get(9, 0.5f) == 0.8f, "ends on the target: %g", locks.get(9, 0.5f));
+	}
+	{
+		wa::MarkerLocks locks;
+		locks.apply(a.value, a.mask, 0.f, 0.25, knobs, 0);
+		locks.apply(b.value, b.mask, 0.f, 0.25, knobs, 0);
+		CHECK(!locks.gliding && locks.get(9, 0.5f) == 0.8f, "slide off jumps: %g", locks.get(9, 0.5f));
+	}
+	// A tied step: the group's locks stay, its own go on top, its own slide.
+	wa::StepData head, tied;
+	head.setLock(9, 0.2f);
+	head.setLock(8, 2.f);
+	head.slide = 0.3f;
+	tied.setLock(9, 0.7f);
+	tied.slide = 0.6f;
+	wa::StepData m = wa::mergeTied(head, tied);
+	std::printf("  tied: cutoff %.2f (0.70) gain %.2f (2.00, kept) slide %.2f (0.60)\n", m.value[9], m.value[8], m.slide);
+	CHECK(m.locked(9) && m.value[9] == 0.7f, "the tied step's own lock wins");
+	CHECK(m.locked(8) && m.value[8] == 2.f, "the group's lock stays");
+	CHECK(m.slide == 0.6f && m.tie, "its own slide, marked tied");
+	wa::StepData empty;
+	wa::StepData m2 = wa::mergeTied(head, empty);
+	CHECK(m2.mask == head.mask, "a tied step without locks keeps the group's: %llx vs %llx", (unsigned long long) m2.mask, (unsigned long long) head.mask);
+	wa::StepData t;
+	t.tie = true;
+	CHECK(!t.isPlain(), "a tie is saved");
+	t.tie = false;
+	t.slide = 0.01f;
+	CHECK(!t.isPlain(), "a 1%% slide is saved");
+}
+
+/** COND RND's picker: every result is a valid condition, mostly chances and A:B, FILL / NOT FILL rare */
+static void testRandomCondition() {
+	std::printf("random condition\n");
+	int count[wa::NUM_CONDITIONS] = {};
+	bool valid = true;
+	const int N = 20000;
+	for (int i = 0; i < N; i++) {
+		wa::StepData d;
+		wa::randomCondition(d, rnd(), rnd(), rnd());
+		count[d.cond]++;
+		if (d.cond == wa::COND_CHANCE) {
+			bool listed = false;
+			for (int c : wa::CHANCES)
+				listed = listed || d.chance == c;
+			valid = valid && listed;
+		}
+		if (d.cond == wa::COND_RATIO)
+			valid = valid && d.b >= 2 && d.b <= 8 && d.a >= 1 && d.a <= d.b;
+	}
+	// The edges of [0, 1) too
+	for (float u : {0.f, 0.999999f}) {
+		wa::StepData d;
+		wa::randomCondition(d, u, u, u);
+		valid = valid && d.cond != wa::COND_ALWAYS && d.a >= 1 && d.a <= d.b && d.b <= 8;
+	}
+	std::printf("  always %d, chance %.1f%% (50), A:B %.1f%% (35), FILL %.1f%% (7.5), NOT FILL %.1f%% (7.5), all valid %d\n", count[wa::COND_ALWAYS],
+		100.0 * count[wa::COND_CHANCE] / N, 100.0 * count[wa::COND_RATIO] / N, 100.0 * count[wa::COND_FILL] / N, 100.0 * count[wa::COND_NOT_FILL] / N, (int) valid);
+	CHECK(valid, "every random condition must be one the menu offers");
+	CHECK(count[wa::COND_ALWAYS] == 0, "the picker always gives a condition: %d", count[wa::COND_ALWAYS]);
+	CHECK(std::abs(count[wa::COND_CHANCE] - N / 2) < N / 50, "chance share %d", count[wa::COND_CHANCE]);
+	CHECK(count[wa::COND_FILL] > N / 20 && count[wa::COND_FILL] < N / 10, "FILL share %d", count[wa::COND_FILL]);
+}
+
+/** MOD output: jumps without slide, glides over slide x a step with it, holds after */
+static void testGlideValue() {
+	std::printf("glide value (MOD)\n");
+	wa::GlideValue g;
+	g.set(0.8f, 0.f, 0.25);
+	CHECK(g.value == 0.8f, "no slide jumps: %g", g.value);
+	// 0.25 beats per step, 0.0025 beats per sample: a step is 100 samples; slide 50% = 50 samples
+	g.set(0.2f, 0.5f, 0.25);
+	CHECK(g.value == 0.8f, "a glide starts where it was: %g", g.value);
+	int n = 0;
+	while (g.progress < 1.0 && n < 1000) {
+		g.advance(0.0025);
+		n++;
+	}
+	std::printf("  slide 50%%: %d samples (50), ends %.3f (0.200)\n", n, g.value);
+	CHECK(n == 50 && g.value == 0.2f, "glide %d samples to %g", n, g.value);
+	g.advance(1.0);
+	CHECK(g.value == 0.2f, "holds after: %g", g.value);
+	g.set(0.2f, 1.f, 0.25);
+	CHECK(g.progress == 1.0, "the same value does not start a glide");
+}
+
 int main() {
+	testGlideValue();
+	testRandomCondition();
+	testSlideAmountAndTie();
 	testConditions();
 	testLocks();
 	testLockable();

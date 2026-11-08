@@ -380,14 +380,18 @@ struct MarkerBar : widget::Widget {
 			float index = 0.f;
 			bool grain = module && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
 			float readAt = 0.f;
+			// While a selected trig's WAVE / START is being moved (map drag or knob held), the slot shows that trig's
+			// start, following the move; otherwise what the marker plays now (moving with its LFO, scan and trigs).
+			float edited = 0.f;
+			bool editing = module && module->stepWaveEditing(i, &edited);
 			if (active) {
 				if (bank && grain) {
 					// Granular: the source around the place this cloud reads (about 6% of the sample wide)
-					readAt = module->shownGrainRead[i].load();
+					readAt = editing ? edited : module->shownGrainRead[i].load();
 					wadraw::drawSampleSlice(args.vg, bank->sample, readAt, 0.06f, wr, c);
 				}
 				else if (bank) {
-					index = module->shownIndex[i].load();
+					index = editing ? edited * std::max(bank->numTables - 1, 0) : module->shownIndex[i].load();
 					wadraw::drawTable(args.vg, *bank, index, wr, c, 1.3f);
 				}
 				else if (!module) {

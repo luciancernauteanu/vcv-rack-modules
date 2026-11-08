@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 30 HP panel for the waveArtifact sequencer. Geometry matches seqlayout in src/WaveArtifactSequencer.cpp.
+<!-- 32 HP panel for the waveArtifact sequencer. Geometry matches seqlayout in src/WaveArtifactSequencer.cpp.
      The grid and labels are drawn at runtime. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="152.4mm" height="128.5mm" viewBox="0 0 152.4 128.5" version="1.1">
+<svg xmlns="http://www.w3.org/2000/svg" width="162.56mm" height="128.5mm" viewBox="0 0 162.56 128.5" version="1.1">
   <g id="panel">
-    <rect id="background" x="0" y="0" width="152.4" height="128.5" fill="#23262b"/>
+    <rect id="background" x="0" y="0" width="162.56" height="128.5" fill="#23262b"/>
     <g id="sections" fill="#2d3137">
-      <rect x="4" y="11" width="144.4" height="104" rx="2" ry="2"/>
+      <rect x="4" y="11" width="154.56" height="104" rx="2" ry="2"/>
     </g>
+    <rect id="gate-out-box" x="140.2" y="11.8" width="18.2" height="86.6" rx="1.5" ry="1.5" fill="#e6e6e6"/>
   </g>
 </svg>

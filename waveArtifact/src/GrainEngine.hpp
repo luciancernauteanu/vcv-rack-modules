@@ -47,6 +47,8 @@
 // POLY play mode (GrainInput::poly): a cloud's weight is its marker's ADSR level instead of its position share
 // (see PolyVoices.hpp). A note from silence starts the cloud as if it had been running (all its overlapping
 // grains at once, each part way through), so a short attack is heard at once and the level does not dip.
+// With RESTART (GrainInput::noteRestart) every note starts its cloud the same way: the grain grid, a synced scan and
+// the scatter count from the note's start, not from the beat, so equal trigs on different steps sound the same.
 //
 // Click prevention: every grain has a >= 1.3 ms smooth edge and is placed so it fits inside the sample (a
 // live pitch change that still reaches an end fades out there); clouds fade in and out with their weight
@@ -344,6 +346,11 @@ struct GrainInput {
 	float voiceEnv[NUM_MARKERS] = {};
 	/** The marker started a new note on this sample */
 	bool voiceStart[NUM_MARKERS] = {};
+	/** POLY: every note restarts its cloud from the same point (RESTART). The grain grid, a synced SCAN and the
+	seeded scatter count from the note's start instead of the beat grid, the scatter's random sequence starts over,
+	and a note over the last one's release fades the old grains out (DECLICK_TIME) and starts like one from
+	silence. So two equal trigs sound the same wherever they land. */
+	bool noteRestart = false;
 
 	// Master section: same as EngineInput
 	int masterMode = -1;
@@ -498,8 +505,10 @@ public:
 		}
 		if (in.reset) {
 			gclock.reset();
-			for (int m = 0; m < NUM_MARKERS; m++)
+			for (int m = 0; m < NUM_MARKERS; m++) {
 				clouds[m].lastCycle = LONG_MIN;
+				clouds[m].anchored = false; // back on the beat grid until the next note
+			}
 		}
 		if (in.clock)
 			gclock.process(*in.clock, sampleRate);
@@ -579,11 +588,18 @@ public:
 							clearCloudGrains(m);
 							c.panS = std::min(std::max(in.markers[m].pan, -1.f), 1.f);
 						}
+						else if (in.noteRestart) {
+							fadeCloudGrains(m);
+						}
+						c.triggerRestart = in.noteRestart;
 					}
+					if (!in.noteRestart)
+						c.anchored = false;
 					c.w = tw[m]; // the ADSR is already smooth, and a smoother would hide a short attack
 				}
 				else {
 					c.w += (tw[m] - c.w) * smoothCoef;
+					c.anchored = false;
 				}
 				float gT = std::min(std::max(in.markers[m].gain, 0.f), (float) MAX_GAIN);
 				c.gainS += (gT - c.gainS) * smoothCoef;
@@ -627,11 +643,15 @@ public:
 					float x = (float) std::max(toEnd, 0.0) / END_FADE;
 					k *= x * x * (3.f - 2.f * x);
 				}
+				if (gr.fadeOut > 0.f) {
+					k *= gr.fade * gr.fade * (3.f - 2.f * gr.fade);
+					gr.fade -= gr.fadeOut;
+				}
 				bufL[gr.marker] += l * k * gr.gl;
 				bufR[gr.marker] += r * k * gr.gr;
 				gr.pos += gr.inc * c.liveMul;
 				gr.age++;
-				if (gr.age >= gr.len || gr.pos < -4.0 || gr.pos > frames + 4.0) {
+				if (gr.age >= gr.len || gr.fade <= 0.f || gr.pos < -4.0 || gr.pos > frames + 4.0) {
 					gr.active = false;
 					c.active--;
 				}
@@ -646,8 +666,14 @@ public:
 			// A silent cloud goes straight to its place, so a new note does not begin with a slide. This runs
 			// even for a cloud idle long enough to skip the block below.
 			float panT = std::min(std::max(M.pan, -1.f), 1.f);
-			if (c.w < 1e-4f)
+			if (c.w < 1e-4f) {
 				c.panS = panT;
+				// The filter too (a step's cutoff lock, a knob turned while it was silent): every note from silence
+				// starts on its own settings, not with a glide from the last note's.
+				modeWeights(true, M.filterMode, c.mixS);
+				c.cutS = std::min(std::max(M.cutoff, 0.f), 1.f);
+				c.resS = std::min(std::max(M.res, 0.f), 1.f);
+			}
 			bool live = c.running || c.active > 0;
 			if (live) {
 				c.idle = 0;
@@ -795,6 +821,9 @@ private:
 		int window = 0;
 		float gl = 1.f, gr = 1.f;
 		float amp = 1.f;
+		/** RESTART: a grain of the last note fades out (fadeOut > 0, per sample) under the new note */
+		float fade = 1.f;
+		float fadeOut = 0.f;
 	};
 
 	struct Cloud {
@@ -829,6 +858,11 @@ private:
 		/** POLY: a note started; schedule() takes it on this cloud's next turn */
 		bool triggerFire = false;
 		bool triggerFromSilence = false;
+		/** RESTART: the note restarts the cloud, and the beat it started on (the grid and a synced scan count from
+		there while `anchored`) */
+		bool triggerRestart = false;
+		bool anchored = false;
+		double anchor = 0.0;
 		/** The grain started last (it may have ended since) */
 		int lastGrain = -1;
 		float smearWet = 0.f;
@@ -850,6 +884,14 @@ private:
 		clouds[m].active = 0;
 	}
 
+	/** RESTART: the cloud's sounding grains fade out over DECLICK_TIME (they belong to the last note) */
+	void fadeCloudGrains(int m) {
+		for (int g = 0; g < MAX_GRAINS; g++) {
+			if (grains[g].active && grains[g].marker == m && grains[g].fadeOut <= 0.f)
+				grains[g].fadeOut = fadeStep;
+		}
+	}
+
 	void resetCloud(int m) {
 		Cloud& c = clouds[m];
 		c.running = false;
@@ -859,6 +901,8 @@ private:
 		c.lastCycle = LONG_MIN;
 		c.lastGrain = -1;
 		c.triggerFire = false;
+		c.triggerRestart = false;
+		c.anchored = false;
 		c.idle = IDLE_RESET + 1;
 		c.w = 0.f;
 		c.svfL.reset();
@@ -866,6 +910,15 @@ private:
 		c.smearWet = 0.f;
 		c.diffL.clear();
 		c.diffR.clear();
+	}
+
+	/** RESTART: where a note's random sequence starts (the same for every note of a marker) */
+	static uint32_t noteSeed(int m) {
+		uint32_t h = (uint32_t) (m + 1) * 0x9E3779B1u ^ 0x5BD1E995u;
+		h ^= h >> 15;
+		h *= 0x2C1B3C6Du;
+		h ^= h >> 12;
+		return h ? h : 1u;
 	}
 
 	float random(Cloud& c) {
@@ -897,11 +950,25 @@ private:
 		bool scanning = grainScanActive(scan);
 		float loopBeats = grainLoopBeats(scan);
 		double srcStep = (double) S.sampleRate / sampleRate;
-		// POLY: a new note reads from START again (a synced scan stays locked to the beat).
-		bool startNote = c.triggerFire && c.triggerFromSilence;
+		// POLY: a new note reads from START again (a synced scan stays locked to the beat, unless RESTART).
+		bool restart = c.triggerFire && c.triggerRestart;
+		bool fromSilence = c.triggerFire && c.triggerFromSilence;
+		bool startNote = fromSilence || restart;
 		if (c.triggerFire && !(sync && scanning))
 			c.scanAccum = 0.0;
+		if (restart) {
+			// The note's own time: its grid point 0 is now, the scan and the seeded scatter start over.
+			c.anchored = true;
+			c.anchor = gclock.beatPos;
+			c.scanAccum = 0.0;
+			c.lastN = 0;
+			c.lastGrain = -1;
+			c.rng = noteSeed(m);
+		}
 		c.triggerFire = false;
+		c.triggerRestart = false;
+		// Beats on the grid this cloud follows: since RESET, or since its note started (RESTART)
+		double beat = gclock.beatPos - (c.anchored ? c.anchor : 0.0);
 
 		if (!wasRunning) {
 			c.syncState = -1;
@@ -917,7 +984,7 @@ private:
 		double offset = 0.0;
 		if (scanning) {
 			if (sync) {
-				offset = syncedScanPlace(gclock.beatPos, loopBeats, scan, M.scanPing) * sliceLen;
+				offset = syncedScanPlace(beat, loopBeats, scan, M.scanPing) * sliceLen;
 			}
 			else {
 				// PING runs one cycle there and back: twice the slice.
@@ -946,6 +1013,9 @@ private:
 			};
 			c.scanLevelTarget = ease(q / f) * ease((1.f - q) / f);
 		}
+		// RESTART from silence: the level starts where the note does, not where the last one left it.
+		if (restart && fromSilence)
+			c.scanLevel = c.scanLevelTarget;
 
 		// Grain clock
 		double delay = 0.0;
@@ -966,7 +1036,7 @@ private:
 			float interval = division / (float) keepFactor(sizeSeconds);
 			// The epsilon (about 0.001 samples) keeps a position that lands on a grid point up to rounding
 			// from missing it by one sample.
-			double x = gclock.beatPos / interval;
+			double x = beat / interval;
 			long nn = (long) std::floor(x + 1e-7);
 			if (c.syncState != 1 || interval != c.lastInterval) {
 				c.syncState = 1;
@@ -979,7 +1049,7 @@ private:
 				fire = true;
 				c.lastN = nn;
 				gridBeat = nn * (double) interval;
-				delay = gclock.snapped ? 0.0 : std::max(gclock.beatPos - nn * (double) interval, 0.0) / std::max(gclock.advance, 1e-12);
+				delay = gclock.snapped ? 0.0 : std::max(beat - nn * (double) interval, 0.0) / std::max(gclock.advance, 1e-12);
 				delay = std::min(std::max(delay, 0.0), 2.0);
 			}
 			else if (nn < c.lastN) {
@@ -1009,7 +1079,7 @@ private:
 			fire = true;
 			delay = 0.0;
 			if (sync)
-				gridBeat = gclock.beatPos;
+				gridBeat = beat;
 			else
 				c.gph = 0.0;
 		}
@@ -1083,6 +1153,8 @@ private:
 			startF = matchedStart(c, m, S, startF, maxStart, (double) len * stepNow, reverse, stepLevel0, &correlation);
 		g->active = true;
 		g->marker = m;
+		g->fade = 1.f;
+		g->fadeOut = 0.f;
 		g->level = level;
 		g->len = len;
 		g->age = 0;

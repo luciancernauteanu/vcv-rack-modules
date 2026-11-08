@@ -68,11 +68,16 @@ struct FromSequencerMessage {
 	bool linked = false;
 	uint32_t fireCount[NUM_MARKERS] = {};
 	float velocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
-	/** The latest played step's locks (see StepLocks.hpp), whether it slides, and one step's length in beats */
+	/** The latest played step's locks (see StepLocks.hpp), its slide (0 = off, else the share of a step it glides
+	over), and one step's length in beats */
 	float lockValue[NUM_MARKERS][NUM_LOCKABLE] = {};
 	uint64_t lockMask[NUM_MARKERS] = {};
-	bool slide[NUM_MARKERS] = {};
+	float slide[NUM_MARKERS] = {};
 	double stepBeats[NUM_MARKERS] = {0.25, 0.25, 0.25, 0.25, 0.25};
+	/** The latest played step is tied to the one before: its note goes on (see PolyVoices legato) */
+	bool legato[NUM_MARKERS] = {};
+	/** The row's next step is tied to the one playing: keep the note on until it comes (long gate). Live. */
+	bool holdOpen[NUM_MARKERS] = {};
 };
 
 struct ToMainMessage {

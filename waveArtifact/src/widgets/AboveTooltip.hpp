@@ -61,6 +61,13 @@ struct AboveTooltip : T {
 		}
 		T::onButton(e);
 	}
+	/** The control's own menu, then (with a sequencer on the left) clearing this setting's trig locks in its row */
+	void appendContextMenu(ui::Menu* menu) override {
+		T::appendContextMenu(menu);
+		WaveArtifact* m = dynamic_cast<WaveArtifact*>(this->module);
+		if (m)
+			m->appendLockMenu(menu, this->paramId);
+	}
 	~AboveTooltip() {
 		hideAbove();
 	}

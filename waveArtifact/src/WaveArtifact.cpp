@@ -158,6 +158,8 @@ WaveArtifact::WaveArtifact() {
 	getParamQuantity(ENGINE_MODE_PARAM)->randomizeEnabled = false;
 	configSwitch(GRAIN_SEEDED_PARAM, 0.f, 1.f, 1.f, "Grain scatter repeats every loop cycle while synced", {"Off (continuous random)", "On (seeded)"});
 	getParamQuantity(GRAIN_SEEDED_PARAM)->randomizeEnabled = false;
+	configSwitch(GRAIN_NOTE_RESTART_PARAM, 0.f, 1.f, 1.f, "Grain notes restart from the same point", {"Off (grains follow the beat)", "On (every note the same)"});
+	getParamQuantity(GRAIN_NOTE_RESTART_PARAM)->randomizeEnabled = false;
 
 	configSwitch(MASTER_MODE_PARAM, 0.f, 4.f, 1.f, "Master filter type", {"Off", "Low-pass", "Band-pass", "High-pass", "Notch"});
 	configParam(MASTER_CUTOFF_PARAM, 0.f, 1.f, 1.f, "Master filter cutoff", " Hz", 1000.f, 20.f);
@@ -244,6 +246,8 @@ WaveArtifact::WaveArtifact() {
 
 void WaveArtifact::onRandomize(const RandomizeEvent& e) {
 	Module::onRandomize(e);
+	// The knobs themselves change, also while a sequencer step is selected (the sequencer's RND randomizes locks).
+	lockResync = true;
 	// Rack calls this with the engine locked, so the expanders' params can be set directly. They
 	// are walked in chain order, like the messages; each applies its own randomizeEnabled flags.
 	Module* last = this;
@@ -255,6 +259,8 @@ void WaveArtifact::onRandomize(const RandomizeEvent& e) {
 
 void WaveArtifact::onReset(const ResetEvent& e) {
 	Module::onReset(e);
+	// Every knob goes back to its default, also while a sequencer step is selected (not into that step's locks).
+	lockResync = true;
 	selectedMarker = 0;
 	previewTable = -1;
 	// Initialize = a fresh module: no sample. Rack calls onReset with the engine locked
@@ -346,6 +352,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	}
 	// The step sequencer on the left: which markers it struck this sample, and how hard.
 	bool seqFired[NUM_MARKERS] = {};
+	// Tied steps (long gates): a fire that goes on with the note, and notes kept on until their next tied step.
+	bool seqLegato[NUM_MARKERS] = {}, seqHoldOpen[NUM_MARKERS] = {};
 	bool seqMode = params[PLAY_MODE_PARAM].getValue() > 3.5f;
 	bool seqLocksOn = false;
 	{
@@ -359,13 +367,17 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			leftModule->rightExpander.requestMessageFlip();
 			bool now = sq->linked;
 			for (int i = 0; i < NUM_MARKERS; i++) {
+				seqHoldOpen[i] = now && sq->holdOpen[i];
 				if (now && !seqLinkedBefore) {
 					seqSeen[i] = sq->fireCount[i]; // just snapped on: do not play what it played before
 				}
 				else if (sq->fireCount[i] != seqSeen[i]) {
 					seqSeen[i] = sq->fireCount[i];
 					seqFired[i] = true;
-					seqVelocity[i] = sq->velocity[i];
+					// A tied step whose note is still on: same note, same level (the group's first trig's velocity).
+					seqLegato[i] = sq->legato[i] && voices.gate[i];
+					if (!seqLegato[i])
+						seqVelocity[i] = sq->velocity[i];
 					// From silence the new velocity is in place at once, so a soft step after a hard one does not
 					// start with the hard one's level.
 					if (voices.env[i] < 1e-3f)
@@ -499,7 +511,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 				bool struck[NUM_MARKERS];
 				for (int i = 0; i < NUM_MARKERS; i++)
 					struck[i] = seqFired[i] && playable[i];
-				voices.process(markerPos, markerOn, triggerPosition, adsr, args.sampleTime, &direct, struck);
+				voices.process(markerPos, markerOn, triggerPosition, adsr, args.sampleTime, &direct, struck, seqLegato, seqHoldOpen);
 			}
 			else {
 				stepper.process(posLfo.getPhase(), markerPos, playable, params[PLAY_MODE_PARAM].getValue() > 2.5f);
@@ -597,6 +609,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		gin.clock = &clock;
 		gin.reset = reset;
 		gin.seeded = params[GRAIN_SEEDED_PARAM].getValue() > 0.5f;
+		gin.noteRestart = params[GRAIN_NOTE_RESTART_PARAM].getValue() > 0.5f;
 		gin.holdSilent = in.holdSilent;
 		gin.poly = in.poly;
 		for (int i = 0; i < NUM_MARKERS; i++) {
@@ -1156,6 +1169,85 @@ int WaveArtifact::stepsLockingInRow(int paramId) {
 	return n;
 }
 
+bool WaveArtifact::stepWaveShown(int marker, float* wave, bool* locked) {
+	int r, s;
+	if (!lockTarget(&r, &s) || r != marker)
+		return false;
+	float v;
+	bool l;
+	if (!stepValueFor(MARKER_WAVE_PARAM + marker, &v, &l))
+		return false;
+	*wave = clamp(v, 0.f, 1.f);
+	if (locked)
+		*locked = l;
+	return true;
+}
+
+bool WaveArtifact::stepWaveEditing(int marker, float* wave) {
+	if (!stepWaveShown(marker, wave))
+		return false;
+	if (waveEditMarker == marker)
+		return true;
+	// The WAVE / START knob held while it shows the step (LinkedKnob)
+	widget::Widget* dragged = APP->event->getDraggedWidget();
+	ParamWidget* pw = dynamic_cast<ParamWidget*>(dragged);
+	StepShownValue* shown = dynamic_cast<StepShownValue*>(dragged);
+	return pw && shown && pw->module == this && pw->paramId == MARKER_WAVE_PARAM + marker && shown->stepShowing;
+}
+
+int WaveArtifact::rowLocks(int marker, int k, bool clear) {
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	if (!seq || marker < 0 || marker >= NUM_MARKERS || !wa::isLockable(k))
+		return 0;
+	int n = 0;
+	for (int s = 0; s < WaveArtifactSequencer::STEPS; s++) {
+		wa::StepData& d = seq->stepData[marker][s];
+		if (!d.locked(k))
+			continue;
+		n++;
+		if (clear)
+			d.clearLock(k);
+	}
+	return n;
+}
+
+void WaveArtifact::appendLockMenu(ui::Menu* menu, int paramId) {
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	if (!seq)
+		return;
+	// Which marker and setting this control is (each setting's params are one block of NUM_MARKERS IDs)
+	int marker = -1, k = -1;
+	for (int s = 0; s < NUM_MARKER_SETTINGS; s++) {
+		int i = paramId - MARKER_SETTING_PARAMS[s];
+		if (i >= 0 && i < NUM_MARKERS) {
+			marker = i;
+			k = s;
+		}
+	}
+	if (marker < 0 || !wa::isLockable(k))
+		return;
+	int n = rowLocks(marker, k);
+	menu->addChild(new MenuSeparator);
+	menu->addChild(createMenuItem(string::f("Clear %s trig locks (row %d)", wa::LOCK_LABELS[k], marker + 1), n == 1 ? "1 step" : string::f("%d steps", n),
+		[=]() {
+			WaveArtifactSequencer* sq = sequencerOnLeft();
+			if (!sq)
+				return;
+			// Undo: the sequencer's whole state before and after
+			history::ModuleChange* h = new history::ModuleChange;
+			h->name = "clear trig locks";
+			h->moduleId = sq->id;
+			h->oldModuleJ = sq->toJson();
+			rowLocks(marker, k, true);
+			h->newModuleJ = sq->toJson();
+			APP->history->push(h);
+			// The lane shows what was cleared
+			sq->laneRow = marker;
+			sq->laneSetting = k;
+		},
+		n == 0));
+}
+
 int WaveArtifact::recordStep() {
 	int r, s;
 	WaveArtifactSequencer* seq = sequencerOnLeft();
@@ -1209,7 +1301,8 @@ bool WaveArtifact::clearStepLock(int paramId) {
 void WaveArtifact::lockCaptureStep() {
 	int r, s;
 	bool target = lockTarget(&r, &s);
-	if (!target || r != lockSnapMarker) {
+	bool resync = lockResync.exchange(false);
+	if (!target || r != lockSnapMarker || resync) {
 		// Not capturing (or a new target): remember the controls as they are, to see changes from the next frame.
 		int m = target ? r : selectedMarker;
 		for (int k = 0; k < NUM_MARKER_SETTINGS; k++)
@@ -1751,6 +1844,15 @@ struct WaveArtifactWidget : ModuleWidget {
 			},
 			[=]() {
 				Param& p = m->params[WaveArtifact::GRAIN_SEEDED_PARAM];
+				p.setValue(p.getValue() > 0.5f ? 0.f : 1.f);
+			}
+		));
+		menu->addChild(createCheckMenuItem("Every note restarts the grains (POLY / SEQ)", "",
+			[=]() {
+				return m->params[WaveArtifact::GRAIN_NOTE_RESTART_PARAM].getValue() > 0.5f;
+			},
+			[=]() {
+				Param& p = m->params[WaveArtifact::GRAIN_NOTE_RESTART_PARAM];
 				p.setValue(p.getValue() > 0.5f ? 0.f : 1.f);
 			}
 		));

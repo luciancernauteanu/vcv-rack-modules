@@ -194,6 +194,13 @@ has none. Expander CV and the LFOs still move a locked value. Locks only play in
   stays selected until you click outside the steps or on an empty part of the main module's panel, select another
   marker, or switch the step off. While a step is
   selected, Shift moves on every marker are off.
+- **Place a trig's WAVE / START on the map:** with a step selected, a line tagged **TRIG** on the wavetable map marks
+  the exact place of the step's own WAVE (or GRAIN START): solid when the step locks it, faint while it plays the
+  knob. The marker's bullet and scan slice stay live, so you see the wave move as the pattern plays (and jump to the
+  TRIG line when that step plays). Turning the WAVE / START knob moves the line. Click anywhere on the map and drag
+  to lock the step's start right there (WAVE: the artifact clicked; GRAIN: the exact place in the sample); the knob
+  keeps its own value. While you move it (on the map, or with the WAVE / START knob held), the marker's slot in the
+  middle screen shows the waveform at the trig's start and follows the move; let go and it shows the live wave again.
 - **Lock from the lane:** the strip under the grid shows one setting for one row (the row of the selected step).
   It switches to whatever control of the selected marker you click or lock, with or without a selected step. Steps
   without a lock show the knob's value, so you see which steps a knob move changes. Unipolar settings fill from the
@@ -210,21 +217,51 @@ has none. Expander CV and the LFOs still move a locked value. Locks only play in
 - **Clearing locks:** the **CLR** button at the left end of the lane clears the lane's setting on every step of its
   row, so those steps play the knob's own value again (for example a recorded CUTOFF move). **Shift + click** clears
   every locked setting of that row. CLR is lit while there is something to clear. Velocity, condition and slide stay.
-  Double-clicking a knob clears just that setting on the selected step, and the step's right-click menu has **Clear
+  **Right-click any of a marker's knobs or buttons** for **Clear <setting> trig locks (row N)**: that setting's locks
+  go from every step of the marker's row (the item shows how many steps; undo with Ctrl + Z), other settings and rows
+  stay. Double-clicking a knob clears just that setting on the selected step, and the step's right-click menu has **Clear
   locks on this step**.
-- **Locked steps** show a white dot in their corner. Right-click a step for its menu: condition, slide, **Clear locks
-  on this step** and **Delete step** (the row's own menu is in its **Row** submenu).
+- **Locked steps** show a white dot in their corner. Right-click a step for its menu: condition, slide, tie, **Clear
+  locks on this step** and **Delete step** (the row's own menu is in its **Row** submenu).
 - **Trig conditions** (right-click a step > Condition) decide whether a step plays this time: **Always**, a
   **chance** (10 / 25 / 50 / 75 / 90%), **A:B** (plays on pass A of every B passes of its row, B = 2 to 8; pass 1 is
   the first after RESET), **FILL** (only while FILL is on) and **NOT FILL** (only while it is off). The condition is
   shown in the step. A step that does not play leaves the locks of the step before in place.
+- **Random conditions (COND, top left):** **RND** gives the lit steps of the lane's row random conditions
+  (**Shift + click**: every row). The slider next to it sets how many: at 100% every lit step gets one, at 0% none
+  (the press resets the row to Always), in between about that share. Mostly chances and A:B, now and then FILL or NOT
+  FILL. Tied steps stay Always (their group's first trig decides). **CLR** resets the row's conditions to Always
+  (**Shift + click**: every row). Both can be undone (Ctrl + Z). Locks, slide and ties stay.
 - **FILL:** the button under the lane latches FILL on and off; the jack next to it turns FILL on while its gate is
   high.
-- **Slide** (right-click a step): the settings this step changes (lock to lock, knob to lock, lock back to the knob)
-  glide there over one of the row's steps instead of jumping. Switches and lists still jump. A slash in the corner
-  shows slide.
+- **Slide:** the thin strip just under each lit trig (apart from the trig, so the whole cell is still velocity).
+  Drag (or click) it to the right: the settings this step
+  changes (lock to lock, knob to lock, lock back to the knob) glide there instead of jumping, over that share of one
+  of the row's steps. At the left end slide is off; 1% is barely a glide, 100% glides over the whole step.
+  Double-click the strip to switch slide off. The step's right-click menu has Off / 10 / 25 / 50 / 75 / 100% too.
+  Switches and lists still jump. Older patches with slide on load at 100%.
+- **Tie (a long gate):** hover the line between two lit trigs and a small **+** appears centered between them:
+  click it to tie the right trig to the left one. On a tied pair it shows **−**: click to untie (also in the step's
+  menu). The joined bars show the group, which can be longer than two. The clock is not touched (every step
+  still counts as before), only the note: the first trig starts it, the tied steps do not start it again, its gate
+  stays on through the group, and the marker's H (note length) counts from the group's last step. A tied step keeps
+  the note's level and the group's locks; its own locks go on top (with its own slide), so a long note can glide to
+  new values. The first trig's condition decides for the whole group. Groups end at the row's end.
+- **Random locks (RND, top right):** gives every lit step of the lane's row new random locks (**Shift + click**: every
+  row). The slider next to it sets how many: at 100% every lockable setting is locked on every lit step, at 0% none
+  (the press clears the row's locks), in between about that share. The values are random over each knob's range
+  (whole values for switches, lists and stepped knobs); the settings Randomize leaves alone on the main module (LFO
+  shape, grain window and direction, the sync switches) are left alone here too. Conditions, slide and ties stay.
+  Undo (Ctrl + Z) brings the previous locks back.
+- **GATE outputs:** a jack right of each row. 10 V for half a step from every trig that plays (so a chance or A:B
+  step that does not play gives no gate), and through a tied group it stays high until half way through the group's
+  last step. The gates follow the row's own CLOCK and length.
+- **MOD outputs:** a jack right of each GATE: the row's step velocities as a CV, 0 to 10 V (the bar's height). Each
+  step that plays sets it, and it holds until the next one plays (steps that are off or do not play keep it). A step
+  with slide glides there over its slide x one step, like the locks; tied steps send their own height, so a long note
+  can carry a moving CV. GATE + MOD together drive any envelope, filter or VCA in the rack.
 
-Locks, conditions and slide are saved with the patch; older patches load with plain steps.
+Locks, conditions, slide and ties are saved with the patch; older patches load with plain steps.
 
 ## The granular engine (GRAIN)
 
@@ -294,6 +331,13 @@ shimmer a little more.
 grain depend only on its place in the loop cycle, so the pattern repeats every cycle instead of
 drifting (right-click menu: *Grain scatter repeats every loop*).
 
+**Every note restarts the grains** (POLY and SEQ, on by default). Each note starts its cloud from
+the same point: its first grain fires at once, the grain grid and a synced SCAN count from the
+note instead of the beat, and the scatter starts the same random sequence. So a trig copied to
+another step sounds exactly like the original, wherever it lands on the beat. A note over the last
+one's release fades the old grains out (5 ms) and starts like a note from silence. Off: grains and
+a synced SCAN stay locked to the beat grid, so equal trigs on different steps sound different.
+
 Pitch: 0 V plays the sample at its original speed; V/OCT, PITCH and the expander's V/OCT transpose
 the grains (up to 3 octaves up without aliasing; the sample is kept low-passed at half rates).
 Level: a dense cloud has about the loudness of the sample whatever DENSITY and SIZE are; sparse
@@ -302,7 +346,7 @@ off, no SPRAY) repeat one short loop, so tonal samples are pulled toward multipl
 rate: add SPRAY or SCAN for a steady pitch.
 
 Right-click menu: *Engine*, *Grain direction (selected marker)* (forward / reverse / random) and
-*Grain scatter repeats every loop*. The wavetable audition (double-click the map) is for the WAVE
+*Grain scatter repeats every loop*, *Every note restarts the grains (POLY / SEQ)*. The wavetable audition (double-click the map) is for the WAVE
 engine only. Not yet: grain clock from the played pitch (PITCH trigger mode).
 
 ## The expander

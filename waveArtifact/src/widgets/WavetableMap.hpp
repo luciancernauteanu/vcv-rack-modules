@@ -53,10 +53,27 @@ struct WavetableMap : widget::Widget {
 	float bulletR() {
 		return std::min(mm2px(layout::BULLET_R), box.size.y * 0.3f);
 	}
+	bool isGrain() {
+		return module && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+	}
+	/** A sequencer step of this marker is selected: where its WAVE / START is on the map (not where the marker plays
+	now), so a trig's start can be placed exactly. GRAIN: START is a share of the sample, so x = START x width. */
+	bool stepX(int marker, int n, float* x, bool* locked = nullptr) {
+		float w;
+		if (!module || !module->stepWaveShown(marker, &w, locked))
+			return false;
+		*x = isGrain() ? w * box.size.x : tableX(w * std::max(n - 1, 0), n);
+		return true;
+	}
+	/** Where a marker is shown: live, the artifact (or GRAIN read place) it plays now, moving with its LFO, scan and
+	the trigs as they play. A selected step's own start is the TRIG line (see drawMap). */
+	float markerX(int marker, int n) {
+		return tableX(module->shownIndex[marker].load(), n);
+	}
 	/** Where a marker's bullet is drawn and clicked: kept fully on the map at its ends. */
 	float bulletX(int marker, int n) {
 		float r = bulletR();
-		return clamp(tableX(module->shownIndex[marker].load(), n), r + 1.f, box.size.x - r - 1.f);
+		return clamp(markerX(marker, n), r + 1.f, box.size.x - r - 1.f);
 	}
 
 	/** Each artifact's cycle averaged down to PTS points. Artifacts are loudness-matched, so their
@@ -126,8 +143,15 @@ struct WavetableMap : widget::Widget {
 		return best;
 	}
 
+	/** Sets a marker's WAVE / START from a map x. With one of its sequencer steps selected, the step's lock gets that
+	exact value instead (the knob stays). */
 	void setWave(int marker, float x) {
-		module->params[WaveArtifact::MARKER_WAVE_PARAM + marker].setValue(clamp(x / box.size.x, 0.f, 1.f));
+		float v = clamp(x / box.size.x, 0.f, 1.f);
+		float dummy;
+		if (module->stepWaveShown(marker, &dummy))
+			module->setStepLock(WaveArtifact::MARKER_WAVE_PARAM + marker, v);
+		else
+			module->params[WaveArtifact::MARKER_WAVE_PARAM + marker].setValue(v);
 	}
 
 	void onHover(const HoverEvent& e) override {
@@ -203,10 +227,26 @@ struct WavetableMap : widget::Widget {
 				dragMarker = hit;
 			}
 			else {
-				// Give this artifact to the selected marker; dragging on sweeps it.
-				module->assignTable(module->selectedMarker, t);
-				dragMarker = module->selectedMarker;
+				int selm = module->selectedMarker;
+				float dummy;
+				if (module->stepWaveShown(selm, &dummy)) {
+					// A step of the selected marker is selected: its lock goes here (WAVE: that artifact exactly;
+					// GRAIN: the very place clicked); dragging on sweeps it.
+					if (isGrain())
+						setWave(selm, e.pos.x);
+					else
+						module->setStepLock(WaveArtifact::MARKER_WAVE_PARAM + selm, n > 1 ? (float) t / (n - 1) : 0.f);
+				}
+				else {
+					// Give this artifact to the selected marker; dragging on sweeps it.
+					module->assignTable(selm, t);
+				}
+				dragMarker = selm;
 			}
+			// Moving a selected trig's start: the middle screen's slot follows it until the drag ends.
+			float dummy;
+			if (module->stepWaveShown(dragMarker, &dummy))
+				module->waveEditMarker = dragMarker;
 			e.consume(this);
 		}
 		else if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
@@ -225,6 +265,8 @@ struct WavetableMap : widget::Widget {
 	void onDragEnd(const DragEndEvent& e) override {
 		dragMarker = -1;
 		dragLoopEnd = -1;
+		if (module)
+			module->waveEditMarker = -1;
 	}
 
 	void onDoubleClick(const DoubleClickEvent& e) override {
@@ -404,7 +446,7 @@ struct WavetableMap : widget::Widget {
 			for (int i = 0; i < wa::NUM_MARKERS; i++) {
 				if (!module->isMarkerActive(i))
 					continue;
-				float x = tableX(module->shownIndex[i].load(), n);
+				float x = markerX(i, n);
 				float hw = std::max(W / n, mm2px(3.f));
 				NVGcolor c = layout::MARKER_COLORS[i];
 				nvgBeginPath(vg);
@@ -547,9 +589,35 @@ struct WavetableMap : widget::Widget {
 			}
 		}
 
+		// A selected sequencer step: a line at the exact place its WAVE / START is, tagged TRIG (solid where the step
+		// locks it, faint where it plays the knob). The bullet stays live, so the wave is seen moving as it plays.
+		int sel = module->selectedMarker;
+		{
+			float sx;
+			bool locked = false;
+			if (module->isMarkerActive(sel) && stepX(sel, n, &sx, &locked)) {
+				NVGcolor c = layout::MARKER_COLORS[sel];
+				nvgBeginPath(vg);
+				nvgMoveTo(vg, sx, 0);
+				nvgLineTo(vg, sx, H);
+				nvgStrokeColor(vg, nvgTransRGBAf(c, locked ? 1.f : 0.5f));
+				nvgStrokeWidth(vg, locked ? 1.4f : 1.f);
+				nvgStroke(vg);
+				if (font) {
+					nvgFontFaceId(vg, font->handle);
+					nvgFontSize(vg, 8.f);
+					float tw = nvgTextBounds(vg, 0, 0, "TRIG", NULL, NULL);
+					// The tag beside the line, inside the map
+					float tx = (sx + 3.f + tw > W) ? sx - 3.f - tw : sx + 3.f;
+					nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+					nvgFillColor(vg, nvgTransRGBAf(c, locked ? 1.f : 0.6f));
+					nvgText(vg, tx, H - 2.f, "TRIG", NULL);
+				}
+			}
+		}
+
 		// Marker bullets on the centre line, like the marker bar's (selected one on top, ringed).
 		float br = bulletR();
-		int sel = module->selectedMarker;
 		for (int k = 0; k <= wa::NUM_MARKERS; k++) {
 			int i = (k < wa::NUM_MARKERS) ? k : sel;
 			if ((k < wa::NUM_MARKERS && i == sel) || !module->isMarkerActive(i))

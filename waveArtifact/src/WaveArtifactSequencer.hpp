@@ -21,6 +21,17 @@ struct WaveArtifactSequencer : Module {
 		/** Latching REC: live record. While the pattern plays, the selected row's knobs are written into each of its lit
 		steps as the playhead passes (see WaveArtifact::recordStep) */
 		REC_PARAM,
+		/** Momentary RND: random locks on the lit steps of the lane's row (Shift: every row), see randomizeLocks() */
+		RND_PARAM,
+		/** 0..1: how many of the lockable settings each lit step gets locked by RND. 0 = none (RND clears the locks),
+		1 = every one. */
+		RND_AMOUNT_PARAM,
+		/** Momentary COND RND: random trig conditions on the lit steps of the lane's row (Shift: every row) */
+		COND_RND_PARAM,
+		/** 0..1: share of the lit steps COND RND gives a condition (the others: Always). 0 = none, 1 = every one. */
+		COND_RND_AMOUNT_PARAM,
+		/** Momentary COND CLR: every condition of the lane's row back to Always (Shift: every row) */
+		COND_CLR_PARAM,
 		PARAMS_LEN
 	};
 
@@ -38,7 +49,17 @@ struct WaveArtifactSequencer : Module {
 		FILL_INPUT,
 		INPUTS_LEN
 	};
-	enum OutputId { OUTPUTS_LEN };
+	enum OutputId {
+		/** Per row: 10 V from each trig that plays for half a step; through a group of tied trigs (a long gate) it
+		stays high until half way through the group's last step. The clock is unchanged. */
+		ENUMS(GATE_OUTPUT, ROWS),
+		/** Per row: the velocity of the step that played last, 0..10 V, held until the next one plays; a step with slide
+		glides there over its slide x one step (as the locks do) */
+		ENUMS(MOD_OUTPUT, ROWS),
+		OUTPUTS_LEN
+	};
+	/** Share of a step a trig's GATE stays high */
+	static constexpr double GATE_LENGTH = 0.5;
 	enum LightId {
 		FILL_LIGHT,
 		REC_LIGHT,
@@ -106,10 +127,23 @@ struct WaveArtifactSequencer : Module {
 		length[r] = c.length;
 		params[CLOCK_MULT_PARAM + r].setValue(c.clockMult);
 	}
-	/** Switches a step off, with its locks, condition and slide */
+	/** Switches a step off, with its locks, condition and slide. The step after it is no longer tied to it. */
 	void deleteStep(int r, int s) {
 		velocity[r][s] = 0.f;
 		stepData[r][s].clear();
+		if (s + 1 < STEPS)
+			stepData[r][s + 1].tie = false;
+	}
+	/** The step is lit and tied to the lit step before it (a long gate). Groups do not wrap round the row's end. */
+	bool isTied(int r, int s) const {
+		return s > 0 && s < STEPS && velocity[r][s] > 0.f && velocity[r][s - 1] > 0.f && stepData[r][s].tie;
+	}
+	/** Alt + click: ties a lit step to the lit step before it, or unties it. False when it cannot be tied. */
+	bool toggleTie(int r, int s) {
+		if (s <= 0 || s >= STEPS || velocity[r][s] <= 0.f || velocity[r][s - 1] <= 0.f)
+			return false;
+		stepData[r][s].tie = !stepData[r][s].tie;
+		return true;
 	}
 	/** Moves a row's trigs one step right (dir 1) or left (-1), with their velocity, locks, condition and slide,
 	wrapping around inside the row's length. A selected step of that row moves with its trig. */
@@ -132,6 +166,14 @@ struct WaveArtifactSequencer : Module {
 		if (selRow == r && selStep >= 0 && selStep < len)
 			selStep = (selStep + dir + len) % len;
 	}
+	/** RND: random locks on the lit steps of the lane's row (allRows: every row), RND AMOUNT deciding how many settings
+	each step locks. False when the main module is not linked. UI thread. */
+	bool randomizeLocks(bool allRows);
+	/** COND RND: each lit step of the lane's row (allRows: every row) gets a random condition with probability COND
+	AMOUNT, else Always. Tied steps are skipped (their group's first trig decides). UI thread. */
+	void randomizeConditions(bool allRows);
+	/** COND CLR: every condition of the lane's row (allRows: every row) back to Always. UI thread. */
+	void clearConditions(bool allRows);
 	void clearRow(int r);
 	void clearAll();
 	/** A starting pattern: a kick on 1 5 9 13, a snare on 5 13, a hat on every other step */
@@ -142,8 +184,16 @@ private:
 	/** The step number each row's clock is at (steps since reset), to see when it moves on */
 	long lastIndex[ROWS] = {};
 	float lastVelocity[ROWS] = {1.f, 1.f, 1.f, 1.f, 1.f};
-	/** What the step that played last carries, sent with its fire */
+	/** What the step that played last carries, sent with its fire (for a tied step: the group's locks with its own) */
 	wa::StepData lastStep[ROWS];
+	/** The row's last step played and was tied (its note goes on); the row's next step is tied to it (keep the
+	note on); this tick played a step (a tied step after it continues the group) */
+	bool lastLegato[ROWS] = {}, holdOpen[ROWS] = {}, groupPlaying[ROWS] = {};
+	/** Each row's GATE output is high */
+	bool gateHigh[ROWS] = {};
+	/** Each row's MOD output (0..1, its steps' velocities) and the beat position seen last, to move its glide on */
+	wa::GlideValue mod[ROWS];
+	double lastBeatPos = 0.0;
 	int position[ROWS] = {-1, -1, -1, -1, -1};
 	/** Passes of each row since RESET (0 = the first), for A:B conditions */
 	long pass[ROWS] = {-1, -1, -1, -1, -1};

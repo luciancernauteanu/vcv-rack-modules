@@ -2,6 +2,7 @@
 #include "WaveArtifact.hpp"
 #include "Layout.hpp"
 #include "widgets/PanelLabels.hpp"
+#include "widgets/LfoWidgets.hpp"
 
 bool isWaveArtifactSequencer(Module* m) {
 	return m && m->model == modelWaveArtifactSequencer;
@@ -36,6 +37,20 @@ WaveArtifactSequencer::WaveArtifactSequencer() {
 	configSwitch(REC_PARAM, 0.f, 1.f, 0.f, "Record (live: knob moves go into the steps as they play)", {"Off", "On"});
 	paramQuantities[REC_PARAM]->randomizeEnabled = false;
 	configLight(REC_LIGHT, "Record");
+	for (int r = 0; r < ROWS; r++)
+		configOutput(GATE_OUTPUT + r, "Marker " + std::to_string(r + 1) + " row gate (half a step per trig; tied trigs: one long gate)");
+	for (int r = 0; r < ROWS; r++)
+		configOutput(MOD_OUTPUT + r, "Marker " + std::to_string(r + 1) + " row velocity CV (0-10 V, held; glides on slide steps)");
+	configButton(RND_PARAM, "Random locks on the lit steps of the lane's row (Shift + click: every row)");
+	paramQuantities[RND_PARAM]->randomizeEnabled = false;
+	configParam(RND_AMOUNT_PARAM, 0.f, 1.f, 0.5f, "RND amount (share of the settings locked on each lit step)", "%", 0.f, 100.f);
+	paramQuantities[RND_AMOUNT_PARAM]->randomizeEnabled = false;
+	configButton(COND_RND_PARAM, "Random trig conditions on the lit steps of the lane's row (Shift + click: every row)");
+	paramQuantities[COND_RND_PARAM]->randomizeEnabled = false;
+	configParam(COND_RND_AMOUNT_PARAM, 0.f, 1.f, 0.5f, "COND RND amount (share of the lit steps given a condition)", "%", 0.f, 100.f);
+	paramQuantities[COND_RND_AMOUNT_PARAM]->randomizeEnabled = false;
+	configButton(COND_CLR_PARAM, "Reset the trig conditions of the lane's row to Always (Shift + click: every row)");
+	paramQuantities[COND_CLR_PARAM]->randomizeEnabled = false;
 	for (int r = 0; r < ROWS; r++)
 		playing[r] = -1;
 	// Per-instance seed: two sequencers must not roll the same chances.
@@ -84,6 +99,9 @@ void WaveArtifactSequencer::restart() {
 	for (int r = 0; r < ROWS; r++) {
 		position[r] = -1;
 		pass[r] = -1;
+		groupPlaying[r] = false;
+		holdOpen[r] = false;
+		gateHigh[r] = false;
 	}
 }
 
@@ -100,17 +118,38 @@ void WaveArtifactSequencer::tickRow(int r) {
 	position[r] = (position[r] + 1) % len;
 	if (position[r] == 0)
 		pass[r]++;
-	playing[r] = position[r];
-	float v = velocity[r][position[r]];
+	int p = position[r];
+	playing[r] = p;
+	float v = velocity[r][p];
+	bool played = false;
 	if (v > 0.f) {
-		const wa::StepData& s = stepData[r][position[r]];
+		const wa::StepData& s = stepData[r][p];
+		if (isTied(r, p)) {
+			// Part of a long gate: plays only when the group has been playing (its first trig's condition decides
+			// for the whole group). It does not start a new note, and keeps the group's velocity and locks.
+			if (groupPlaying[r]) {
+				lastStep[r] = wa::mergeTied(lastStep[r], s);
+				lastLegato[r] = true;
+				fires[r]++;
+				played = true;
+			}
+		}
 		// A step that does not play also leaves the locks of the one before in place.
-		if (!wa::conditionPasses(s, std::max(pass[r], 0L), fill, random01()))
-			return;
-		lastVelocity[r] = v;
-		lastStep[r] = s;
-		fires[r]++;
+		else if (wa::conditionPasses(s, std::max(pass[r], 0L), fill, random01())) {
+			lastVelocity[r] = v;
+			lastStep[r] = s;
+			lastLegato[r] = false;
+			fires[r]++;
+			played = true;
+		}
 	}
+	groupPlaying[r] = played;
+	gateHigh[r] = played;
+	// MOD: the step's own velocity (a tied step's too, so a long note can carry a moving CV), gliding with its slide.
+	if (played)
+		mod[r].set(v, stepData[r][p].slide, 1.0 / stepsPerBeat((int) std::round(params[CLOCK_MULT_PARAM + r].getValue())));
+	// The clock is untouched: the steps go on as always, only the note is kept on until the next tied step comes.
+	holdOpen[r] = played && p + 1 < len && isTied(r, p + 1);
 }
 
 void WaveArtifactSequencer::process(const ProcessArgs& args) {
@@ -122,9 +161,23 @@ void WaveArtifactSequencer::process(const ProcessArgs& args) {
 	lights[REC_LIGHT].setBrightness(params[REC_PARAM].getValue() > 0.5f ? 1.f : 0.f);
 	if (!isLinked) {
 		warmUp = WARM_UP_SAMPLES;
+		for (int r = 0; r < ROWS; r++) {
+			gateHigh[r] = false;
+			outputs[GATE_OUTPUT + r].setVoltage(0.f);
+			outputs[MOD_OUTPUT + r].setVoltage(0.f);
+		}
 		return;
 	}
 	const wa::ToSequencerMessage* in = (const wa::ToSequencerMessage*) rightExpander.consumerMessage;
+	// MOD glides move with the clock: the beats since the last sample (none across a jump back or a big leap).
+	{
+		double d = in->beatPos - lastBeatPos;
+		lastBeatPos = in->beatPos;
+		if (warmUp > 0 || d < 0.0 || d > 1.0)
+			d = 0.0;
+		for (int r = 0; r < ROWS; r++)
+			mod[r].advance(d);
+	}
 	// Right after snapping on, the first messages are stale (from before it was unlinked): only follow them.
 	// Each row's step number: the clock's beat position times the row's steps per beat. The tiny offset keeps a step
 	// that lands exactly on a beat from slipping to the next sample.
@@ -164,6 +217,19 @@ void WaveArtifactSequencer::process(const ProcessArgs& args) {
 		out->lockMask[r] = lastStep[r].mask;
 		out->slide[r] = lastStep[r].slide;
 		out->stepBeats[r] = 1.0 / stepsPerBeat((int) std::round(params[CLOCK_MULT_PARAM + r].getValue()));
+		out->legato[r] = lastLegato[r];
+		// Live, so untying or deleting the next step while the note waits lets it go at that step.
+		int next = position[r] + 1;
+		out->holdOpen[r] = holdOpen[r] && next < STEPS && isTied(r, next);
+		// GATE: high from the trig for half a step, or on through a tied group. Where the row is in its step comes
+		// from the same clock as the steps, so the gates keep time exactly.
+		if (gateHigh[r] && !out->holdOpen[r]) {
+			double x = in->beatPos * stepsPerBeat((int) std::round(params[CLOCK_MULT_PARAM + r].getValue())) + 1e-7;
+			if (x - std::floor(x) >= GATE_LENGTH)
+				gateHigh[r] = false;
+		}
+		outputs[GATE_OUTPUT + r].setVoltage(gateHigh[r] ? 10.f : 0.f);
+		outputs[MOD_OUTPUT + r].setVoltage(10.f * mod[r].value);
 	}
 	main->leftExpander.requestMessageFlip();
 }
@@ -206,8 +272,10 @@ json_t* WaveArtifactSequencer::dataToJson() {
 				json_object_set_new(step, "a", json_integer(d.a));
 				json_object_set_new(step, "b", json_integer(d.b));
 			}
-			if (d.slide)
-				json_object_set_new(step, "slide", json_true());
+			if (d.slide > 0.f)
+				json_object_set_new(step, "slide", json_real(d.slide));
+			if (d.tie)
+				json_object_set_new(step, "tie", json_true());
 			json_array_append_new(row, step);
 		}
 		json_array_append_new(data, row);
@@ -274,7 +342,10 @@ void WaveArtifactSequencer::dataFromJson(json_t* root) {
 				if ((j = json_object_get(step, "a")))
 					d.a = (uint8_t) clamp((int) json_integer_value(j), 1, (int) d.b);
 			}
-			d.slide = json_is_true(json_object_get(step, "slide"));
+			// Older patches saved slide as on / off: on is a full slide.
+			json_t* slide = json_object_get(step, "slide");
+			d.slide = json_is_true(slide) ? 1.f : (json_is_number(slide) ? clamp((float) json_number_value(slide), 0.f, 1.f) : 0.f);
+			d.tie = json_is_true(json_object_get(step, "tie"));
 		}
 	}
 	json_t* lr = json_object_get(root, "laneRow");
@@ -288,21 +359,28 @@ void WaveArtifactSequencer::dataFromJson(json_t* root) {
 	}
 }
 
-// Panel: 30 HP. Geometry matches res/waveArtifactSequencer.svg.
+// Panel: 32 HP. Geometry matches res/waveArtifactSequencer.svg.
 namespace seqlayout {
-static const float W = 152.4f;
-static const float GRID_X0 = 31.f;
-/** Row clock knob, left of the grid */
-static const float CLOCK_KNOB_X = 21.f;
-static const float GRID_X1 = 147.f;
+static const float W = 162.56f;
+/** Left of each row, packed tight: the marker badge with LEN under it, the row clock knob, the shift arrows */
+static const float BADGE_X = 8.5f;
+static const float CLOCK_KNOB_X = 15.6f;
+static const float GRID_X0 = 23.8f;
+static const float GRID_X1 = 139.8f;
+/** GATE output of each row, right of the grid, in an output box (both SVGs) */
+static const float GATE_X = 144.4f;
+/** MOD output of each row (its steps' velocities as CV), right of GATE in the same box */
+static const float MOD_X = 154.2f;
+static const float GATE_LABEL_Y = 14.5f;
 static const float ROW_Y0 = 19.f;
-static const float ROW_H = 14.f;
-static const float ROW_GAP = 2.6f;
+/** A row's cells; under them, in the gap, the SLIDE strips of the lit trigs (same row pitch as before: 16.6 mm) */
+static const float ROW_H = 12.6f;
+static const float ROW_GAP = 4.0f;
 static const float CELL_GAP = 0.8f;
 /** The lock lane under the grid (below the step numbers), and its name on the left */
 static const float LANE_Y0 = 104.6f;
 static const float LANE_H = 9.4f;
-static const float LANE_LABEL_X = 18.6f;
+static const float LANE_LABEL_X = 15.7f;
 /** CLR, left of the lane's name: clears the lane's setting in its row */
 static const float CLR_X0 = 2.4f, CLR_W = 5.2f;
 static const float CLR_Y0 = LANE_Y0 + 2.2f, CLR_H = 5.0f;
@@ -313,14 +391,38 @@ static const float FILL_LABEL_Y = 115.4f;
 /** REC (live record) in the top-left corner, under the screw, with its label to the right */
 static const Vec REC_BUTTON = Vec(14.f, 9.6f);
 static const Vec REC_LABEL = Vec(22.f, 10.6f);
+/** RND (random locks) and its amount slider in the top-right corner, level with REC, left of the screw */
+static const Vec RND_LABEL = Vec(112.f, 10.6f);
+static const Vec RND_BUTTON = Vec(121.5f, 9.6f);
+static const Vec RND_BUTTON_SIZE = Vec(8.f, 4.f);
+static const Vec RND_SLIDER = Vec(138.f, 9.6f);
+static const Vec RND_SLIDER_SIZE = Vec(21.f, 3.6f);
+/** COND: random trig conditions (RND + amount slider) and CLR, in the top bar right of REC. The title moves right
+to make room. */
+static const Vec COND_LABEL = Vec(30.5f, 10.6f);
+static const Vec COND_RND_BUTTON = Vec(38.5f, 9.6f);
+static const Vec COND_SLIDER = Vec(51.f, 9.6f);
+static const Vec COND_SLIDER_SIZE = Vec(13.f, 3.6f);
+static const Vec COND_CLR_BUTTON = Vec(62.f, 9.6f);
+static const Vec COND_CLR_SIZE = Vec(7.f, 4.f);
+static const float TITLE_X = 84.f;
+/** Accent of the COND controls (warm, apart from the locks' blue) */
+static const NVGcolor COND_COLOR = nvgRGB(0xff, 0xc4, 0x6b);
 /** Shift arrows of each row, stacked between the CLOCK knob and the first step: ◀ on top, ▶ below */
-static const float SHIFT_X0 = 25.4f, SHIFT_W = 4.6f, SHIFT_H = 5.2f;
-static const float SHIFT_LEFT_DY = 1.2f, SHIFT_RIGHT_DY = 7.6f;
+static const float SHIFT_X0 = 19.2f, SHIFT_W = 4.0f, SHIFT_H = 5.0f;
+static const float SHIFT_LEFT_DY = 1.0f, SHIFT_RIGHT_DY = 6.8f;
+/** SLIDE strip under each lit trig, apart from its cell (SLIDE_DY below it): drag right for more slide (left end =
+off). The cell above stays all velocity. */
+static const float SLIDE_DY = 0.5f, SLIDE_H = 2.0f;
+inline float slideTop(int r);
 inline float cellW() {
 	return (GRID_X1 - GRID_X0) / WaveArtifactSequencer::STEPS;
 }
 inline float rowTop(int r) {
 	return ROW_Y0 + r * (ROW_H + ROW_GAP);
+}
+inline float slideTop(int r) {
+	return rowTop(r) + ROW_H + SLIDE_DY;
 }
 inline float cellX(int s) {
 	return GRID_X0 + s * cellW();
@@ -338,6 +440,82 @@ static void selectStep(WaveArtifactSequencer* m, int r, int s) {
 	WaveArtifact* main = mainOf(m);
 	if (main && r >= 0 && main->isMarkerActive(r))
 		main->selectedMarker = r;
+}
+
+/** RND: new random locks on every lit step of the lane's row (allRows: of every row). Each lockable setting that the
+main module's own Randomize would change gets locked with probability RND AMOUNT, to a random value in that knob's
+range (whole values for switches, lists and stepped knobs). The step's other locks go, so 0 % leaves no locks and
+100 % locks every one. Conditions and slide stay. UI thread (the RND button adds the undo entry). */
+bool WaveArtifactSequencer::randomizeLocks(bool allRows) {
+	WaveArtifactSequencer* m = this;
+	WaveArtifact* main = mainOf(m);
+	if (!main)
+		return false;
+	float amount = clamp(m->params[WaveArtifactSequencer::RND_AMOUNT_PARAM].getValue(), 0.f, 1.f);
+	for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
+		if (!allRows && r != m->laneRow)
+			continue;
+		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++) {
+			if (m->velocity[r][s] <= 0.f)
+				continue;
+			wa::StepData& d = m->stepData[r][s];
+			d.mask = 0;
+			for (int k = 0; k < wa::NUM_LOCKABLE; k++) {
+				ParamQuantity* q = main->getParamQuantity(WaveArtifact::MARKER_SETTING_PARAMS[k] + r);
+				if (!wa::isLockable(k) || !q || !q->randomizeEnabled)
+					continue;
+				// amount 1: uniform() < 1 always locks; amount 0: never.
+				if (random::uniform() >= amount)
+					continue;
+				float lo = q->getMinValue(), hi = q->getMaxValue();
+				float v = lo + (hi - lo) * random::uniform();
+				if (q->snapEnabled)
+					v = std::round(v);
+				d.setLock(k, clamp(v, lo, hi));
+			}
+		}
+	}
+	return true;
+}
+
+void WaveArtifactSequencer::randomizeConditions(bool allRows) {
+	float amount = clamp(params[COND_RND_AMOUNT_PARAM].getValue(), 0.f, 1.f);
+	for (int r = 0; r < ROWS; r++) {
+		if (!allRows && r != laneRow)
+			continue;
+		for (int s = 0; s < STEPS; s++) {
+			if (velocity[r][s] <= 0.f)
+				continue;
+			wa::StepData& d = stepData[r][s];
+			d.cond = wa::COND_ALWAYS;
+			// amount 1: uniform() < 1 always; amount 0: never. A tied step plays with its group, so it stays Always.
+			if (isTied(r, s) || random::uniform() >= amount)
+				continue;
+			wa::randomCondition(d, random::uniform(), random::uniform(), random::uniform());
+		}
+	}
+}
+
+void WaveArtifactSequencer::clearConditions(bool allRows) {
+	for (int r = 0; r < ROWS; r++)
+		for (int s = 0; s < STEPS; s++)
+			if (allRows || r == laneRow)
+				stepData[r][s].cond = wa::COND_ALWAYS;
+}
+
+/** A panel action with an undo entry (the whole module before and after). `f` returns false when it did nothing. */
+static void undoable(WaveArtifactSequencer* m, const std::string& name, std::function<bool()> f) {
+	json_t* before = m->toJson();
+	if (!f()) {
+		json_decref(before);
+		return;
+	}
+	history::ModuleChange* h = new history::ModuleChange;
+	h->name = name;
+	h->moduleId = m->id;
+	h->oldModuleJ = before;
+	h->newModuleJ = m->toJson();
+	APP->history->push(h);
 }
 
 /** What Ctrl + C copied last (a trig or a row), shared by every sequencer so it can go from one to another */
@@ -432,7 +610,15 @@ static void openStepMenu(WaveArtifactSequencer* m, int r, int s) {
 		sub->addChild(createCheckMenuItem("FILL (only while FILL is on)", "", [=]() { return d->cond == wa::COND_FILL; }, [=]() { d->cond = wa::COND_FILL; }));
 		sub->addChild(createCheckMenuItem("NOT FILL (only while FILL is off)", "", [=]() { return d->cond == wa::COND_NOT_FILL; }, [=]() { d->cond = wa::COND_NOT_FILL; }));
 	}));
-	menu->addChild(createBoolPtrMenuItem("Slide (glide to this step's values over one step)", "", &d->slide));
+	menu->addChild(createSubmenuItem("Slide (glide to this step's values)", d->slide > 0.f ? string::f("%d%%", (int) std::round(d->slide * 100.f)) : "off",
+		[=](ui::Menu* sub) {
+			sub->addChild(createMenuLabel("Share of one step the glide takes (also: drag the strip under the trig)"));
+			for (int pct : {0, 10, 25, 50, 75, 100})
+				sub->addChild(createCheckMenuItem(pct == 0 ? "Off" : string::f("%d%%", pct), "",
+					[=]() { return (int) std::round(d->slide * 100.f) == pct; }, [=]() { d->slide = pct / 100.f; }));
+		}));
+	menu->addChild(createCheckMenuItem("Tie to the trig before (long gate)", "", [=]() { return m->isTied(r, s); },
+		[=]() { m->toggleTie(r, s); }, s == 0 || m->velocity[r][s] <= 0.f || m->velocity[r][s - 1] <= 0.f));
 	int locks = 0;
 	for (int k = 0; k < wa::NUM_LOCKABLE; k++)
 		locks += d->locked(k) ? 1 : 0;
@@ -447,7 +633,10 @@ switched on, at the height of the mouse (the top of a cell is 100%). Drag up and
 step selects it (its values show under the main module's knobs, and turning that marker's knobs locks them on it); a
 double-click on a step switches it off. Shift + drag along a row switches the steps you pass off. Ctrl + click sets
 the row's length to end at that step. Right-click a step for its condition, slide and locks; click outside the
-steps to deselect. */
+steps to deselect. The strip under a lit trig (apart from its cell) is its SLIDE: drag right for more (left end = off,
+double-click = off).
+Between two lit trigs, a + appears in the middle of the row on hover: click it to tie them (one note through both, a
+long gate, the clock unchanged); on a tied pair it shows − to untie. */
 struct StepGrid : widget::OpaqueWidget {
 	WaveArtifactSequencer* module = nullptr;
 	int dragRow = -1, dragCol = -1;
@@ -457,6 +646,10 @@ struct StepGrid : widget::OpaqueWidget {
 	double createdAt = -10.0;
 	float pressY = 0.f;
 	bool wasOff = false, moved = false, erasing = false;
+	/** A drag on a lit trig's SLIDE strip (that step), and whether the last press was on a strip (a double-click
+	there switches the slide off instead of deleting the step) */
+	int slideRow = -1, slideCol = -1;
+	bool pressOnSlide = false;
 	/** Tests: use this pointer position (in panel pixels) instead of the real mouse */
 	bool mouseOverride = false;
 	Vec mouseAt;
@@ -488,12 +681,93 @@ struct StepGrid : widget::OpaqueWidget {
 		return (v < OFF_BELOW) ? 0.f : clamp(v, MIN_ON, 1.f);
 	}
 
+	/** TIE handle: a small round button on the line between two steps, in the middle of the row's height. It shows
+	while the mouse is near that line (HOVER_MM either side) and both steps are lit. */
+	static constexpr float TIE_DY = 6.3f, TIE_R = 1.8f, TIE_HOVER_MM = 2.6f; // TIE_DY: ROW_H / 2
+	/** The row and the gap (s = between steps s - 1 and s) the mouse is near, and whether it is on the handle */
+	int hoverRow = -1, hoverGap = -1;
+	bool hoverOnHandle = false;
+
+	bool tieHandleUsable(int r, int s) {
+		return module && r >= 0 && r < WaveArtifactSequencer::ROWS && s >= 1 && s < WaveArtifactSequencer::STEPS &&
+			module->velocity[r][s] > 0.f && module->velocity[r][s - 1] > 0.f;
+	}
+	/** The gap nearest to a point (panel pixels) in a row, within `reach` mm of it, and whether the point is on its
+	handle */
+	bool gapNear(Vec p, float reach, int* row, int* gap, bool* onHandle) {
+		float x = p.x / SVG_DPI * MM_PER_IN, y = p.y / SVG_DPI * MM_PER_IN;
+		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
+			float top = seqlayout::rowTop(r);
+			if (y < top || y > top + seqlayout::ROW_H)
+				continue;
+			int s = (int) std::round((x - seqlayout::GRID_X0) / seqlayout::cellW());
+			float gx = seqlayout::GRID_X0 + s * seqlayout::cellW();
+			if (std::fabs(x - gx) > reach || !tieHandleUsable(r, s))
+				return false;
+			*row = r;
+			*gap = s;
+			float dx = x - gx, dy = y - (top + TIE_DY);
+			*onHandle = dx * dx + dy * dy <= (TIE_R + 0.4f) * (TIE_R + 0.4f);
+			return true;
+		}
+		return false;
+	}
+	/** The press (panel pixels) is on a TIE handle: the row and the step it ties (to the one before) */
+	bool tieHandleAt(Vec p, int* row, int* s) {
+		bool on = false;
+		return gapNear(p, TIE_R + 0.4f, row, s, &on) && on;
+	}
+	void onHover(const HoverEvent& e) override {
+		if (!gapNear(e.pos, TIE_HOVER_MM, &hoverRow, &hoverGap, &hoverOnHandle)) {
+			hoverRow = hoverGap = -1;
+			hoverOnHandle = false;
+		}
+		OpaqueWidget::onHover(e);
+	}
+	void onLeave(const LeaveEvent& e) override {
+		hoverRow = hoverGap = -1;
+		hoverOnHandle = false;
+		OpaqueWidget::onLeave(e);
+	}
+
+	/** The press (panel pixels) is on the SLIDE strip under a lit trig: which one. The whole gap under the row counts
+	(the strip plus a little margin), so the thin strip is easy to catch. */
+	bool slideStripAt(Vec p, int* row, int* col) {
+		if (!module)
+			return false;
+		float x = p.x / SVG_DPI * MM_PER_IN, y = p.y / SVG_DPI * MM_PER_IN;
+		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
+			float top = seqlayout::rowTop(r) + seqlayout::ROW_H;
+			if (y <= top || y > seqlayout::slideTop(r) + seqlayout::SLIDE_H + 0.7f)
+				continue;
+			int c = (int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW());
+			if (c < 0 || c >= WaveArtifactSequencer::STEPS || module->velocity[r][c] <= 0.f)
+				return false;
+			*row = r;
+			*col = c;
+			return true;
+		}
+		return false;
+	}
+	/** SLIDE for a mouse x (panel pixels) over step c: the strip's left end is off, its right end 100%. A few
+	percent of dead zone at the left, so off is easy to reach. */
+	float slideAt(int c, float xPx) {
+		float x = xPx / SVG_DPI * MM_PER_IN;
+		float x0 = seqlayout::cellX(c) + seqlayout::CELL_GAP / 2.f + 0.4f, w = seqlayout::cellW() - seqlayout::CELL_GAP - 0.8f;
+		float f = (x - x0) / w;
+		const float DEAD = 0.04f;
+		if (f <= DEAD)
+			return 0.f;
+		return clamp((f - DEAD) / (1.f - DEAD) * 0.99f + 0.01f, 0.01f, 1.f);
+	}
+
 	void onButton(const ButtonEvent& e) override {
 		if (!module || e.action != GLFW_PRESS)
 			return;
 		// Any click ends a whole-row selection (Ctrl + A)
 		module->rowSel = -1;
-		int r, c;
+		pressOnSlide = false;
+		int r = -1, c = -1;
 		bool onCell = cellAt(e.pos, &r, &c);
 		// A row's shift arrows: its trigs (and everything on them) one step left or right
 		int arrowRow, arrowDir;
@@ -502,6 +776,37 @@ struct StepGrid : widget::OpaqueWidget {
 			pressRow = pressCol = -1;
 			e.consume(this);
 			return;
+		}
+		// The TIE handle between two lit trigs (shown on hover): ties the right one to the left one, or unties it.
+		int tr, ts;
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT && tieHandleAt(e.pos, &tr, &ts)) {
+			module->toggleTie(tr, ts);
+			selectStep(module, tr, ts);
+			pressRow = pressCol = -1;
+			e.consume(this);
+			return;
+		}
+		// The SLIDE strip under a lit trig: set its slide where the mouse is, and drag sideways for more or less.
+		// Right-click there opens the step's menu.
+		int sr, sc;
+		if (slideStripAt(e.pos, &sr, &sc)) {
+			if (e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == 0) {
+				pressRow = sr;
+				pressCol = sc;
+				slideRow = sr;
+				slideCol = sc;
+				pressOnSlide = true;
+				module->stepData[sr][sc].slide = slideAt(sc, e.pos.x);
+				selectStep(module, sr, sc);
+				e.consume(this);
+				return;
+			}
+			if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
+				selectStep(module, sr, sc);
+				openStepMenu(module, sr, sc);
+				e.consume(this);
+				return;
+			}
 		}
 		if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
 			if (onCell) {
@@ -608,6 +913,12 @@ struct StepGrid : widget::OpaqueWidget {
 	void onDoubleClick(const DoubleClickEvent& e) override {
 		if (!module || pressRow < 0 || pressCol < 0)
 			return;
+		if (pressOnSlide) {
+			// On the SLIDE strip: slide off, the step stays.
+			module->stepData[pressRow][pressCol].slide = 0.f;
+			e.consume(this);
+			return;
+		}
 		bool justCreated = pressRow == createdRow && pressCol == createdCol && system::getTime() - createdAt < 0.6;
 		if (!justCreated && module->velocity[pressRow][pressCol] > 0.f) {
 			module->deleteStep(pressRow, pressCol);
@@ -619,9 +930,15 @@ struct StepGrid : widget::OpaqueWidget {
 	}
 
 	void onDragMove(const DragMoveEvent& e) override {
-		if (!module || dragRow < 0 || e.button != GLFW_MOUSE_BUTTON_LEFT)
+		if (!module || e.button != GLFW_MOUSE_BUTTON_LEFT)
 			return;
 		Vec local = mouseOverride ? mouseAt : APP->scene->getMousePos().minus(getAbsoluteOffset(Vec(0, 0))).div(getAbsoluteZoom());
+		if (slideRow >= 0) {
+			module->stepData[slideRow][slideCol].slide = slideAt(slideCol, local.x);
+			return;
+		}
+		if (dragRow < 0)
+			return;
 		if (std::fabs(local.y - pressY) > 2.f)
 			moved = true;
 		// The step under the mouse, in the row the drag began in; every step passed on the way gets the same.
@@ -646,9 +963,10 @@ struct StepGrid : widget::OpaqueWidget {
 		if (module && dragRow >= 0) {
 			for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
 				if (module->velocity[dragRow][s] <= 0.f)
-					module->stepData[dragRow][s].clear();
+					module->deleteStep(dragRow, s);
 		}
 		dragRow = dragCol = -1;
+		slideRow = slideCol = -1;
 		erasing = false;
 	}
 
@@ -699,22 +1017,60 @@ struct StepGrid : widget::OpaqueWidget {
 						nvgStrokeWidth(vg, 0.7f);
 						nvgStroke(vg);
 					}
-					if (d.slide) {
+					// SLIDE strip under the cell, apart from it: a track in the row's color, filled from the left as far
+					// as the slide goes.
+					float sx = cx, sw = cwPx;
+					float sh = seqlayout::SLIDE_H * mm, sy = seqlayout::slideTop(r) * mm;
+					nvgBeginPath(vg);
+					nvgRoundedRect(vg, sx, sy, sw, sh, 1.f);
+					nvgFillColor(vg, dark ? nvgRGB(0x1c, 0x1f, 0x26) : nvgRGB(0xb3, 0xb0, 0xa8));
+					nvgFill(vg);
+					nvgStrokeColor(vg, nvgTransRGBAf(col, inside ? 0.7f : 0.25f));
+					nvgStrokeWidth(vg, 0.6f);
+					nvgStroke(vg);
+					if (d.slide > 0.f) {
 						nvgBeginPath(vg);
-						nvgMoveTo(vg, cx + 2.f, cy + 6.f);
-						nvgLineTo(vg, cx + 6.f, cy + 2.f);
-						nvgStrokeColor(vg, nvgRGB(0xff, 0xff, 0xff));
-						nvgStrokeWidth(vg, 1.3f);
-						nvgStroke(vg);
+						nvgRoundedRect(vg, sx, sy, std::max(sw * d.slide, 1.6f), sh, 1.f);
+						nvgFillColor(vg, nvgTransRGBAf(col, inside ? 1.f : 0.3f));
+						nvgFill(vg);
+					}
+					// While its strip is dragged: the amount in the cell
+					if (slideRow == r && slideCol == s && font) {
+						nvgFontFaceId(vg, font->handle);
+						nvgFontSize(vg, 7.f);
+						nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
+						nvgFillColor(vg, nvgRGB(0x16, 0x18, 0x22));
+						std::string pct = d.slide > 0.f ? string::f("%d%%", (int) std::round(d.slide * 100.f)) : "off";
+						nvgText(vg, cx + cwPx / 2.f, cy + chPx - 1.f, pct.c_str(), NULL);
 					}
 					char text[16];
 					wa::conditionText(d, text, sizeof(text));
-					if (text[0] && font) {
+					if (text[0] && font && !(slideRow == r && slideCol == s)) {
 						nvgFontFaceId(vg, font->handle);
 						nvgFontSize(vg, 6.5f);
 						nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
 						nvgFillColor(vg, nvgRGB(0x16, 0x18, 0x22));
 						nvgText(vg, cx + cwPx / 2.f, cy + chPx - 1.f, text, NULL);
+					}
+					// Tied to the trig before (a long gate): the two bars joined across the gap, with a bar on top
+					if (module->isTied(r, s) && inside) {
+						float hPrev = seqlayout::ROW_H * module->velocity[r][s - 1];
+						float h = std::min(hPrev, seqlayout::ROW_H * v);
+						// Across the gap (and the rounded corners)
+						float gx0 = cx - seqlayout::CELL_GAP * mm - 1.6f, gx1 = cx + 1.6f;
+						float gy0 = (top + seqlayout::ROW_H - h) * mm;
+						nvgBeginPath(vg);
+						nvgRect(vg, gx0, gy0, gx1 - gx0, cy + chPx - gy0 - 1.5f);
+						nvgFillColor(vg, col);
+						nvgFill(vg);
+						float ly = (top + seqlayout::ROW_H - h) * mm + 1.6f;
+						nvgBeginPath(vg);
+						nvgMoveTo(vg, cx - cwPx / 2.f - seqlayout::CELL_GAP * mm, ly);
+						nvgLineTo(vg, cx + cwPx / 2.f, ly);
+						nvgStrokeColor(vg, nvgRGB(0xff, 0xff, 0xff));
+						nvgStrokeWidth(vg, 1.4f);
+						nvgLineCap(vg, NVG_ROUND);
+						nvgStroke(vg);
 					}
 				}
 				if (s == playing) {
@@ -740,6 +1096,30 @@ struct StepGrid : widget::OpaqueWidget {
 					nvgStrokeWidth(vg, 2.2f);
 					nvgStroke(vg);
 				}
+			}
+			// TIE handle, on hover between two lit trigs of this row: + ties them, − unties them
+			if (module && hoverRow == r && tieHandleUsable(r, hoverGap)) {
+				bool tied = module->isTied(r, hoverGap);
+				float hx = (seqlayout::GRID_X0 + hoverGap * cw) * mm, hy = (top + TIE_DY) * mm, hr = TIE_R * mm;
+				nvgBeginPath(vg);
+				nvgCircle(vg, hx, hy, hr);
+				nvgFillColor(vg, hoverOnHandle ? nvgRGB(0xff, 0xff, 0xff) : nvgRGB(0x16, 0x18, 0x22));
+				nvgFill(vg);
+				nvgStrokeColor(vg, col);
+				nvgStrokeWidth(vg, 1.f);
+				nvgStroke(vg);
+				float a = hr * 0.5f;
+				nvgBeginPath(vg);
+				nvgMoveTo(vg, hx - a, hy);
+				nvgLineTo(vg, hx + a, hy);
+				if (!tied) {
+					nvgMoveTo(vg, hx, hy - a);
+					nvgLineTo(vg, hx, hy + a);
+				}
+				nvgStrokeColor(vg, hoverOnHandle ? nvgRGB(0x16, 0x18, 0x22) : nvgRGB(0xff, 0xff, 0xff));
+				nvgStrokeWidth(vg, 1.3f);
+				nvgLineCap(vg, NVG_ROUND);
+				nvgStroke(vg);
 			}
 		}
 	}
@@ -910,7 +1290,8 @@ struct LockLane : widget::OpaqueWidget {
 			float lx = (seqlayout::LANE_LABEL_X - box.pos.x / mm) * mm;
 			nvgText(vg, lx, 0.4f * mm, string::f("ROW %d LOCK", row + 1).c_str(), NULL);
 			nvgFillColor(vg, dark ? nvgRGB(0xe6, 0xe8, 0xee) : nvgRGB(0x22, 0x24, 0x2c));
-			nvgFontSize(vg, 7.5f);
+			// Sized for the longest name ("WAVE / START") in the space left of the steps
+			nvgFontSize(vg, 6.4f);
 			nvgText(vg, lx, 4.6f * mm, (std::string(wa::LOCK_LABELS[k]) + " \xe2\x96\xbe").c_str(), NULL);
 		}
 		// CLR button: lit while the row has locks of the lane's setting (dim when there is nothing to clear)
@@ -1007,17 +1388,17 @@ struct StepRowLabels : widget::TransparentWidget {
 			NVGcolor col = layout::MARKER_COLORS[r];
 			float cy = (seqlayout::rowTop(r) + seqlayout::ROW_H / 2.f) * mm;
 			nvgBeginPath(vg);
-			nvgCircle(vg, 9.f * mm, cy - 2.f * mm, 3.1f * mm);
+			nvgCircle(vg, seqlayout::BADGE_X * mm, cy - 2.f * mm, 3.1f * mm);
 			nvgFillColor(vg, col);
 			nvgFill(vg);
 			nvgFontSize(vg, 11.f);
 			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
 			nvgFillColor(vg, nvgRGB(0x16, 0x18, 0x22));
-			nvgText(vg, 9.f * mm, cy - 2.f * mm + 3.8f, std::to_string(r + 1).c_str(), NULL);
+			nvgText(vg, seqlayout::BADGE_X * mm, cy - 2.f * mm + 3.8f, std::to_string(r + 1).c_str(), NULL);
 			nvgFontSize(vg, 8.f);
 			nvgFillColor(vg, col);
 			std::string len = module ? string::f("%d", module->length[r]) : "16";
-			nvgText(vg, 9.f * mm, cy + 5.5f * mm, len.c_str(), NULL);
+			nvgText(vg, seqlayout::BADGE_X * mm, cy + 5.5f * mm, len.c_str(), NULL);
 			// The row's clock, under its knob
 			std::string mult = module ? WaveArtifactSequencer::multiplierText((int) std::round(module->params[WaveArtifactSequencer::CLOCK_MULT_PARAM + r].getValue())) : "x4";
 			nvgText(vg, seqlayout::CLOCK_KNOB_X * mm, cy + 5.5f * mm, mult.c_str(), NULL);
@@ -1050,6 +1431,101 @@ struct StepRowLabels : widget::TransparentWidget {
 	}
 };
 
+/** A panel action button (RND, COND RND, COND CLR): lit while held; the press runs the action, undoable (Shift:
+every row). */
+struct ActionButton : MomentaryLitButton {
+	std::string undoName;
+	std::function<bool(WaveArtifactSequencer*, bool allRows)> action;
+	void onButton(const ButtonEvent& e) override {
+		bool press = e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && ((e.mods & RACK_MOD_MASK) & ~GLFW_MOD_SHIFT) == 0;
+		MomentaryLitButton::onButton(e);
+		if (press && module && action) {
+			WaveArtifactSequencer* m = (WaveArtifactSequencer*) module;
+			bool all = (e.mods & GLFW_MOD_SHIFT) != 0;
+			undoable(m, undoName, [=]() { return action(m, all); });
+		}
+	}
+};
+
+static ActionButton* createActionButton(Vec mmCenter, Module* module, int paramId, const std::string& label, NVGcolor color, Vec mmSize,
+	const std::string& undoName, std::function<bool(WaveArtifactSequencer*, bool)> action) {
+	ActionButton* b = createLitToggle<ActionButton>(mmCenter, module, paramId, label, color, mmSize);
+	b->undoName = undoName;
+	b->action = action;
+	return b;
+}
+
+/** Small horizontal slider: click or drag sets the value where the mouse is, double-click resets, right-click is the
+usual param menu. The fill and the percentage are drawn inside. */
+struct MiniSlider : app::ParamWidget {
+	NVGcolor color = layout::SCREEN_TEXT;
+	float dragX = 0.f, oldValue = 0.f;
+
+	void setFromX(float x) {
+		engine::ParamQuantity* pq = getParamQuantity();
+		if (pq && box.size.x > 0.f)
+			pq->setScaledValue(clamp(x / box.size.x, 0.f, 1.f));
+	}
+	void onButton(const ButtonEvent& e) override {
+		engine::ParamQuantity* pq = getParamQuantity();
+		if (pq && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == 0) {
+			oldValue = pq->getValue();
+			dragX = e.pos.x;
+			setFromX(dragX);
+			e.consume(this);
+			return;
+		}
+		ParamWidget::onButton(e);
+	}
+	void onDragMove(const DragMoveEvent& e) override {
+		if (e.button != GLFW_MOUSE_BUTTON_LEFT)
+			return;
+		dragX += e.mouseDelta.x / getAbsoluteZoom();
+		setFromX(dragX);
+	}
+	void onDragEnd(const DragEndEvent& e) override {
+		engine::ParamQuantity* pq = getParamQuantity();
+		if (pq && e.button == GLFW_MOUSE_BUTTON_LEFT && pq->getValue() != oldValue) {
+			history::ParamChange* h = new history::ParamChange;
+			h->name = "change " + pq->getLabel();
+			h->moduleId = module->id;
+			h->paramId = paramId;
+			h->oldValue = oldValue;
+			h->newValue = pq->getValue();
+			APP->history->push(h);
+		}
+		ParamWidget::onDragEnd(e);
+	}
+	void draw(const DrawArgs& args) override {
+		engine::ParamQuantity* pq = getParamQuantity();
+		float f = pq ? clamp(pq->getScaledValue(), 0.f, 1.f) : 0.5f;
+		NVGcontext* vg = args.vg;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, 0, 0, box.size.x, box.size.y, 1.6f);
+		nvgFillColor(vg, nvgRGB(0x14, 0x16, 0x1d));
+		nvgFill(vg);
+		if (f > 0.f) {
+			nvgBeginPath(vg);
+			nvgRoundedRect(vg, 0, 0, box.size.x * f, box.size.y, 1.6f);
+			nvgFillColor(vg, nvgTransRGBAf(color, 0.55f));
+			nvgFill(vg);
+		}
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, 0, 0, box.size.x, box.size.y, 1.6f);
+		nvgStrokeColor(vg, nvgTransRGBAf(color, 0.6f));
+		nvgStrokeWidth(vg, 0.7f);
+		nvgStroke(vg);
+		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/Nunito-Bold.ttf"));
+		if (!font)
+			return;
+		nvgFontFaceId(vg, font->handle);
+		nvgFontSize(vg, box.size.y * 0.72f);
+		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFillColor(vg, nvgRGB(0xf0, 0xf2, 0xff));
+		nvgText(vg, box.size.x / 2.f, box.size.y / 2.f + 0.4f, string::f("%d%%", (int) std::round(f * 100.f)).c_str(), NULL);
+	}
+};
+
 struct WaveArtifactSequencerWidget : ModuleWidget {
 	StepGrid* grid = nullptr;
 	LockLane* lane = nullptr;
@@ -1068,17 +1544,22 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 
 		PanelLabels* labels = createWidget<PanelLabels>(Vec(0, 0));
 		labels->box.size = box.size;
-		labels->add(Vec(W / 2.f, 6.f), "wA SEQUENCER", 9.f);
+		labels->add(Vec(TITLE_X, 6.f), "wA SEQUENCER", 9.f);
 		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
-			labels->add(Vec(GRID_X0 + (s + 0.5f) * cellW(), rowTop(WaveArtifactSequencer::ROWS - 1) + ROW_H + 3.2f), string::f("%d", s + 1), 5.f);
-		const float helpX = (GRID_X0 + GRID_X1) / 2.f;
-		labels->add(Vec(helpX, 117.6f), "drag: draw (height = velocity)   click: select   double-click: delete   Shift + drag: erase", 5.5f);
-		labels->add(Vec(helpX, 121.1f), "selected step: turn the marker's knobs to lock them   Ctrl + click: row ends   right-click: step", 5.5f);
+			labels->add(Vec(GRID_X0 + (s + 0.5f) * cellW(), slideTop(WaveArtifactSequencer::ROWS - 1) + SLIDE_H + 1.9f), string::f("%d", s + 1), 5.f);
+		// Help between the FILL jack and the panel's right edge
+		const float helpX = 89.f;
+		labels->add(Vec(helpX, 117.6f), "drag: draw (height = velocity)  click: select  double-click: delete  Shift+drag: erase  strip under a trig: slide", 5.5f);
+		labels->add(Vec(helpX, 121.1f), "selected step: turn the marker's knobs to lock  Ctrl+click: row end  + between trigs: tie (long gate)  right-click: step", 5.5f);
 		labels->add(Vec(W / 2.f, 125.2f), "left of Wave Artifacts   |   PLAY: SEQ   |   clock: CLOCK input or internal tempo", 5.5f);
 		labels->add(Vec(CLOCK_KNOB_X, 14.5f), "CLOCK", 5.f);
-		labels->add(Vec(9.f, 14.5f), "LEN", 5.f);
+		labels->add(Vec(BADGE_X, 14.5f), "LEN", 5.f);
+		labels->add(Vec(GATE_X, GATE_LABEL_Y), "GATE", 5.f, true);
+		labels->add(Vec(MOD_X, GATE_LABEL_Y), "MOD", 5.f, true);
 		labels->add(Vec((FILL_BUTTON.x + FILL_INPUT.x) / 2.f, FILL_LABEL_Y), "FILL", 5.f);
 		labels->add(REC_LABEL, "REC", 6.f);
+		labels->add(RND_LABEL, "LOCKS", 6.f);
+		labels->add(COND_LABEL, "COND", 6.f);
 		addChild(labels);
 
 		StepRowLabels* rows = createWidget<StepRowLabels>(Vec(0, 0));
@@ -1103,6 +1584,26 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<WhiteLight>>>(mm2px(FILL_BUTTON), module, WaveArtifactSequencer::FILL_PARAM, WaveArtifactSequencer::FILL_LIGHT));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(FILL_INPUT), module, WaveArtifactSequencer::FILL_INPUT));
 		addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<RedLight>>>(mm2px(REC_BUTTON), module, WaveArtifactSequencer::REC_PARAM, WaveArtifactSequencer::REC_LIGHT));
+		addParam(createActionButton(RND_BUTTON, module, WaveArtifactSequencer::RND_PARAM, "RND", layout::SCREEN_TEXT, RND_BUTTON_SIZE, "random locks",
+			[](WaveArtifactSequencer* m, bool all) { return m->randomizeLocks(all); }));
+		auto addSlider = [&](Vec center, Vec size, int paramId, NVGcolor color) {
+			MiniSlider* slider = createParam<MiniSlider>(Vec(0, 0), module, paramId);
+			slider->box.size = mm2px(size);
+			slider->box.pos = mm2px(center).minus(slider->box.size.div(2.f));
+			slider->color = color;
+			addParam(slider);
+		};
+		addSlider(RND_SLIDER, RND_SLIDER_SIZE, WaveArtifactSequencer::RND_AMOUNT_PARAM, layout::SCREEN_TEXT);
+		addParam(createActionButton(COND_RND_BUTTON, module, WaveArtifactSequencer::COND_RND_PARAM, "RND", COND_COLOR, RND_BUTTON_SIZE, "random conditions",
+			[](WaveArtifactSequencer* m, bool all) { m->randomizeConditions(all); return true; }));
+		addSlider(COND_SLIDER, COND_SLIDER_SIZE, WaveArtifactSequencer::COND_RND_AMOUNT_PARAM, COND_COLOR);
+		addParam(createActionButton(COND_CLR_BUTTON, module, WaveArtifactSequencer::COND_CLR_PARAM, "CLR", COND_COLOR, COND_CLR_SIZE, "reset conditions",
+			[](WaveArtifactSequencer* m, bool all) { m->clearConditions(all); return true; }));
+		// Row GATE outputs, on top of the grid like the knobs
+		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
+			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(GATE_X, rowTop(r) + ROW_H / 2.f)), module, WaveArtifactSequencer::GATE_OUTPUT + r));
+		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
+			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(MOD_X, rowTop(r) + ROW_H / 2.f)), module, WaveArtifactSequencer::MOD_OUTPUT + r));
 	}
 
 	void step() override {

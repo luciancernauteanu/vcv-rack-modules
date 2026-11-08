@@ -74,7 +74,12 @@ struct StepData {
 	uint8_t cond = COND_ALWAYS;
 	uint8_t chance = 50;
 	uint8_t a = 1, b = 2;
-	bool slide = false;
+	/** Slide 0..1: 0 = off; otherwise the settings this step changes glide there over that fraction of one of the
+	row's steps (1 = the whole step, 0.01 = almost a jump). */
+	float slide = 0.f;
+	/** Tied to the trig before it (a long gate): the note that trig started goes on through this step instead of
+	starting again; only counts while the step before is lit (see isTied()). */
+	bool tie = false;
 
 	bool locked(int k) const {
 		return (mask >> k) & 1u;
@@ -89,12 +94,27 @@ struct StepData {
 		mask &= ~((uint64_t) 1u << k);
 	}
 	bool isPlain() const {
-		return mask == 0 && cond == COND_ALWAYS && !slide;
+		return mask == 0 && cond == COND_ALWAYS && slide <= 0.f && !tie;
 	}
 	void clear() {
 		*this = StepData();
 	}
 };
+
+/** What a tied step plays: the locks of the group so far with its own on top (a step without locks keeps the
+group's), and its own slide. */
+inline StepData mergeTied(const StepData& group, const StepData& step) {
+	StepData out = group;
+	for (int k = 0; k < NUM_LOCKABLE; k++) {
+		if (step.locked(k)) {
+			out.value[k] = step.value[k];
+			out.mask |= (uint64_t) 1u << k;
+		}
+	}
+	out.slide = step.slide;
+	out.tie = true;
+	return out;
+}
 
 /** Whether a step plays this time. `pass` counts the row's passes since RESET (0 = the first), `random01` is a
 uniform number in [0, 1) drawn for this step. */
@@ -112,6 +132,62 @@ inline bool conditionPasses(const StepData& s, long pass, bool fill, float rando
 	}
 }
 
+/** One value that jumps to each new target, or glides there with slide (over slide x one step, like the locks).
+Used for a row's MOD output (its steps' velocities). */
+struct GlideValue {
+	float value = 0.f;
+	float from = 0.f, to = 0.f;
+	double progress = 1.0, glideBeats = 1.0;
+
+	void set(float target, float slide, double stepBeats) {
+		slide = slide > 1.f ? 1.f : slide;
+		if (slide > 0.f && stepBeats > 0.0 && target != value) {
+			from = value;
+			to = target;
+			progress = 0.0;
+			glideBeats = stepBeats * slide;
+		}
+		else {
+			value = to = target;
+			progress = 1.0;
+		}
+	}
+	/** Moves on by `beats` (the clock's beats since the last call) */
+	void advance(double beats) {
+		if (progress >= 1.0)
+			return;
+		progress += beats / glideBeats;
+		if (progress >= 1.0) {
+			progress = 1.0;
+			value = to;
+		}
+		else {
+			value = from + (to - from) * (float) progress;
+		}
+	}
+};
+
+/** COND RND: a random condition from three uniform numbers in [0, 1). Mostly chances (half) and A:B (a third);
+FILL and NOT FILL are rare, as they silence a step until FILL is used (or until it is). */
+inline void randomCondition(StepData& d, float u1, float u2, float u3) {
+	if (u1 < 0.5f) {
+		d.cond = COND_CHANCE;
+		int i = (int) (u2 * 5.f);
+		d.chance = (uint8_t) CHANCES[i < 0 ? 0 : (i > 4 ? 4 : i)];
+	}
+	else if (u1 < 0.85f) {
+		d.cond = COND_RATIO;
+		int b = 2 + (int) (u2 * 7.f);
+		b = b > 8 ? 8 : b;
+		int a = 1 + (int) (u3 * (float) b);
+		d.b = (uint8_t) b;
+		d.a = (uint8_t) (a > b ? b : a);
+	}
+	else {
+		d.cond = (u1 < 0.925f) ? COND_FILL : COND_NOT_FILL;
+	}
+}
+
 /** Short text for a condition, drawn in the step and in the menu: "50%", "1:2", "FILL", "!FILL" (empty for ALWAYS) */
 inline void conditionText(const StepData& s, char* out, int size) {
 	switch (s.cond) {
@@ -124,7 +200,7 @@ inline void conditionText(const StepData& s, char* out, int size) {
 }
 
 /** The locks one marker is playing, from the step that played last until its row plays another one. With slide, the
-settings the new step changes glide there over one of the row's steps instead of jumping. Audio thread. */
+settings the new step changes glide there over SLIDE x one of the row's steps instead of jumping. Audio thread. */
 struct MarkerLocks {
 	float value[NUM_LOCKABLE] = {};
 	uint64_t mask = 0;
@@ -147,10 +223,11 @@ struct MarkerLocks {
 
 	/** A new step plays. `knobs` are the knob values now (to start glides from what is heard). `jumpMask`: settings
 	that never glide (switches and lists). */
-	void apply(const float* newValue, uint64_t newMask, bool slide, double stepBeats, const float* knobs, uint64_t jumpMask) {
+	void apply(const float* newValue, uint64_t newMask, float slide, double stepBeats, const float* knobs, uint64_t jumpMask) {
 		uint64_t glide = 0;
 		float start[NUM_LOCKABLE];
-		if (slide && stepBeats > 0.0) {
+		slide = slide > 1.f ? 1.f : slide;
+		if (slide > 0.f && stepBeats > 0.0) {
 			for (int k = 0; k < NUM_LOCKABLE; k++) {
 				uint64_t bit = (uint64_t) 1u << k;
 				if (!((mask | newMask | gliding) & bit) || (jumpMask & bit))
@@ -170,7 +247,8 @@ struct MarkerLocks {
 			if ((glide >> k) & 1u)
 				from[k] = start[k];
 		progress = glide ? 0.0 : 1.0;
-		glideBeats = stepBeats > 0.0 ? stepBeats : 1.0;
+		// SLIDE 100% glides over the whole step, 1% over a hundredth of it.
+		glideBeats = (stepBeats > 0.0 ? stepBeats : 1.0) * (slide > 0.f ? slide : 1.f);
 	}
 
 	/** Moves the glides on by `beats` (the clock's beats per sample) */
