@@ -11,7 +11,7 @@
 
 namespace wa {
 
-static const int NUM_LOCKABLE = 37;
+static const int NUM_LOCKABLE = 53;
 
 /** Saved in the patch (JSON keys): never rename one. Same order as WaveArtifact::MARKER_SETTING_PARAMS. */
 static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
@@ -24,6 +24,9 @@ static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
 	"grainSpread", "grainPScatter", "grainScan", "grainDir",
 	"attack", "decay", "sustain", "hold", "release",
 	"grainKeepSpeed", "grainScanMode", "grainScanFade", "grainScanLength",
+	"sampleLoop", "sampleLoopPoint", "sampleBeat", "sampleHitSnap",
+	"modLfoRate", "modLfoShape", "modLfoSync", "modLfoTriplet", "modLfoDotted", "modLfoDest", "modLfoDepth",
+	"modAdAttack", "modAdDecay", "modAdPerc", "modAdDest", "modAdDepth",
 };
 
 /** Shown in the lane's setting menu and on the panel */
@@ -37,6 +40,9 @@ static const char* const LOCK_LABELS[NUM_LOCKABLE] = {
 	"SPREAD", "P.SPRD", "SCAN", "DIRECTION",
 	"ATTACK", "DECAY", "SUSTAIN", "HOLD", "RELEASE",
 	"KEEP", "LOOP / PING", "FADE", "LENGTH",
+	"ONE / LOOP / PING", "LOOP POINT", "BEAT", "HIT",
+	"EXP LFO RATE", "EXP LFO SHAPE", "EXP LFO SYNC", "EXP LFO T", "EXP LFO D", "EXP LFO DEST", "EXP LFO DEPTH",
+	"EXP AD ATTACK", "EXP AD DECAY", "EXP AD PERC", "EXP AD DEST", "EXP AD DEPTH",
 };
 
 /** Settings a step cannot lock: switches that only change how another control is read (SYNC / T / D, PITCH FREE)
@@ -46,7 +52,10 @@ static const uint64_t NOT_LOCKABLE =
 	(1ull << 4) | (1ull << 5) | (1ull << 6) |    // LFO SYNC, T, D
 	(1ull << 14) |                               // PITCH FREE
 	(1ull << 21) | (1ull << 22) | (1ull << 23) | // GRAIN SYNC, T, D
-	(1ull << 33) | (1ull << 34);                 // KEEP, LOOP / PING
+	(1ull << 33) | (1ull << 34) |                // KEEP, LOOP / PING
+	(1ull << 37) | (1ull << 39) | (1ull << 40) | // SAMPLE ONE / LOOP / PING, BEAT, HIT
+	(1ull << 43) | (1ull << 44) | (1ull << 45) | // EXP LFO SYNC, T, D
+	(1ull << 50);                                // EXP AD PERC
 
 inline bool isLockable(int k) {
 	return k >= 0 && k < NUM_LOCKABLE && !((NOT_LOCKABLE >> k) & 1u);

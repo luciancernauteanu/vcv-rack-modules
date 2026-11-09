@@ -16,6 +16,14 @@ inline std::string scanLengthText(float k, const wa::WavetableBank* bank) {
 struct GrainScanLengthQuantity : ParamQuantity {
 	std::string getDisplayValueString() override {
 		WaveArtifact* m = dynamic_cast<WaveArtifact*>(module);
+		// SAMPLE with BEAT: a note value at the tempo (straight, plus the marker's T / D)
+		int marker = paramId - WaveArtifact::MARKER_GRAIN_SCAN_LENGTH_PARAM;
+		if (m && (int) std::round(m->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) == 2
+			&& (int) std::round(m->params[WaveArtifact::MARKER_SAMPLE_BEAT_PARAM + marker].getValue()) == wa::SAMPLE_BEAT_CUT) {
+			int d = wa::sampleBeatDivision(getValue(), m->params[WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM + marker].getValue() > 0.5f,
+				m->params[WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + marker].getValue() > 0.5f);
+			return string::f("%s (%g beats)", wa::SAMPLE_DIVISIONS[d].name, std::round(wa::SAMPLE_DIVISIONS[d].beats * 1000.f) / 1000.f);
+		}
 		return scanLengthText(getValue(), m ? m->activeBank.load() : nullptr);
 	}
 	std::string getUnit() override {

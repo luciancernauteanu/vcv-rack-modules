@@ -121,12 +121,19 @@ static void testLockable() {
 	int count = 0;
 	for (int k = 0; k < wa::NUM_LOCKABLE; k++)
 		count += wa::isLockable(k) ? 1 : 0;
-	std::printf("  lockable settings: %d of %d (want 28)\n", count, wa::NUM_LOCKABLE);
-	CHECK(count == 28, "lockable count %d", count);
+	std::printf("  lockable settings: %d of %d (want 37: SAMPLE's LOOP point locks, its ONE / LOOP / PING does not; the expander LFO's\n"
+		"  rate, shape, DEST, DEPTH and the AD's attack, decay, DEST, DEPTH lock, their SYNC / T / D and PERC do not)\n", count, wa::NUM_LOCKABLE);
+	CHECK(count == 37, "lockable count %d", count);
+	// The expander modulation (StepLocks.hpp 41..52)
+	for (int k : {41, 42, 46, 47, 48, 49, 51, 52})
+		CHECK(wa::isLockable(k), "%s must be lockable", wa::LOCK_NAMES[k]);
+	for (int k : {43, 44, 45, 50})
+		CHECK(!wa::isLockable(k), "%s must not be lockable", wa::LOCK_NAMES[k]);
 	// The four lockable switches / lists, and the nine that are not
 	for (int k : {7, 11, 20, 27})
 		CHECK(wa::isLockable(k), "%s must be lockable", wa::LOCK_NAMES[k]);
-	for (int k : {4, 5, 6, 14, 21, 22, 23, 33, 34})
+	CHECK(wa::isLockable(38), "%s must be lockable", wa::LOCK_NAMES[38]);
+	for (int k : {4, 5, 6, 14, 21, 22, 23, 33, 34, 37})
 		CHECK(!wa::isLockable(k), "%s must not be lockable", wa::LOCK_NAMES[k]);
 	wa::StepData s;
 	s.setLock(4, 1.f);

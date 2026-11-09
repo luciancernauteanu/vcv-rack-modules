@@ -84,6 +84,12 @@ struct EngineInput {
 	int previewTable = -1;
 	/** Render this artifact's own output (see getDirect); only patched outputs cost CPU. */
 	bool wantDirect[NUM_MARKERS] = {};
+	/** SEND / RETURN (an expander's jacks): render each marker's send (getSend) */
+	bool wantSend = false;
+	/** The marker's filter is replaced by the returned signal (engine units, retR = retL when mono) */
+	bool insert[NUM_MARKERS] = {};
+	float retL[NUM_MARKERS] = {};
+	float retR[NUM_MARKERS] = {};
 	/** POLY play mode: the voices below instead of the morph. Switching fades like a structural change. */
 	bool poly = false;
 	/** Level of each marker's ADSR, 0..1 */
@@ -269,6 +275,14 @@ public:
 			}
 		}
 
+		// RETURN: each marker's filter gives way to the returned sound over 20 ms (and back), so patching or
+		// unpatching a return never clicks. The sends are written again by whatever renders below.
+		for (int m = 0; m < NUM_MARKERS; m++) {
+			float t = in.insert[m] ? 1.f : 0.f;
+			insertS[m] = (t > insertS[m]) ? std::min(t, insertS[m] + tableFadeStep) : std::max(t, insertS[m] - tableFadeStep);
+			sendL[m] = sendR[m] = 0.f;
+		}
+
 		float l = 0.f, r = 0.f;
 		bool rendered = in.bank && gain > 0.f;
 		if (rendered) {
@@ -277,6 +291,10 @@ public:
 			else
 				renderMorph(in, *in.bank, &l, &r);
 		}
+		// MORPH: the artifacts' own chains (outputs, SEND, RETURN); a returned sound joins the mix here, before the
+		// master section.
+		if (!polyApplied)
+			renderChains(in, &l, &r);
 
 		// Preview (audition) of one table: replaces the morph with a 20 ms crossfade, plays at the
 		// base pitch, centered, unfiltered. A different table while previewing crossfades too.
@@ -334,10 +352,7 @@ public:
 		masterGainS += (std::min(std::max(in.masterGain, 0.f), (float) MAX_MASTER_GAIN) - masterGainS) * smoothCoef;
 		limiter.process(l * masterGainS, r * masterGainS, LIMIT, outL, outR);
 
-		if (!polyApplied) {
-			renderDirect(in);
-		}
-		else if (!rendered) {
+		if (polyApplied && !rendered) {
 			// Fully faded: the limiters look ahead, so they still hold the last faded samples.
 			for (int m = 0; m < NUM_MARKERS; m++) {
 				if (in.wantDirect[m])
@@ -355,6 +370,19 @@ public:
 	void getDirect(int m, float* l, float* r) const {
 		*l = directL[m];
 		*r = directR[m];
+	}
+
+	/** SEND: what this marker's filter gets this sample (engine units, x5 V), after GAIN and DRIVE; in MORPH at
+	its position share. 0 when it does not sound. */
+	void getSend(int m, float* l, float* r) const {
+		*l = sendL[m];
+		*r = sendR[m];
+	}
+
+	/** The marker's level for the ENV output, 0..1: its ADSR in POLY, its position share in MORPH (before an
+	artifact output or a return takes it out of the morph's voice) */
+	float getLevel(int m) const {
+		return posWeight[m];
 	}
 
 	/** Output gain reduction of the limiter (1 = not limiting), for a meter */
@@ -429,19 +457,21 @@ private:
 			float t = in.wantDirect[m] ? 0.f : 1.f;
 			mainShare[m] = (t > mainShare[m]) ? std::min(t, mainShare[m] + tableFadeStep) : std::max(t, mainShare[m] - tableFadeStep);
 		}
-		heard[a] *= mainShare[a];
+		// A marker with a RETURN leaves the morph's voice (its filter is outside): renderChains plays it, through
+		// the return, into the main mix.
+		heard[a] *= mainShare[a] * (1.f - insertS[a]);
 		if (b != a)
-			heard[b] *= mainShare[b];
+			heard[b] *= mainShare[b] * (1.f - insertS[b]);
 		float ra = readMarker(a);
 		float rb = (b == a) ? ra : readMarker(b);
-		float va = ra * gainS[a] * mainShare[a];
-		float vb = rb * gainS[b] * mainShare[b];
-		// Artifacts with a patched output are read every sample, heard in the morph or not.
+		float va = ra * gainS[a] * mainShare[a] * (1.f - insertS[a]);
+		float vb = rb * gainS[b] * mainShare[b] * (1.f - insertS[b]);
+		// Artifacts with their own chain (a patched output, a SEND or a RETURN) are read every sample, heard in the
+		// morph or not.
 		for (int m = 0; m < NUM_MARKERS; m++) {
-			if (!in.wantDirect[m])
-				continue;
-			rawRead[m] = (m == a) ? ra : (m == b) ? rb : readMarker(m);
-			rawValid[m] = true;
+			rawValid[m] = needsChain(in, m);
+			if (rawValid[m])
+				rawRead[m] = (m == a) ? ra : (m == b) ? rb : readMarker(m);
 		}
 		float dry = va + (vb - va) * w;
 
@@ -538,15 +568,27 @@ private:
 					float old = readAt(bank, s.prev, phases[m], f);
 					v = old + (v - old) * s.fade;
 				}
-				float y = d.svf.process(d.drive.process(v * gainS[m], d.driveS < 1e-5f ? 0.f : d.driveS), filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
-				if (!std::isfinite(y)) {
-					d.svf.reset();
-					y = 0.f;
+				// SEND: what the filter gets; RETURN (insert) takes the filter's place, faded in and out over 20 ms
+				float driven = d.drive.process(v * gainS[m], d.driveS < 1e-5f ? 0.f : d.driveS);
+				sendL[m] = sendR[m] = driven;
+				float k = insertS[m];
+				float y = 0.f;
+				if (k < 1.f) {
+					y = d.svf.process(driven, filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
+					if (!std::isfinite(y)) {
+						d.svf.reset();
+						y = 0.f;
+					}
 				}
 				y *= env * gain;
 				float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
-				yl = y * std::cos(angle) * SQRT2;
-				yr = y * std::sin(angle) * SQRT2;
+				float cl = std::cos(angle) * SQRT2, cr = std::sin(angle) * SQRT2;
+				yl = y * cl;
+				yr = y * cr;
+				if (k > 0.f) {
+					yl += (in.retL[m] * env * gain * cl - yl) * k;
+					yr += (in.retR[m] * env * gain * cr - yr) * k;
+				}
 			}
 			else {
 				d.running = false;
@@ -570,14 +612,22 @@ private:
 		*outR = sumR * polyTrimS;
 	}
 
-	/** The artifacts' own outputs. Each patched artifact runs its own chain with its own settings
-	(no interpolation with a neighbor): GAIN, DRIVE, filter, its position share (posWeight, so the
-	outputs follow the playhead like the main mix), PAN, then a safety limiter. It fades
-	(5 ms) when the artifact is switched off, and with the structural declick when the bank changes. */
-	void renderDirect(const EngineInput& in) {
+	/** A marker that runs its own chain in the morph: a patched artifact output, a SEND, or a RETURN */
+	bool needsChain(const EngineInput& in, int m) const {
+		return in.wantDirect[m] || in.wantSend || insertS[m] > 0.f;
+	}
+
+	/** MORPH: each artifact's own chain, for its output, its SEND and its RETURN. Its own settings (no
+	interpolation with a neighbor): GAIN, DRIVE, filter, its position share (posWeight, so it follows the playhead
+	like the main mix), PAN; the output then goes through a safety limiter. It fades (5 ms) when the artifact is
+	switched off, and with the structural declick when the bank changes.
+	SEND is the marker's part of what the morph's filter gets (after DRIVE, at its position share). With a RETURN,
+	the returned sound takes the filter's place (faded over 20 ms) and goes into the main mix (`l`, `r`, before the
+	master section), as the marker has left the morph's voice. */
+	void renderChains(const EngineInput& in, float* l, float* r) {
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			DirectChain& d = direct[m];
-			if (!in.wantDirect[m]) {
+			if (!needsChain(in, m)) {
 				d.running = false;
 				directL[m] = directR[m] = 0.f;
 				continue;
@@ -587,7 +637,10 @@ private:
 				// phases also stop, so the sound resumes exactly where it paused instead of refilling
 				// an emptied filter. The limiter keeps running on silence: it looks ahead, so it still
 				// holds the last few faded samples and must let them out.
-				d.limiter.process(0.f, 0.f, LIMIT, &directL[m], &directR[m]);
+				if (in.wantDirect[m])
+					d.limiter.process(0.f, 0.f, LIMIT, &directL[m], &directR[m]);
+				else
+					directL[m] = directR[m] = 0.f;
 				continue;
 			}
 			const MarkerInput& M = in.markers[m];
@@ -619,14 +672,30 @@ private:
 			d.env += ((M.active ? 1.f : 0.f) - d.env) * smoothCoef;
 
 			float x = rawValid[m] ? rawRead[m] * gainS[m] : 0.f;
-			float y = d.svf.process(d.drive.process(x, d.driveS < 1e-5f ? 0.f : d.driveS), filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
-			if (!std::isfinite(y)) {
-				d.svf.reset();
-				y = 0.f;
+			float driven = d.drive.process(x, d.driveS < 1e-5f ? 0.f : d.driveS);
+			float share = d.env * posWeight[m];
+			sendL[m] = sendR[m] = driven * share;
+			float k = insertS[m];
+			float y = 0.f;
+			if (k < 1.f) {
+				y = d.svf.process(driven, filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
+				if (!std::isfinite(y)) {
+					d.svf.reset();
+					y = 0.f;
+				}
 			}
-			y *= d.env * gain * posWeight[m];
+			y *= share * gain;
 			float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
-			d.limiter.process(y * std::cos(angle) * SQRT2, y * std::sin(angle) * SQRT2, LIMIT, &directL[m], &directR[m]);
+			float cl = std::cos(angle) * SQRT2, cr = std::sin(angle) * SQRT2;
+			// The return already carries the position share (the send did)
+			float el = in.retL[m] * gain * cl, er = in.retR[m] * gain * cr;
+			float yl = y * cl + (el - y * cl) * k, yr = y * cr + (er - y * cr) * k;
+			if (in.wantDirect[m])
+				d.limiter.process(yl, yr, LIMIT, &directL[m], &directR[m]);
+			else
+				directL[m] = directR[m] = 0.f;
+			*l += el * k * mainShare[m];
+			*r += er * k * mainShare[m];
 		}
 	}
 
@@ -747,9 +816,13 @@ private:
 	DirectChain direct[NUM_MARKERS];
 	float directL[NUM_MARKERS] = {};
 	float directR[NUM_MARKERS] = {};
-	/** This sample's oscillator read of each artifact with a patched output (before GAIN) */
+	/** This sample's oscillator read of each artifact with its own chain (before GAIN) */
 	float rawRead[NUM_MARKERS] = {};
 	bool rawValid[NUM_MARKERS] = {};
+	/** SEND / RETURN: each marker's send this sample, and how far its return has replaced its filter (0..1) */
+	float sendL[NUM_MARKERS] = {};
+	float sendR[NUM_MARKERS] = {};
+	float insertS[NUM_MARKERS] = {};
 	/** Declick gain (structural fades) */
 	float gain = 0.f;
 

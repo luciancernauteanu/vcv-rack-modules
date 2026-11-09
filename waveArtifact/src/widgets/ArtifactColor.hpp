@@ -93,7 +93,7 @@ struct ArtifactSections : widget::Widget {
 				nvgStrokeWidth(args.vg, 1.f);
 				nvgStroke(args.vg);
 			}
-			// The bottom strip follows the selection too: the envelope only exists in POLY, SPREAD in GRAIN.
+			// The bottom strip follows the selection too: the envelope only exists in POLY, WINDOW / SPREAD / KEEP in GRAIN.
 			auto outline = [&](Vec mmPos, Vec mmSize) {
 				Vec p = mm2px(mmPos);
 				Vec size = mm2px(mmSize);
@@ -105,7 +105,7 @@ struct ArtifactSections : widget::Widget {
 			};
 			if (module && module->params[WaveArtifact::PLAY_MODE_PARAM].getValue() > 0.5f)
 				outline(layout::ADSR_BOX_POS, layout::ADSR_BOX_SIZE);
-			if (module && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f)
+			if (module && (int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) == 1)
 				outline(layout::SPREAD_BOX_POS, layout::SPREAD_BOX_SIZE);
 		}
 		Widget::drawLayer(args, layer);

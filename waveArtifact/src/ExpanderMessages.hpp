@@ -52,6 +52,9 @@ struct ToExpanderMessage {
 	bool granular = false;
 	/** The main module is in POLY: GATE plays the marker's own ADSR instead of scaling its level */
 	bool poly = false;
+	/** Each marker's expander LFO (-1..1, run by the main module: its settings are marker settings, lockable), for
+	the expanders' LFO jacks */
+	float modLfo[NUM_MARKERS] = {};
 };
 
 /** Main -> sequencer (the sequencer sits on the LEFT of the main module). The beat position is a level and the

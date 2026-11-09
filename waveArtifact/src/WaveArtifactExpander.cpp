@@ -1,6 +1,7 @@
 #include "WaveArtifactExpander.hpp"
 #include "Layout.hpp"
 #include "widgets/LfoControls.hpp"
+#include "widgets/LinkedKnob.hpp"
 #include "widgets/LfoWidgets.hpp"
 #include "widgets/ModeButton.hpp"
 #include "widgets/PanelLabels.hpp"
@@ -29,32 +30,27 @@ WaveArtifactExpander::WaveArtifactExpander() {
 	configParam(GRAIN_START_AMT_PARAM, 0.f, 1.f, 0.f, "START CV amount", "%", 0.f, 100.f);
 	configParam(GRAIN_DENSITY_AMT_PARAM, 0.f, 1.f, 0.f, "DENSITY CV amount", "%", 0.f, 100.f);
 	configParam(GRAIN_SPREAD_AMT_PARAM, 0.f, 1.f, 0.f, "Unused", "%", 0.f, 100.f);
-	// LFO 1 defaults to 1 Hz, LFO 2 to 0.2 Hz.
-	const float defaultRate[NUM_LFOS] = {0.606f, 0.394f};
+	// The LFO and the AD now belong to the marker (main module settings, shown on this panel; see the widget). Their
+	// old params here are placeholders, kept so later IDs and saved patches stay valid; only the LFO jack's level is
+	// this expander's own. (LFO 2 and the ENV output are gone.)
 	for (int k = 0; k < NUM_LFOS; k++) {
-		std::string name = "LFO " + std::to_string(k + 1);
-		configLfoRate(this, LFO_RATE_PARAM + k, LFO_SYNC_PARAM + k, LFO_TRIPLET_PARAM + k, LFO_DOTTED_PARAM + k, name + " rate", defaultRate[k]);
-		configSwitch(LFO_SYNC_PARAM + k, 0.f, 1.f, 1.f, name + " sync", {"Free (Hz)", "Tempo sync (BPM / CLOCK)"});
-		configSwitch(LFO_TRIPLET_PARAM + k, 0.f, 1.f, 0.f, name + " triplets", {"Off", "On"});
-		configSwitch(LFO_DOTTED_PARAM + k, 0.f, 1.f, 0.f, name + " dotted", {"Off", "On"});
-		for (int id : {LFO_SYNC_PARAM, LFO_TRIPLET_PARAM, LFO_DOTTED_PARAM})
+		for (int id : {LFO_RATE_PARAM, LFO_SYNC_PARAM, LFO_TRIPLET_PARAM, LFO_DOTTED_PARAM, LFO_SHAPE_PARAM}) {
+			configParam(id + k, 0.f, 1.f, 0.f, "Unused");
 			getParamQuantity(id + k)->randomizeEnabled = false;
-		configSwitch(LFO_SHAPE_PARAM + k, 0.f, wa::NUM_LFO_SHAPES - 1, 0.f, name + " shape", std::vector<std::string>(wa::LFO_SHAPE_NAMES, wa::LFO_SHAPE_NAMES + wa::NUM_LFO_SHAPES));
-		getParamQuantity(LFO_SHAPE_PARAM + k)->randomizeEnabled = false;
-		// The output level. Unlike the CV amounts (which start at 0 so nothing is modulated until you ask),
-		// this starts at 100%: an LFO output that starts silent would look broken.
-		configParam(LFO_AMT_PARAM + k, 0.f, 1.f, 1.f, name + " amount (output level)", "%", 0.f, 100.f);
-		lfos[k].seed(random::u32());
-		configOutput(LFO_OUTPUT + k, name + " (+-5 V)");
+		}
 	}
+	// The LFO jack's level. Unlike the CV amounts (which start at 0 so nothing is modulated until you ask), this
+	// starts at 100%: an LFO output that starts silent would look broken.
+	configParam(LFO_AMT_PARAM + 0, 0.f, 1.f, 1.f, "LFO output level", "%", 0.f, 100.f);
+	configParam(LFO_AMT_PARAM + 1, 0.f, 1.f, 1.f, "Unused");
+	getParamQuantity(LFO_AMT_PARAM + 1)->randomizeEnabled = false;
+	configOutput(LFO_OUTPUT + 0, "Marker's LFO (+-5 V at 100%)");
 	configInput(VOCT_INPUT, "V/OCT for this artifact (1 V/oct, added to the main V/OCT)");
-	configInput(GATE_INPUT, "Gate for this artifact. MORPH: it sounds only while the gate is high, shaped by ATTACK / DECAY. POLY: plays its note with its own ADSR while high, instead of the playhead");
-	// Attack 5 ms..2 s, decay 5 ms..4 s (log). At the minimum a stage is instant (plain gate).
-	configParam(ATTACK_PARAM, 0.f, 1.f, 0.f, "Attack", " s", 2.f / MIN_ENV_TIME, MIN_ENV_TIME);
-	configParam(DECAY_PARAM, 0.f, 1.f, 0.f, "Decay", " s", 4.f / MIN_ENV_TIME, MIN_ENV_TIME);
-	configSwitch(PERC_PARAM, 0.f, 1.f, 0.f, "Envelope mode", {"Gate (holds while high, DECAY after it falls)", "Percussive AD (decays even while the gate is held)"});
-	getParamQuantity(PERC_PARAM)->randomizeEnabled = false;
-	configOutput(ENV_OUTPUT, "Gate envelope (0..10 V; 0 V without a gate)");
+	configInput(GATE_INPUT, "Gate for this artifact: starts its AD. MORPH: it sounds only while the gate is high, shaped by the AD. POLY: plays its note with its own ADSR while high, instead of the playhead");
+	for (int id : {ATTACK_PARAM, DECAY_PARAM, PERC_PARAM}) {
+		configParam(id, 0.f, 1.f, 0.f, "Unused");
+		getParamQuantity(id)->randomizeEnabled = false;
+	}
 	configLight(LINK_LIGHT, "Connected to Wave Artifacts");
 
 	leftExpander.producerMessage = new wa::ToExpanderMessage;
@@ -71,52 +67,6 @@ WaveArtifactExpander::~WaveArtifactExpander() {
 	delete (wa::ToMainMessage*) rightExpander.consumerMessage;
 }
 
-/** Gate envelope: 0..1. ATTACK rises linearly; DECAY falls exponentially (60 dB in the DECAY time).
-At the minimum (5 ms or less) a stage is instant and the main module's 5 ms gain smoothing
-declicks it, so the defaults behave exactly like a plain gate. In gate mode the level holds while
-the gate is high and DECAY starts when it falls; in PERC mode a gate edge runs attack then decay
-whatever the gate does. A gate patched while already high starts the envelope (gate mode). */
-float WaveArtifactExpander::stepEnvelope(bool gateHigh, bool risingEdge, float sampleTime) {
-	bool perc = params[PERC_PARAM].getValue() > 0.5f;
-	float attack = envTime(params[ATTACK_PARAM].getValue(), 2.f);
-	float decay = envTime(params[DECAY_PARAM].getValue(), 4.f);
-	const float instant = MIN_ENV_TIME * 1.05f;
-	if (risingEdge || (gateHigh && !perc && envStage == ENV_IDLE))
-		envStage = ENV_ATTACK;
-
-	if (envStage == ENV_ATTACK) {
-		if (!perc && !gateHigh) {
-			envStage = ENV_DECAY;
-		}
-		else {
-			env = (attack <= instant) ? 1.f : std::min(1.f, env + sampleTime / attack);
-			if (env >= 1.f) {
-				env = 1.f;
-				// PERC starts falling next sample, so an instant attack still reaches the output.
-				envStage = perc ? ENV_DECAY : ENV_HOLD;
-				return env;
-			}
-		}
-	}
-	else if (envStage == ENV_HOLD && !gateHigh) {
-		envStage = ENV_DECAY;
-	}
-
-	if (envStage == ENV_DECAY) {
-		if (decay <= instant) {
-			env = 0.f;
-			envStage = ENV_IDLE;
-		}
-		else {
-			env *= std::exp(-6.9078f * sampleTime / decay);
-			if (env < 1e-3f) {
-				env = 0.f;
-				envStage = ENV_IDLE;
-			}
-		}
-	}
-	return env;
-}
 
 void WaveArtifactExpander::process(const ProcessArgs& args) {
 	Module* left = leftExpander.module;
@@ -134,13 +84,10 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 	// GATE: Schmitt trigger (high at 1 V, low below 0.1 V). Tracked even while unlinked so the state
 	// is right the moment the expander snaps on.
 	bool gatePatched = inputs[GATE_INPUT].isConnected();
-	bool gateRising = false;
 	if (gatePatched)
-		gateRising = gateTrigger.process(inputs[GATE_INPUT].getVoltage(), 0.1f, 1.f);
+		gateTrigger.process(inputs[GATE_INPUT].getVoltage(), 0.1f, 1.f);
 	else
 		gateTrigger.reset();
-	float envLevel = stepEnvelope(gatePatched && gateTrigger.isHigh(), gateRising, args.sampleTime);
-	outputs[ENV_OUTPUT].setVoltage(10.f * envLevel);
 
 	// Modulation: what the expanders to our right sent, plus ours.
 	wa::ToMainMessage acc;
@@ -148,18 +95,13 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		acc = *(const wa::ToMainMessage*) rightExpander.consumerMessage;
 	if (active) {
 		int m = getMarker();
-		// A patched GATE shapes the artifact's level with the ATTACK / DECAY envelope, through the
-		// same multiplier as the GAIN VCA, so the main module's 5 ms gain smoothing keeps even the
-		// fastest open/close click-free. Two expanders gating the same artifact multiply.
-		// In POLY the gate plays the marker's own ADSR instead (ATTACK / DECAY then only shape the ENV output).
+		// A patched GATE goes to the main module, which runs the marker's AD (its settings are marker settings, so
+		// trigs can lock them). In MORPH the artifact's level follows the AD (the main module's 5 ms gain smoothing
+		// keeps even the fastest open / close click-free); in POLY the gate plays the marker's note with its ADSR,
+		// and starts the AD. Two expanders gating the same artifact: either one opens it.
 		if (gatePatched) {
-			if (fromLeft.poly) {
-				acc.gatePatched[m] = true;
-				acc.gateHigh[m] = acc.gateHigh[m] || gateTrigger.isHigh();
-			}
-			else {
-				acc.gainMul[m] *= envLevel;
-			}
+			acc.gatePatched[m] = true;
+			acc.gateHigh[m] = acc.gateHigh[m] || gateTrigger.isHigh();
 			acc.modulated[m] = true;
 		}
 		if (inputs[VOCT_INPUT].isConnected()) {
@@ -191,38 +133,25 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->reset = fromLeft.reset;
 		out->granular = fromLeft.granular;
 		out->poly = fromLeft.poly;
+		std::copy(fromLeft.modLfo, fromLeft.modLfo + wa::NUM_MARKERS, out->modLfo);
 		right->leftExpander.requestMessageFlip();
 	}
 
-	// RESET from the main module restarts these LFOs too.
-	if (fromLeft.linked && fromLeft.reset) {
-		for (int k = 0; k < NUM_LFOS; k++)
-			lfos[k].reset();
-	}
-	// LFOs run whether or not the expander is linked; unlinked, sync falls back to 120 BPM.
-	const wa::ClockTracker& clock = fromLeft.linked ? fromLeft.clock : idleClock;
-	float lfoOut[NUM_LFOS];
-	for (int k = 0; k < NUM_LFOS; k++) {
-		bool sync = params[LFO_SYNC_PARAM + k].getValue() > 0.5f;
-		bool triplets = params[LFO_TRIPLET_PARAM + k].getValue() > 0.5f;
-		bool dotted = params[LFO_DOTTED_PARAM + k].getValue() > 0.5f;
-		int shape = (int) std::round(params[LFO_SHAPE_PARAM + k].getValue());
-		lfoOut[k] = lfos[k].process(shape, sync, params[LFO_RATE_PARAM + k].getValue(), triplets, dotted, clock, args.sampleTime);
-		lfoOut[k] *= params[LFO_AMT_PARAM + k].getValue();
-		outputs[LFO_OUTPUT + k].setVoltage(5.f * lfoOut[k]);
-	}
+	// LFO jack: the marker's LFO, which the main module runs (its settings are marker settings, so trigs can lock
+	// them), at this expander's AMT. Silent while not linked.
+	float lfoOut = active ? fromLeft.modLfo[getMarker()] * params[LFO_AMT_PARAM + 0].getValue() : 0.f;
+	outputs[LFO_OUTPUT + 0].setVoltage(5.f * lfoOut);
 
 	if (lightDivider.process()) {
 		float dt = args.sampleTime * lightDivider.getDivision();
 		lights[LINK_LIGHT + 0].setBrightnessSmooth(active ? 1.f : 0.f, dt);
 		lights[LINK_LIGHT + 1].setBrightnessSmooth(fromLeft.linked && !active ? 1.f : 0.f, dt);
-		for (int k = 0; k < NUM_LFOS; k++) {
-			lights[LFO_LIGHT + 2 * k + 0].setBrightnessSmooth(std::max(lfoOut[k], 0.f), dt);
-			lights[LFO_LIGHT + 2 * k + 1].setBrightnessSmooth(std::max(-lfoOut[k], 0.f), dt);
-		}
+		lights[LFO_LIGHT + 0].setBrightnessSmooth(std::max(lfoOut, 0.f), dt);
+		lights[LFO_LIGHT + 1].setBrightnessSmooth(std::max(-lfoOut, 0.f), dt);
 		linked = active;
 		chainIndex = index;
 		granular = fromLeft.linked && fromLeft.granular;
+		marker = getMarker();
 	}
 }
 
@@ -236,7 +165,7 @@ static const Vec VOCT_JACK = Vec(29.5f, 17.4f);
 static const Vec GATE_JACK = Vec(40.5f, 17.4f);
 static const Vec LINK_LIGHT_POS = Vec(44.5f, 6.f);
 static const float TOP_LABEL_Y = 22.4f;
-// Order top to bottom: header (MARKER, V/OCT, GATE), envelope, CV grid, LFOs.
+// Order top to bottom: header (MARKER, V/OCT, GATE), the marker's AD, CV grid, the marker's LFO.
 // CV section: two columns of three cells, each a name above a CV jack with its AMT trimpot
 // beside it (WAVE GAIN / CUTOFF DRIVE / FINE PAN).
 static const float CV_CELL_X[2] = {4.f, 25.4f};
@@ -245,17 +174,20 @@ static const float CV_AMT_DX = 16.4f;
 static const float CV_NAME_DX = 11.3f;
 static const float CV_JACK_Y[3] = {49.4f, 61.4f, 73.4f};
 static const float CV_NAME_DY = -5.6f;
-// Envelope section (gate): names above ATTACK, DECAY and the ENV output; PERC button between.
-static const float ENV_NAME_Y = 28.4f;
-static const float ENV_Y = 34.2f;
-static const float ATTACK_X = 10.5f;
-static const float DECAY_X = 21.2f;
-static const Vec PERC_BUTTON = Vec(30.4f, 34.2f);
-static const Vec PERC_BUTTON_SIZE = Vec(8.f, 4.4f);
-static const float ENV_OUT_X = 41.4f;
-// Per LFO column, top to bottom: title (+ light), shape screen, SYNC / T / D centered under the
-// screen, RATE + AMT with their labels above (as on the main module), output.
-static const float LFO_X[2] = {14.8f, 36.2f};
+// The marker's AD: ATTACK, DECAY, PERC, then where it goes (DEST) and how much (DEPTH); names above.
+static const float AD_NAME_Y = 28.4f;
+static const float AD_Y = 34.2f;
+static const float ATTACK_X = 8.2f;
+static const float DECAY_X = 15.6f;
+static const Vec PERC_BUTTON = Vec(23.7f, 34.2f);
+static const Vec PERC_BUTTON_SIZE = Vec(7.4f, 4.4f);
+static const Vec AD_DEST_BUTTON = Vec(33.4f, 34.2f);
+static const float AD_DEPTH_X = 42.6f;
+static const Vec DEST_BUTTON_SIZE = Vec(10.f, 4.6f);
+// The marker's LFO, left column, top to bottom: title (+ light), shape screen, SYNC / T / D centered under the
+// screen, RATE + AMT (the jack's level) with their labels above, the output. Right column: where it goes (DEST)
+// and how much (DEPTH).
+static const float LFO_X = 14.8f;
 static const float LFO_LABEL_Y = 83.2f;
 static const float LFO_SCREEN_Y = 88.8f;
 static const Vec LFO_SCREEN_SIZE = Vec(16.f, 6.4f);
@@ -264,12 +196,66 @@ static const float LFO_KNOB_LABEL_Y = 100.f;
 static const float LFO_KNOB_Y = 104.4f;
 static const float LFO_KNOB_DX = 5.1f;
 static const float LFO_OUT_Y = 114.6f;
+static const float LFO_DEST_X = 36.2f;
+static const float LFO_DEST_LABEL_Y = 87.4f;
+static const float LFO_DEST_Y = 92.6f;
 } // namespace xlayout
+
+/** The main module this expander is chained to, or null */
+static WaveArtifact* mainOf(Module* expander) {
+	Module* p = expander ? expander->leftExpander.module : nullptr;
+	for (int n = 0; p && n <= wa::MAX_EXPANDERS; n++) {
+		if (isMain(p))
+			return (WaveArtifact*) p;
+		if (!isWaveArtifactExpander(p))
+			return nullptr;
+		p = p->leftExpander.module;
+	}
+	return nullptr;
+}
 
 struct WaveArtifactExpanderWidget : ModuleWidget {
 	/** Per CV input with a separate granular amount: the wavetable knob and the granular knob at the same spot */
 	ParamWidget* waveAmtKnobs[wa::NUM_MOD_TARGETS] = {};
 	ParamWidget* grainAmtKnobs[wa::NUM_MOD_TARGETS] = {};
+
+	/** The controls of the marker's LFO and AD: main module params (a block of NUM_MARKERS IDs from `base`), shown
+	for this expander's marker. Each frame they point at the main module and the marker as they are now, so a step
+	selected on the sequencer locks them like the main module's own knobs. Not linked: no param (inactive). */
+	struct Bound {
+		ParamWidget* widget;
+		int base;
+	};
+	std::vector<Bound> bound;
+	LinkedKnob<LfoRateKnobT<RoundSmallBlackKnob>>* rateKnob = nullptr;
+	ModeButton* destButtons[2] = {};
+	WaveArtifact* boundMain = nullptr;
+	int boundMarker = -1;
+
+	template <class T>
+	T* bind(T* w, int base) {
+		bound.push_back({w, base});
+		return w;
+	}
+
+	void rebind(WaveArtifact* main, int marker) {
+		boundMain = main;
+		boundMarker = marker;
+		for (Bound& b : bound) {
+			b.widget->module = main;
+			b.widget->paramId = b.base + marker;
+		}
+		if (rateKnob) {
+			rateKnob->syncId = WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM + marker;
+			rateKnob->tripletId = WaveArtifact::MARKER_MOD_LFO_TRIPLET_PARAM + marker;
+			rateKnob->dottedId = WaveArtifact::MARKER_MOD_LFO_DOTTED_PARAM + marker;
+		}
+		// Redraw each one at its new value
+		for (Bound& b : bound) {
+			widget::Widget::ChangeEvent e;
+			b.widget->onChange(e);
+		}
+	}
 
 	void step() override {
 		WaveArtifactExpander* m = dynamic_cast<WaveArtifactExpander*>(module);
@@ -279,6 +265,14 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 				continue;
 			waveAmtKnobs[t]->setVisible(!grain);
 			grainAmtKnobs[t]->setVisible(grain);
+		}
+		WaveArtifact* main = (m && m->linked.load(std::memory_order_relaxed)) ? mainOf(m) : nullptr;
+		int marker = m ? clamp(m->marker.load(std::memory_order_relaxed), 0, wa::NUM_MARKERS - 1) : 0;
+		if (main != boundMain || marker != boundMarker)
+			rebind(main, marker);
+		for (ModeButton* d : destButtons) {
+			if (d)
+				d->labels.assign(grain ? wa::MOD_DEST_SHORT_GRAIN : wa::MOD_DEST_SHORT, (grain ? wa::MOD_DEST_SHORT_GRAIN : wa::MOD_DEST_SHORT) + wa::NUM_MOD_DESTS);
 		}
 		ModuleWidget::step();
 	}
@@ -306,15 +300,15 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++)
 			labels->addModal(Vec(CV_CELL_X[t % 2] + CV_NAME_DX, CV_JACK_Y[t / 2] + CV_NAME_DY), wa::MOD_TARGET_NAMES[t], GRAIN_TARGET_NAMES[t], 6.f);
 		labels->grainFlag = module ? &module->granular : nullptr;
-		labels->add(Vec(ATTACK_X, ENV_NAME_Y), "ATTACK", 6.f);
-		labels->add(Vec(DECAY_X, ENV_NAME_Y), "DECAY", 6.f);
-		labels->add(Vec(ENV_OUT_X, ENV_NAME_Y), "ENV", 6.f);
-		for (int k = 0; k < WaveArtifactExpander::NUM_LFOS; k++)
-		{
-			labels->add(Vec(LFO_X[k], LFO_LABEL_Y), "LFO " + std::to_string(k + 1), 6.f);
-			labels->add(Vec(LFO_X[k] - LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "RATE", 6.f);
-			labels->add(Vec(LFO_X[k] + LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "AMT", 6.f);
-		}
+		labels->add(Vec(ATTACK_X, AD_NAME_Y), "ATTACK", 5.f);
+		labels->add(Vec(DECAY_X, AD_NAME_Y), "DECAY", 5.f);
+		labels->add(Vec(AD_DEST_BUTTON.x, AD_NAME_Y), "AD DEST", 5.f);
+		labels->add(Vec(AD_DEPTH_X, AD_NAME_Y), "DEPTH", 5.f);
+		labels->add(Vec(LFO_X, LFO_LABEL_Y), "LFO", 6.f);
+		labels->add(Vec(LFO_X - LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "RATE", 6.f);
+		labels->add(Vec(LFO_X + LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "AMT", 6.f);
+		labels->add(Vec(LFO_DEST_X, LFO_DEST_LABEL_Y), "LFO DEST", 5.f);
+		labels->add(Vec(LFO_DEST_X, LFO_KNOB_LABEL_Y), "DEPTH", 6.f);
 		addChild(labels);
 
 		ModeButton* marker = createParam<ModeButton>(Vec(0, 0), module, WaveArtifactExpander::MARKER_PARAM);
@@ -342,26 +336,38 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 			}
 		}
 
-		addParam(createParamCentered<Trimpot>(mm2px(Vec(ATTACK_X, ENV_Y)), module, WaveArtifactExpander::ATTACK_PARAM));
-		addParam(createParamCentered<Trimpot>(mm2px(Vec(DECAY_X, ENV_Y)), module, WaveArtifactExpander::DECAY_PARAM));
-		addParam(createLitToggle(PERC_BUTTON, module, WaveArtifactExpander::PERC_PARAM, "PERC", layout::SCREEN_TEXT, PERC_BUTTON_SIZE));
-		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(ENV_OUT_X, ENV_Y)), module, WaveArtifactExpander::ENV_OUTPUT));
+		// The marker's modulation: main module params, bound to the marker in step(). Created without a module.
+		NVGcolor c = layout::SCREEN_TEXT;
+		auto dest = [&](Vec at) {
+			ModeButton* d = createParam<ModeButton>(Vec(0, 0), nullptr, 0);
+			d->box.size = mm2px(DEST_BUTTON_SIZE);
+			d->box.pos = mm2px(at).minus(d->box.size.div(2.f));
+			d->labels.assign(wa::MOD_DEST_SHORT, wa::MOD_DEST_SHORT + wa::NUM_MOD_DESTS);
+			return d;
+		};
+		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(ATTACK_X, AD_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_AD_ATTACK_PARAM));
+		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(DECAY_X, AD_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_AD_DECAY_PARAM));
+		addParam(bind(createLitToggle(PERC_BUTTON, nullptr, 0, "PERC", c, PERC_BUTTON_SIZE), WaveArtifact::MARKER_MOD_AD_PERC_PARAM));
+		destButtons[0] = bind(dest(AD_DEST_BUTTON), WaveArtifact::MARKER_MOD_AD_DEST_PARAM);
+		addParam(destButtons[0]);
+		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(AD_DEPTH_X, AD_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_AD_DEPTH_PARAM));
 
-		for (int k = 0; k < WaveArtifactExpander::NUM_LFOS; k++) {
-			float x = LFO_X[k];
-			NVGcolor c = layout::SCREEN_TEXT;
-			addParam(createLfoShapeScreen(Vec(x, LFO_SCREEN_Y), LFO_SCREEN_SIZE, module, WaveArtifactExpander::LFO_SHAPE_PARAM + k, c));
-			addParam(createLfoRateKnob<LfoRateKnobT<RoundSmallBlackKnob>>(Vec(x - LFO_KNOB_DX, LFO_KNOB_Y), module,
-				WaveArtifactExpander::LFO_RATE_PARAM + k, WaveArtifactExpander::LFO_SYNC_PARAM + k,
-				WaveArtifactExpander::LFO_TRIPLET_PARAM + k, WaveArtifactExpander::LFO_DOTTED_PARAM + k));
-			addParam(createParamCentered<Trimpot>(mm2px(Vec(x + LFO_KNOB_DX, LFO_KNOB_Y)), module, WaveArtifactExpander::LFO_AMT_PARAM + k));
-			// SYNC (wide), then the narrow T and D, centered as a group under the shape screen.
-			addParam(createLitToggle(Vec(x - 4.7f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_SYNC_PARAM + k, "SYNC", c));
-			addParam(createLitToggle(Vec(x + 1.3f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_TRIPLET_PARAM + k, "T", c, layout::LFO_TOGGLE_SMALL));
-			addParam(createLitToggle(Vec(x + 6.f, LFO_BUTTON_Y), module, WaveArtifactExpander::LFO_DOTTED_PARAM + k, "D", c, layout::LFO_TOGGLE_SMALL));
-			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(x, LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + k));
-			addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(x + 8.6f, LFO_LABEL_Y)), module, WaveArtifactExpander::LFO_LIGHT + 2 * k));
-		}
+		addParam(bind(createLfoShapeScreen(Vec(LFO_X, LFO_SCREEN_Y), LFO_SCREEN_SIZE, nullptr, 0, c), WaveArtifact::MARKER_MOD_LFO_SHAPE_PARAM));
+		rateKnob = createLfoRateKnob<LinkedKnob<LfoRateKnobT<RoundSmallBlackKnob>>>(Vec(LFO_X - LFO_KNOB_DX, LFO_KNOB_Y), nullptr,
+			WaveArtifact::MARKER_MOD_LFO_RATE_PARAM, WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM,
+			WaveArtifact::MARKER_MOD_LFO_TRIPLET_PARAM, WaveArtifact::MARKER_MOD_LFO_DOTTED_PARAM);
+		addParam(bind(rateKnob, WaveArtifact::MARKER_MOD_LFO_RATE_PARAM));
+		// The jack's level: this expander's own
+		addParam(createParamCentered<Trimpot>(mm2px(Vec(LFO_X + LFO_KNOB_DX, LFO_KNOB_Y)), module, WaveArtifactExpander::LFO_AMT_PARAM + 0));
+		// SYNC (wide), then the narrow T and D, centered as a group under the shape screen.
+		addParam(bind(createLitToggle(Vec(LFO_X - 4.7f, LFO_BUTTON_Y), nullptr, 0, "SYNC", c), WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM));
+		addParam(bind(createLitToggle(Vec(LFO_X + 1.3f, LFO_BUTTON_Y), nullptr, 0, "T", c, layout::LFO_TOGGLE_SMALL), WaveArtifact::MARKER_MOD_LFO_TRIPLET_PARAM));
+		addParam(bind(createLitToggle(Vec(LFO_X + 6.f, LFO_BUTTON_Y), nullptr, 0, "D", c, layout::LFO_TOGGLE_SMALL), WaveArtifact::MARKER_MOD_LFO_DOTTED_PARAM));
+		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(LFO_X, LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + 0));
+		addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(LFO_X + 8.6f, LFO_LABEL_Y)), module, WaveArtifactExpander::LFO_LIGHT));
+		destButtons[1] = bind(dest(Vec(LFO_DEST_X, LFO_DEST_Y)), WaveArtifact::MARKER_MOD_LFO_DEST_PARAM);
+		addParam(destButtons[1]);
+		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(LFO_DEST_X, LFO_KNOB_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_LFO_DEPTH_PARAM));
 	}
 };
 

@@ -20,19 +20,23 @@ test_granular: test_granular.cpp ../src/WavetableBank.cpp $(wildcard ../src/*.hp
 test_poly: test_poly.cpp ../src/WavetableBank.cpp $(wildcard ../src/*.hpp)
 	$(CXX) $(FLAGS) -o $@ test_poly.cpp ../src/WavetableBank.cpp
 
+test_sample: test_sample.cpp ../src/WavetableBank.cpp $(wildcard ../src/*.hpp)
+	$(CXX) $(FLAGS) -o $@ test_sample.cpp ../src/WavetableBank.cpp
+
 test_seq: test_seq.cpp $(wildcard ../src/*.hpp)
 	$(CXX) $(FLAGS) -o $@ test_seq.cpp
 
-run: test_bank test_engine test_lfo test_sound test_granular test_poly test_seq
+run: test_bank test_engine test_lfo test_sound test_granular test_poly test_sample test_seq
 	./test_bank
 	./test_engine
 	./test_lfo
 	./test_sound
 	./test_granular
 	./test_poly
+	./test_sample
 	./test_seq
 
 clean:
-	rm -f test_bank test_bank.exe test_engine test_engine.exe test_lfo test_lfo.exe test_sound test_sound.exe test_granular test_granular.exe test_poly test_poly.exe test_seq test_seq.exe
+	rm -f test_bank test_bank.exe test_engine test_engine.exe test_lfo test_lfo.exe test_sound test_sound.exe test_granular test_granular.exe test_poly test_poly.exe test_sample test_sample.exe test_seq test_seq.exe
 
 .PHONY: run clean
