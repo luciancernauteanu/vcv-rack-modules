@@ -9,6 +9,8 @@
 #include "Lfo.hpp"
 #include "Limiter.hpp"
 #include "MorphEngine.hpp" // NUM_MARKERS
+#include "SamplePlayer.hpp"
+#include "Transients.hpp"
 #include "WavetableBank.hpp"
 
 // Granular engine: the second engine of Wave Artifacts. No Rack dependencies (tested in tests/).
@@ -306,6 +308,18 @@ struct GrainMarkerInput {
 	/** SCAN knob -1..1 */
 	float scan = 0.f;
 	int direction = GRAIN_FORWARD;
+	/** SAMPLE engine: wa::PlayerLoop at the slice end (ONE loops too in MORPH, where there are no notes) */
+	int loopMode = PLAYER_LOOP;
+	/** SAMPLE engine: where LOOP / PING repeat from, 0..1 of the slice (PlayerSettings::loopPoint) */
+	float loopPoint = 0.f;
+	/** SAMPLE engine: DRIVE before the filter, 0..1 (the wavetable engine's WarmDrive; 0 = untouched) */
+	float drive = 0.f;
+	/** SAMPLE engine BEAT button: wa::SampleBeatMode. CUT: LENGTH is `beatLength` beats at the tempo, cut at the
+	sample's own speed; FIT: the speed changes so what repeats lasts a whole number of beats. Both put LOOP on a grid of the slice (sampleLoopSteps). */
+	int beatMode = SAMPLE_BEAT_OFF;
+	float beatLength = 1.f;
+	/** HIT (SAMPLE and GRAIN): START plays from the nearest hit (GrainInput::hits) */
+	bool hitSnap = false;
 	/** KEEP SPEED: pitch changes the pitch but not the sample's timing */
 	bool keepSpeed = false;
 	/** SCAN: forwards then backwards (PING) instead of jumping back to START (LOOP) */
@@ -340,6 +354,10 @@ struct GrainInput {
 	bool seeded = true;
 	bool holdSilent = false;
 	bool wantDirect[NUM_MARKERS] = {};
+	/** SEND / RETURN (an expander's jacks): the marker's filter is replaced by the returned signal (engine units, retR = retL when mono) */
+	bool insert[NUM_MARKERS] = {};
+	float retL[NUM_MARKERS] = {};
+	float retR[NUM_MARKERS] = {};
 	/** POLY play mode: each cloud follows voiceEnv instead of the position crossfade */
 	bool poly = false;
 	/** Level of each marker's ADSR, 0..1 */
@@ -351,6 +369,13 @@ struct GrainInput {
 	and a note over the last one's release fades the old grains out (DECLICK_TIME) and starts like one from
 	silence. So two equal trigs sound the same wherever they land. */
 	bool noteRestart = false;
+	/** SAMPLE engine: each cloud is one read head playing the sample as it is (SamplePlayer.hpp) instead of grains.
+	The rest of the cloud (filter, gain, pan, POLY level, own output) and the master section are the same. */
+	bool player = false;
+	/** SAMPLE engine SNAP: START, the slice end and the loop point move to the nearest zero crossing */
+	bool zeroSnap = false;
+	/** SAMPLE engine: the hits HIT snaps to (frames of the sample, sorted; the HITS slider), or null */
+	const std::vector<long>* hits = nullptr;
 
 	// Master section: same as EngineInput
 	int masterMode = -1;
@@ -442,6 +467,11 @@ public:
 		*end = clouds[m].shownSliceEnd;
 	}
 
+	/** SAMPLE BEAT: the beats a marker's slice lasts now (0 = BEAT off) */
+	double getBeats(int m) const {
+		return clouds[m].beats;
+	}
+
 	float getReadPosition(int m) const {
 		return clouds[m].shownRead;
 	}
@@ -487,18 +517,31 @@ public:
 		*r = directR[m];
 	}
 
+	/** SEND: what this cloud's filter gets this sample (engine units, x5 V), before its level (position share or
+	POLY envelope), GAIN and PAN; 0 while the cloud is idle */
+	void getSend(int m, float* l, float* r) const {
+		*l = sendL[m];
+		*r = sendR[m];
+	}
+
+	/** The marker's level for the ENV output, 0..1: its ADSR in POLY, its position share in MORPH */
+	float getLevel(int m) const {
+		return heard[m];
+	}
+
 	void process(const GrainInput& in, float* outL, float* outR) {
 		*outL = *outR = 0.f;
 		const SampleBuffer* S = (in.bank && in.bank->sample.valid()) ? &in.bank->sample : nullptr;
 
 		// Bank swap: fade out, clear while silent, apply.
-		bool changed = !bankApplied || in.bank != appliedBank || in.poly != polyApplied;
+		bool changed = !bankApplied || in.bank != appliedBank || in.poly != polyApplied || in.player != playerApplied;
 		bool wantSilent = in.holdSilent || changed || !S;
 		gain = wantSilent ? std::max(0.f, gain - fadeStep) : std::min(1.f, gain + fadeStep);
 		if (changed && gain <= 0.f) {
 			appliedBank = in.bank; // identity only: it may already be freed, never read it
 			bankApplied = true;
 			polyApplied = in.poly;
+			playerApplied = in.player;
 			clearGrains();
 			for (int m = 0; m < NUM_MARKERS; m++)
 				resetCloud(m);
@@ -607,12 +650,16 @@ public:
 				if (!wanted) {
 					c.running = false;
 					c.triggerFire = false;
+					c.player.stop();
 					// Not scheduled (the playhead is elsewhere): the map still shows its bullet at START, and its loop.
 					c.shownRead = std::min(std::max(in.markers[m].start, 0.f), 1.f);
 					updateShownSlice(m, in, *S);
 					continue;
 				}
-				schedule(m, in, *S, canSync);
+				if (playerApplied)
+					play(m, in, *S, &bufL[m], &bufR[m]);
+				else
+					schedule(m, in, *S, canSync);
 			}
 		}
 		else {
@@ -663,14 +710,19 @@ public:
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			Cloud& c = clouds[m];
 			const GrainMarkerInput& M = in.markers[m];
+			sendL[m] = sendR[m] = 0.f;
+			float insertT = in.insert[m] ? 1.f : 0.f;
+			c.insertS = (insertT > c.insertS) ? std::min(insertT, c.insertS + fadeStep) : std::max(insertT, c.insertS - fadeStep);
 			// A silent cloud goes straight to its place, so a new note does not begin with a slide. This runs
 			// even for a cloud idle long enough to skip the block below.
 			float panT = std::min(std::max(M.pan, -1.f), 1.f);
+			// SAMPLE: an LP fully open with no RES is no filter at all, so the sample passes untouched.
+			bool filterOn = !(playerApplied && M.filterMode == MODE_LP && M.cutoff >= 0.999f && M.res <= 0.001f);
 			if (c.w < 1e-4f) {
 				c.panS = panT;
 				// The filter too (a step's cutoff lock, a knob turned while it was silent): every note from silence
 				// starts on its own settings, not with a glide from the last note's.
-				modeWeights(true, M.filterMode, c.mixS);
+				modeWeights(filterOn, M.filterMode, c.mixS);
 				c.cutS = std::min(std::max(M.cutoff, 0.f), 1.f);
 				c.resS = std::min(std::max(M.res, 0.f), 1.f);
 			}
@@ -684,7 +736,7 @@ public:
 			float yl = 0.f, yr = 0.f;
 			if (c.idle < IDLE_RESET) {
 				float mixT[NUM_MIX];
-				modeWeights(true, M.filterMode, mixT);
+				modeWeights(filterOn, M.filterMode, mixT);
 				for (int k = 0; k < NUM_MIX; k++)
 					c.mixS[k] += (mixT[k] - c.mixS[k]) * smoothCoef;
 				c.cutS += (std::min(std::max(M.cutoff, 0.f), 1.f) - c.cutS) * smoothCoef;
@@ -698,7 +750,9 @@ public:
 					xl *= c.scanLevel;
 					xr *= c.scanLevel;
 				}
-				float wetT = (M.window == GRAIN_SMEAR) ? 1.f : 0.f;
+				if (playerApplied)
+					sampleDrive(c, M, &xl, &xr);
+				float wetT = (!playerApplied && M.window == GRAIN_SMEAR) ? 1.f : 0.f;
 				if (wetT > 0.f || c.smearWet > 0.f) {
 					c.smearWet += (wetT - c.smearWet) * smoothCoef;
 					if (wetT == 0.f && c.smearWet < 1e-4f) {
@@ -712,15 +766,27 @@ public:
 						xr = dry * xr + wet * c.diffR.process(xr);
 					}
 				}
-				yl = c.svfL.process(xl, fc, q, sampleRate, c.mixS);
-				yr = c.svfR.process(xr, fc, q, sampleRate, c.mixS);
-				if (!std::isfinite(yl) || !std::isfinite(yr)) {
-					c.svfL.reset();
-					c.svfR.reset();
-					yl = yr = 0.f;
+				// SEND: what the filter gets. RETURN (insert) takes the filter's place, faded over 20 ms both ways.
+				sendL[m] = xl;
+				sendR[m] = xr;
+				float k = c.insertS;
+				if (k < 1.f) {
+					yl = c.svfL.process(xl, fc, q, sampleRate, c.mixS);
+					yr = c.svfR.process(xr, fc, q, sampleRate, c.mixS);
+					if (!std::isfinite(yl) || !std::isfinite(yr)) {
+						c.svfL.reset();
+						c.svfR.reset();
+						yl = yr = 0.f;
+					}
 				}
-				yl *= c.gainS * c.w;
-				yr *= c.gainS * c.w;
+				if (k > 0.f) {
+					yl += (in.retL[m] - yl) * k;
+					yr += (in.retR[m] - yr) * k;
+				}
+				// SAMPLE: the sound comes out of the drive's delay, so its envelope does too
+				float w = playerApplied ? c.wDelayed : c.w;
+				yl *= c.gainS * w;
+				yr *= c.gainS * w;
 				c.panS += (panT - c.panS) * smoothCoef;
 				if (c.panS != 0.f) {
 					float angle = (c.panS + 1.f) * M_PI_4_F;
@@ -776,6 +842,10 @@ private:
 	static constexpr float M_PI_4_F = 0.785398163f;
 	/** Samples a silent cloud keeps filtering (ring-out) before its filter memory is cleared */
 	static const int IDLE_RESET = 24000;
+	/** WarmDrive's constant latency is 30.5 samples (2x oversampling, two 63-tap half-band filters). The clean path is
+	delayed 31, the nearest whole number: while DRIVE crosses in (5 ms) the two are half a sample apart, which dims the
+	very top a little (measured: 12 kHz -0.7 dB at worst) and is gone once it has crossed. */
+	static const int DRIVE_LATENCY = 31;
 	static const int WINDOW_POINTS = 1024;
 	static const int EDGE = 64;
 	static const int MIN_LENGTH = 128;
@@ -867,6 +937,30 @@ private:
 		int lastGrain = -1;
 		float smearWet = 0.f;
 		GrainDiffuser diffL, diffR;
+		/** SAMPLE engine: the cloud's read heads, and the direction of the note playing */
+		PlayerVoice player;
+		int playerDir = 1;
+		/** SNAP cache: the last places asked for (START, slice end, loop point) and their zero crossings */
+		long snapIn[3] = {-1, -1, -1};
+		long snapOut[3] = {0, 0, 0};
+		/** BEAT: the beats the slice lasts (0 = off) */
+		double beats = 0.0;
+		/** SAMPLE DRIVE: the drive, its smoothed amount, and how much of it is heard (0 = the clean path, delayed by
+		the drive's latency so turning DRIVE never moves the sound in time) */
+		WarmDrive driveL, driveR;
+		float driveS = 0.f;
+		float driveWet = 0.f;
+		float cleanL[DRIVE_LATENCY + 1] = {};
+		float cleanR[DRIVE_LATENCY + 1] = {};
+		/** The note's level (w) delayed with the sound, so the envelope scales the very samples it was meant for (a
+		retrigger's attack must not reach the old note's tail early) */
+		float cleanW[DRIVE_LATENCY + 1] = {};
+		float wDelayed = 0.f;
+		/** RETURN: how far the returned sound has replaced the cloud's filter (0..1, 20 ms each way) */
+		float insertS = 0.f;
+		int cleanPos = 0;
+		/** Samples the drive has run since it started (heard once past DRIVE_LATENCY) */
+		int drivePrimed = 0;
 	};
 
 	void clearGrains() {
@@ -903,6 +997,17 @@ private:
 		c.triggerFire = false;
 		c.triggerRestart = false;
 		c.anchored = false;
+		c.player.stop();
+		c.driveL.reset();
+		c.driveR.reset();
+		c.driveS = c.driveWet = 0.f;
+		c.drivePrimed = 0;
+		c.snapIn[0] = c.snapIn[1] = c.snapIn[2] = -1;
+		c.beats = 0.0;
+		std::fill(c.cleanL, c.cleanL + DRIVE_LATENCY + 1, 0.f);
+		std::fill(c.cleanR, c.cleanR + DRIVE_LATENCY + 1, 0.f);
+		std::fill(c.cleanW, c.cleanW + DRIVE_LATENCY + 1, 0.f);
+		c.wDelayed = 0.f;
 		c.idle = IDLE_RESET + 1;
 		c.w = 0.f;
 		c.svfL.reset();
@@ -928,6 +1033,187 @@ private:
 		x ^= x << 5;
 		c.rng = x;
 		return (float) (x >> 8) * (1.f / 8388608.f) - 1.f;
+	}
+
+	/** SAMPLE engine: one sample of a cloud's read heads into its bus. A note (POLY / SEQ) or the cloud coming back
+	(MORPH: the playhead reaches it again) starts it from START; a tied step goes on. */
+	void play(int m, const GrainInput& in, const SampleBuffer& S, float* l, float* r) {
+		Cloud& c = clouds[m];
+		const GrainMarkerInput& M = in.markers[m];
+		bool wasRunning = c.running;
+		c.running = true;
+		float key = in.voct + M.voct + M.pitch / 12.f;
+		if (key != c.liveKey) {
+			c.liveKey = key;
+			c.liveMul = std::min(std::exp2(std::min(std::max(key, -6.f), 3.f)), (float) MAX_RATE);
+		}
+		double srcRate = (double) S.sampleRate;
+		PlayerSettings p;
+		double beatSec = in.clock ? std::max(in.clock->beatPeriod(), 1e-3) : 0.5;
+		bool cut = M.beatMode == SAMPLE_BEAT_CUT && in.clock, fit = M.beatMode == SAMPLE_BEAT_FIT && in.clock;
+		p.start = (double) std::min(std::max(M.start, 0.f), 1.f) * (double) S.frames;
+		p.end = std::min(p.start + sliceFrames(in, m, S), (double) S.frames - 1.0);
+		// HIT: START plays from the nearest hit (the knob turns smoothly, the sound jumps from hit to hit). The slice
+		// keeps its end.
+		bool onHit = false;
+		if (M.hitSnap && in.hits) {
+			long h = nearestHit(*in.hits, p.start);
+			if (h >= 0) {
+				p.start = (double) h;
+				onHit = true;
+			}
+		}
+		p.loop = std::min(std::max(M.loopMode, 0), NUM_PLAYER_LOOPS - 1);
+		if (!polyApplied && p.loop == PLAYER_ONE)
+			p.loop = PLAYER_LOOP;
+		p.xfade = std::max((double) std::min(std::max(M.scanFade, 0.f), 0.5f) * (p.end - p.start), PLAYER_MIN_XFADE_SECONDS * srcRate);
+		// BEAT: LENGTH is a note value at the tempo, as heard: at another PITCH (or V/OCT) the slice holds more or less of
+		// the sample, so it still lasts that note value. With LOOP the slice reads on by the crossfade, so one pass, up to
+		// where the next one starts under it, lasts exactly that note value.
+		double gridBeats = 0.0;
+		double beatFrames = (double) M.beatLength * beatSec * srcRate * (double) c.liveMul;
+		if (cut) {
+			double len = std::max(beatFrames, 2.0);
+			p.xfade = std::max((double) std::min(std::max(M.scanFade, 0.f), 0.5f) * len, PLAYER_MIN_XFADE_SECONDS * srcRate);
+			p.xfade = std::min(p.xfade, 0.5 * len);
+			p.end = std::min(p.start + len + (p.loop == PLAYER_LOOP ? p.xfade : 0.0), (double) S.frames - 1.0);
+			gridBeats = M.beatLength;
+		}
+		else if (fit) {
+			gridBeats = c.beats;
+		}
+		p.start = std::min(p.start, std::max(p.end - 1.0, 0.0));
+		// LOOP point: free, or (BEAT, FIT) on a grid of the slice: 1/128 notes, 8 to 64 places (sampleLoopSteps)
+		p.loopPoint = std::min(std::max(M.loopPoint, 0.f), 1.f);
+		if (gridBeats > 0.0) {
+			double steps = (double) sampleLoopSteps(gridBeats);
+			p.loopPoint = std::min(std::round(p.loopPoint * steps), steps - 1.0) / steps;
+		}
+		// The repeated part: [loop point, end] forward, its mirror [start, loop point] reverse. In BEAT the loop point
+		// is a share of the musical length (without the crossfade's read-on).
+		{
+			double len = cut ? std::min(beatFrames, p.end - p.start) : p.end - p.start;
+			double lp = std::min(p.loopPoint, 0.99) * len;
+			p.loopLo = c.playerDir > 0 ? p.start + lp : p.start;
+			p.loopHi = c.playerDir > 0 ? p.end : p.start + len - lp;
+		}
+		// SNAP: every place a note or a loop starts from moves to the nearest zero crossing (up to 5 ms), so nothing
+		// starts on a step. Cached: only a moved place is searched again. Not in BEAT: there the places are musical
+		// times, and moving them would drift the loop (its crossfade and the note's attack keep it clean).
+		if (in.zeroSnap && !cut) {
+			// A hit is already placed exactly (on or just after a zero crossing): moving it could cut its attack.
+			if (!onHit)
+				p.start = snapped(c, 0, p.start, S);
+			p.end = std::max(snapped(c, 1, p.end, S), p.start + 1.0);
+			if (c.playerDir > 0)
+				p.loopLo = std::min(std::max(snapped(c, 2, p.loopLo, S), p.start), p.end - 1.0);
+			else
+				p.loopHi = std::min(std::max(snapped(c, 2, p.loopHi, S), p.start + 1.0), p.end);
+		}
+		p.edge = PLAYER_EDGE_SECONDS * srcRate;
+		p.rate = (double) c.liveMul * srcRate / sampleRate;
+		// FIT: what repeats lasts a whole number of beats (a power of two, 1/4 to 64) at the clock's tempo: the speed
+		// changes to fit, like tape. The count is the nearest to its own length, and stays until that is 1.5x away
+		// (so a tempo drift does not make it jump).
+		if (fit) {
+			// What repeats: the slice (ONE), the loop up to where the next pass starts under its crossfade (LOOP),
+			// or the loop there and back (PING).
+			double part = std::max(p.loopHi - p.loopLo, 1.0), cycle = p.end - p.start;
+			if (p.loop == PLAYER_LOOP)
+				cycle = std::max(part - std::min(std::max(p.xfade, 1.0), 0.5 * part), 1.0);
+			else if (p.loop == PLAYER_PING)
+				cycle = 2.0 * part;
+			double natural = cycle / srcRate / beatSec;
+			double b = c.beats;
+			if (b <= 0.0 || natural / b > 1.5 || natural / b < 1.0 / 1.5)
+				b = std::min(std::max(std::exp2(std::round(std::log2(std::max(natural, 1e-6)))), 0.25), 64.0);
+			c.beats = b;
+			p.rate *= natural / b;
+		}
+		else {
+			c.beats = cut ? (double) M.beatLength : 0.0;
+		}
+
+
+		bool note = c.triggerFire || !wasRunning;
+		c.triggerFire = false;
+		c.triggerRestart = false;
+		if (note) {
+			if (M.direction == GRAIN_REVERSE)
+				c.playerDir = -1;
+			else if (M.direction == GRAIN_RANDOM_DIR)
+				c.playerDir = random(c) < 0.f ? -1 : 1;
+			else
+				c.playerDir = 1;
+		}
+		p.dir = c.playerDir;
+		if (note)
+			c.player.start(p, wasRunning && c.player.sounding() && c.w > 1e-4f, DECLICK_TIME * sampleRate,
+				std::round((float) (PLAYER_ATTACK_SECONDS * sampleRate)), c.w);
+
+		float a, b;
+		c.player.process(S, p, &a, &b, c.w);
+		*l += a * S.normGain;
+		*r += b * S.normGain;
+
+		double at = c.player.position();
+		c.shownRead = (float) std::min(std::max((at >= 0.0 ? at : p.start) / (double) S.frames, 0.0), 1.0);
+		updateShownSlice(m, in, S);
+		// The map shows the slice where it plays (after HIT and the zero-crossing snap)
+		c.shownSliceStart = (float) (p.start / (double) S.frames);
+		// BEAT: the musical length (the LOOP crossfade reads on past it, not shown)
+		double shownEnd = cut ? std::min(p.start + beatFrames, p.end) : p.end;
+		c.shownSliceEnd = (float) (shownEnd / (double) S.frames);
+		c.scanLevelTarget = 1.f;
+	}
+
+	/** A place (frames) moved to its nearest zero crossing, cached per cloud and place `k` */
+	double snapped(Cloud& c, int k, double frame, const SampleBuffer& S) {
+		long f = (long) std::lround(frame);
+		if (f != c.snapIn[k]) {
+			c.snapIn[k] = f;
+			c.snapOut[k] = nearestZeroCrossing(S, f, (long) (ZERO_SNAP_SECONDS * S.sampleRate));
+		}
+		return (double) c.snapOut[k];
+	}
+
+	/** SAMPLE DRIVE on the cloud's bus, before the filter. The clean path is delayed by the drive's latency, so DRIVE
+	fades between two aligned sounds (5 ms) and at 0 the sample is untouched; the drive itself only runs while it is
+	turned up (once started, its first DRIVE_LATENCY samples are not heard). */
+	void sampleDrive(Cloud& c, const GrainMarkerInput& M, float* l, float* r) {
+		float dT = std::min(std::max(M.drive, 0.f), 1.f);
+		bool want = dT > 1e-4f;
+		c.cleanL[c.cleanPos] = *l;
+		c.cleanR[c.cleanPos] = *r;
+		c.cleanW[c.cleanPos] = c.w;
+		c.cleanPos = (c.cleanPos + 1) % (DRIVE_LATENCY + 1);
+		float cl = c.cleanL[c.cleanPos], cr = c.cleanR[c.cleanPos];
+		c.wDelayed = c.cleanW[c.cleanPos];
+		if (!want && c.driveWet <= 0.f) {
+			c.drivePrimed = 0;
+			c.driveS = 0.f;
+			*l = cl;
+			*r = cr;
+			return;
+		}
+		if (c.drivePrimed == 0) {
+			c.driveL.reset();
+			c.driveR.reset();
+			c.driveS = dT;
+		}
+		c.driveS += (dT - c.driveS) * smoothCoef;
+		float dl = c.driveL.process(*l, c.driveS), dr = c.driveR.process(*r, c.driveS);
+		bool primed = c.drivePrimed > DRIVE_LATENCY;
+		if (!primed)
+			c.drivePrimed++;
+		float wetT = (want && primed) ? 1.f : 0.f;
+		// A silent cloud goes straight to its setting (a step's DRIVE lock), like the filter.
+		if (c.w < 1e-4f)
+			c.driveWet = wetT;
+		else
+			c.driveWet = wetT > c.driveWet ? std::min(1.f, c.driveWet + fadeStep) : std::max(0.f, c.driveWet - fadeStep);
+		*l = cl + (dl - cl) * c.driveWet;
+		*r = cr + (dr - cr) * c.driveWet;
 	}
 
 	/** Decides, for this sample, whether a cloud starts a grain. */
@@ -981,6 +1267,18 @@ private:
 		// Scan offset into the slice (frames of level 0)
 		double sliceLen = sliceFrames(in, m, S);
 		updateShownSlice(m, in, S);
+		// HIT: the grains start from the nearest hit to START, as SAMPLE's notes do (the knob turns smoothly, the
+		// sound jumps from hit to hit); the scan reads on from there for the slice's length.
+		double startFrames = (double) M.start * (double) S.frames;
+		if (M.hitSnap && in.hits) {
+			long h = nearestHit(*in.hits, startFrames);
+			if (h >= 0) {
+				startFrames = (double) h;
+				c.shownSliceStart = (float) (startFrames / (double) S.frames);
+				if (c.shownSliceEnd >= 0.f)
+					c.shownSliceEnd = (float) std::min((startFrames + sliceLen) / (double) S.frames, 1.0);
+			}
+		}
 		double offset = 0.0;
 		if (scanning) {
 			if (sync) {
@@ -1001,7 +1299,7 @@ private:
 		else {
 			c.scanAccum = 0.0;
 		}
-		c.shownRead = (float) std::min(std::max((M.start * (double) S.frames + offset) / (double) S.frames, 0.0), 1.0);
+		c.shownRead = (float) std::min(std::max((startFrames + offset) / (double) S.frames, 0.0), 1.0);
 		// FADE: the level follows where the scan is in its loop now (applied to the cloud's sound, smoothed).
 		c.scanLevelTarget = 1.f;
 		if (scanning && M.scanFade > 0.f && sliceLen > 1.0) {
@@ -1121,7 +1419,7 @@ private:
 		}
 		// Always draw four numbers, so the seeded sequence stays aligned whatever the knobs are.
 		float rSpray = random(c), rPitch = random(c), rPan = random(c), rDir = random(c);
-		double startF = (double) M.start * (double) S.frames + offset;
+		double startF = startFrames + offset;
 		startF += rSpray * grainSpraySeconds(M.spray) * (double) S.sampleRate;
 		startF = std::min(std::max(startF, 0.0), (double) S.frames - 1.0);
 		bool reverse = M.direction == GRAIN_REVERSE || (M.direction == GRAIN_RANDOM_DIR && rDir < 0.f);
@@ -1313,7 +1611,8 @@ private:
 		Cloud& c = clouds[m];
 		float start = std::min(std::max(in.markers[m].start, 0.f), 1.f);
 		c.shownSliceStart = start;
-		c.shownSliceEnd = grainScanActive(in.markers[m].scan) ? (float) std::min(start + sliceFrames(in, m, S) / (double) S.frames, 1.0) : -1.f;
+		bool loop = playerApplied || grainScanActive(in.markers[m].scan);
+		c.shownSliceEnd = loop ? (float) std::min(start + sliceFrames(in, m, S) / (double) S.frames, 1.0) : -1.f;
 	}
 
 	/** Frames of level 0 from this marker's START to the next START (in the sample), or to the end. */
@@ -1394,10 +1693,15 @@ private:
 	/** Where each window is highest, 0..1 through the grain */
 	float windowPeak[NUM_GRAIN_WINDOWS] = {};
 	bool polyApplied = false;
+	/** SAMPLE engine in use (GrainInput::player, applied while silent like a bank swap) */
+	bool playerApplied = false;
 	float heard[NUM_MARKERS] = {1.f, 0.f, 0.f, 0.f, 0.f};
 	float mainShare[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	float directL[NUM_MARKERS] = {};
 	float directR[NUM_MARKERS] = {};
+	/** SEND: each cloud's sound where its filter is, this sample */
+	float sendL[NUM_MARKERS] = {};
+	float sendR[NUM_MARKERS] = {};
 	MasterFilter master;
 	SafetyLimiter limiter;
 	GrainEvent eventRing[NUM_EVENTS];

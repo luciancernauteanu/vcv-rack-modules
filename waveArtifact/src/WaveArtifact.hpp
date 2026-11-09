@@ -6,6 +6,7 @@
 #include "plugin.hpp"
 #include "GrainEngine.hpp"
 #include "Lfo.hpp"
+#include "MarkerMod.hpp"
 #include "MorphEngine.hpp"
 #include "PolyVoices.hpp"
 #include "WavetableBank.hpp"
@@ -89,7 +90,7 @@ struct WaveArtifact : Module {
 		/** Master GAIN CV amount -100%..100% (default 0): 10 V at 100% = the whole knob range (+200%) */
 		MASTER_GAIN_AMT_PARAM,
 		// ---- Granular engine (appended, so every earlier ID and saved patch stays valid) ----
-		/** 0 = wavetable engine (default), 1 = granular engine: the knobs change meaning */
+		/** 0 = wavetable engine (default), 1 = granular engine, 2 = sample player: the knobs change meaning */
 		ENGINE_MODE_PARAM,
 		/** DENSITY: grains per second (free) or note value (SYNC), 0..1 */
 		ENUMS(MARKER_GRAIN_DENSITY_PARAM, NUM_MARKERS),
@@ -137,6 +138,34 @@ struct WaveArtifact : Module {
 		/** GRAIN, POLY / SEQ: 1 = every note restarts its cloud from the same point (grain grid, synced scan and
 		scatter count from the note, not the beat), so equal trigs sound the same on any step */
 		GRAIN_NOTE_RESTART_PARAM,
+		/** SAMPLE engine: wa::PlayerLoop, what the slice end does (ONE / LOOP / PING) */
+		ENUMS(MARKER_SAMPLE_LOOP_PARAM, NUM_MARKERS),
+		/** SAMPLE engine: LOOP point, where LOOP / PING repeat from, 0..1 of the slice (0 = the whole slice) */
+		ENUMS(MARKER_SAMPLE_LOOP_POINT_PARAM, NUM_MARKERS),
+		/** SAMPLE engine: 1 = START, the slice end and the loop point snap to the nearest zero crossing (default) */
+		SAMPLE_ZERO_SNAP_PARAM,
+		/** SAMPLE engine HITS slider 0..1: how many hits (transients) are found, from only the strongest (0 %) to the
+		softest too (100 %). Found again when it moves and when a sample loads (Transients.hpp). */
+		SAMPLE_HIT_SENSITIVITY_PARAM,
+		/** SAMPLE engine BEAT: 1 = the slice lasts a whole number of beats at the tempo */
+		ENUMS(MARKER_SAMPLE_BEAT_PARAM, NUM_MARKERS),
+		/** SAMPLE engine HIT: 1 = START plays from the nearest hit (transient) while the knob turns */
+		ENUMS(MARKER_SAMPLE_HIT_SNAP_PARAM, NUM_MARKERS),
+		/** Each marker's modulation (MarkerMod.hpp), set on its expander: an LFO and an AD, each with a destination
+		(wa::ModDest) and a depth (-1..1). Marker settings like the others: lockable, copied with the marker. */
+		ENUMS(MARKER_MOD_LFO_RATE_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO_SHAPE_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO_SYNC_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO_TRIPLET_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO_DOTTED_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO_DEST_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO_DEPTH_PARAM, NUM_MARKERS),
+		/** AD times 0..1 (wa::modAdTime), PERC 0 = gate (GATE holds it) / 1 = percussive */
+		ENUMS(MARKER_MOD_AD_ATTACK_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD_DECAY_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD_PERC_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD_DEST_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD_DEPTH_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -153,16 +182,22 @@ struct WaveArtifact : Module {
 		RESET_INPUT,
 		/** Master GAIN CV (scaled by MASTER_GAIN_AMT_PARAM): a VCA on the main outputs */
 		MASTER_GAIN_INPUT,
+		/** Each artifact's RETURN: 2 channels (L, R) or 1 (both sides); replaces its filter while patched */
+		ENUMS(RETURN_INPUT, NUM_MARKERS),
 		INPUTS_LEN
 	};
 	enum OutputId {
 		LEFT_OUTPUT,
 		RIGHT_OUTPUT,
-		/** Each artifact's own output (its chain alone, after the position crossfade, before the master). L carries mono when R is unpatched. */
-		ENUMS(ARTIFACT_L_OUTPUT, NUM_MARKERS),
-		ENUMS(ARTIFACT_R_OUTPUT, NUM_MARKERS),
+		/** The old per-artifact outputs (ARTIFACT OUT L / R), replaced by SEND / RETURN. The IDs stay reserved so
+		later IDs keep their place; a cable to them is dropped when an old patch loads. */
+		ENUMS(OLD_ARTIFACT_L_OUTPUT, NUM_MARKERS),
+		ENUMS(OLD_ARTIFACT_R_OUTPUT, NUM_MARKERS),
 		/** Beat clock: a 10 V, 5 ms trigger per quarter note from the clock in use (internal or CLOCK) */
 		CLOCK_OUTPUT,
+		/** Each artifact's SEND: what its filter gets, 2 channels (L, R), or 1 (L + R) once a mono module answers on
+		its RETURN */
+		ENUMS(SEND_OUTPUT, NUM_MARKERS),
 		OUTPUTS_LEN
 	};
 	enum LightId {
@@ -197,6 +232,14 @@ struct WaveArtifact : Module {
 	std::atomic<float> shownPreview{0.f};
 	/** An expander is modulating this artifact (shown as a CV tag on the screen) */
 	std::atomic<bool> shownCv[NUM_MARKERS];
+	/** The artifact's RETURN replaces its filter (shown as a RET tag on the screen) */
+	std::atomic<bool> shownReturn[NUM_MARKERS];
+	/** SEND / RETURN (audio thread): a mono module answers on this artifact's RETURN (1 channel back while SEND sends
+	2, for MONO_SEND_SAMPLES in a row), so SEND carries L + R on one channel. Reset when either cable is unplugged. */
+	bool monoSend[NUM_MARKERS] = {};
+	int monoCount[NUM_MARKERS] = {};
+	/** A poly module needs a few samples to answer with 2 channels after its input became stereo: about 5 ms */
+	static const int MONO_SEND_SAMPLES = 256;
 	/** Granular engine: where each cloud reads (0..1 of the sample), and a counter of its grain starts
 	with the latest start, so the display can flash a grain. */
 	std::atomic<float> shownGrainRead[NUM_MARKERS];
@@ -206,11 +249,13 @@ struct WaveArtifact : Module {
 	std::atomic<float> shownGrainPos[NUM_MARKERS];
 	std::atomic<float> shownGrainSeconds[NUM_MARKERS];
 	std::atomic<uint32_t> shownGrainCount[NUM_MARKERS];
+	/** SAMPLE BEAT: the beats each marker's slice lasts now (0 = off) */
+	std::atomic<float> shownBeats[NUM_MARKERS];
 
 	// Audio thread only
 	wa::MorphEngine engine;
 	wa::GrainEngine grainEngine;
-	/** Engine in use (0 wavetable, 1 granular); follows ENGINE_MODE_PARAM after a fade to silence */
+	/** Engine in use (0 wavetable, 1 granular, 2 sample player: grainEngine with GrainInput::player); follows ENGINE_MODE_PARAM after a fade to silence */
 	int engineApplied = 0;
 	uint32_t grainEventsSeen = 0;
 	wa::PolyVoices voices;
@@ -241,6 +286,13 @@ struct WaveArtifact : Module {
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];
 	wa::Lfo posLfo;
+	/** Each marker's modulation (MarkerMod.hpp): its expander LFO and AD, the LFO's last value (sent to the expanders'
+	LFO jacks), a note that starts the AD on the next sample, and the GATE as last seen (for its edges) */
+	wa::Lfo modLfos[NUM_MARKERS];
+	wa::ModEnvelope modAds[NUM_MARKERS];
+	float modLfoOut[NUM_MARKERS] = {};
+	bool modAdNote[NUM_MARKERS] = {};
+	bool modGateWas[NUM_MARKERS] = {};
 	/** The position LFO after its SMOOTH one-pole */
 	wa::LfoSmoother posLfoSmoother;
 	dsp::SchmittTrigger resetTrigger;
@@ -263,7 +315,7 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 37;
+	static const int NUM_MARKER_SETTINGS = 53;
 	static const int MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS];
 	/** The settings copied last (not saved with the patch), and the marker they came from, or -1 */
 	float markerClipboard[NUM_MARKER_SETTINGS] = {};
@@ -387,6 +439,28 @@ struct WaveArtifact : Module {
 	bool hasSiblings();
 	/** UI thread. Frees a bank that process() has retired. */
 	void uiStep();
+
+	// SAMPLE engine hits (transients), UI thread. Found again whenever the sample or the HITS slider changes, while
+	// the engine switch is on SAMPLE.
+	/** Frames of the active sample, sorted */
+	std::vector<long> transients;
+	/** Frames of the sample they were found in (to turn them into 0..1) */
+	long transientFrames = 0;
+	int transientsSerial = -1;
+	float transientsSens = -1.f;
+	double transientsTime = 0.0;
+	/** Finds the hits again when the sample or the HITS slider changed (at most every 30 ms while it is dragged) and
+	hands the list to the audio thread */
+	void updateTransients();
+	/** Moves a marker's START to the next (dir 1) or previous (dir -1) hit. False when there is none that way. */
+	bool stepStartToTransient(int marker, int dir);
+	/** Puts the active markers' STARTs on hits spread over the sample */
+	bool spreadMarkersOnTransients();
+	/** The hit list for HIT: the UI puts a new one in `hitsPending`, process() takes it into `hitsActive` and leaves
+	the old one in `hitsRetired`, which the UI frees (the bank swap's pattern: nothing is freed on the audio thread) */
+	std::atomic<std::vector<long>*> hitsPending{nullptr};
+	std::atomic<std::vector<long>*> hitsRetired{nullptr};
+	std::vector<long>* hitsActive = nullptr;
 	/** UI thread. All 5 markers on, evenly spaced left to right, wavetables spread from the start
 	to the end of the sample, per-marker settings back to default. */
 	void autoArrange();

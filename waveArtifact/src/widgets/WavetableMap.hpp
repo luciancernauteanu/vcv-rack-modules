@@ -586,7 +586,45 @@ struct WavetableMap : widget::Widget {
 				nvgClosePath(vg);
 				nvgFillColor(vg, nvgTransRGBAf(c, sel ? 1.f : 0.6f));
 				nvgFill(vg);
+				// SAMPLE: the LOOP point (where LOOP / PING repeat from), a line with a flag at the bottom pointing into
+				// the repeated part. Reverse notes mirror it from the slice end.
+				int engine = (int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue());
+				float lp = module->params[WaveArtifact::MARKER_SAMPLE_LOOP_POINT_PARAM + i].getValue();
+				int loopMode = (int) std::round(module->params[WaveArtifact::MARKER_SAMPLE_LOOP_PARAM + i].getValue());
+				if (engine == 2 && loopMode != wa::PLAYER_ONE && lp > 0.f) {
+					bool reverse = (int) std::round(module->params[WaveArtifact::MARKER_GRAIN_DIR_PARAM + i].getValue()) == wa::GRAIN_REVERSE;
+					float xl = reverse ? x1 - lp * (x1 - x0) : x0 + lp * (x1 - x0);
+					float fw = reverse ? -4.f : 4.f;
+					nvgBeginPath(vg);
+					nvgMoveTo(vg, xl, H * 0.25f);
+					nvgLineTo(vg, xl, H);
+					nvgStrokeColor(vg, nvgTransRGBAf(c, sel ? 0.95f : 0.5f));
+					nvgStrokeWidth(vg, sel ? 1.2f : 0.8f);
+					nvgStroke(vg);
+					nvgBeginPath(vg);
+					nvgMoveTo(vg, xl, H);
+					nvgLineTo(vg, xl + fw, H);
+					nvgLineTo(vg, xl + fw, H - gh * 0.7f);
+					nvgLineTo(vg, xl, H - gh);
+					nvgClosePath(vg);
+					nvgFillColor(vg, nvgTransRGBAf(c, sel ? 1.f : 0.6f));
+					nvgFill(vg);
+				}
 			}
+		}
+
+		// SAMPLE and GRAIN: the hits found (the HITS slider), short ticks along the bottom
+		if ((int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) >= 1 && module->transientFrames > 0) {
+			module->updateTransients();
+			nvgBeginPath(vg);
+			for (long t : module->transients) {
+				float x = (float) ((double) t / (double) module->transientFrames) * W;
+				nvgMoveTo(vg, x, H);
+				nvgLineTo(vg, x, H * 0.72f);
+			}
+			nvgStrokeColor(vg, nvgRGBAf(1.f, 1.f, 1.f, 0.55f));
+			nvgStrokeWidth(vg, 0.8f);
+			nvgStroke(vg);
 		}
 
 		// A selected sequencer step: a line at the exact place its WAVE / START is, tagged TRIG (solid where the step

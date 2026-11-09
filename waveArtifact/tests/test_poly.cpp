@@ -7,6 +7,7 @@
 #include "PolyVoices.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1229,7 +1230,97 @@ static void testTiedSteps() {
 	}
 }
 
+/** SEND / RETURN cases: no return (the marker's own filter), the send looped straight back (as through a cable,
+one sample later), a silent return */
+enum ReturnMode { RETURN_NONE, RETURN_LOOP, RETURN_SILENT };
+
+/** Runs a rig `seconds` with its return in `mode` (all five channels), recording the main L (from `from` seconds)
+and the RMS of marker 0's send. Works for WaveRig and GrainRig (one sample per run() call). */
+template <typename Rig>
+static void runReturn(Rig& r, ReturnMode mode, double seconds, double from, std::vector<float>* out, double* sendRms, double switchAt = -1.0) {
+	float sl[M] = {}, sr[M] = {};
+	double ss = 0.0;
+	long n = (long) (seconds * SR), n0 = (long) (from * SR), counted = 0;
+	for (long i = 0; i < n; i++) {
+		bool on = mode != RETURN_NONE && (switchAt < 0.0 || i >= (long) (switchAt * SR));
+		for (int m = 0; m < M; m++) {
+			r.in.insert[m] = on;
+			r.in.retL[m] = (on && mode == RETURN_LOOP) ? sl[m] : 0.f;
+			r.in.retR[m] = (on && mode == RETURN_LOOP) ? sr[m] : 0.f;
+		}
+		std::vector<float> one;
+		r.run(1.5 / SR, &one); // one sample
+		for (int m = 0; m < M; m++)
+			r.engine->getSend(m, &sl[m], &sr[m]);
+		if (i >= n0) {
+			if (out)
+				out->push_back(one.empty() ? 0.f : one[0]);
+			ss += (double) sl[0] * sl[0];
+			counted++;
+		}
+	}
+	if (sendRms)
+		*sendRms = std::sqrt(ss / std::max(counted, 1L));
+}
+
+template <typename Rig>
+static void checkReturn(const char* name, std::function<void(Rig&)> setup) {
+	auto level = [&](float cutoff, ReturnMode mode, double* send) {
+		Rig r;
+		setup(r);
+		r.in.markers[0].cutoff = cutoff;
+		std::vector<float> l;
+		runReturn(r, mode, 0.6, 0.3, &l, send);
+		return rms(l, 0, l.size());
+	};
+	double s0, s1, s2, s3;
+	double open = level(1.f, RETURN_NONE, &s0), low = level(0.15f, RETURN_NONE, &s1);
+	double loop = level(0.15f, RETURN_LOOP, &s2), silent = level(0.15f, RETURN_SILENT, &s3);
+	double dB = 20.0 * std::log10(std::max(loop, 1e-9) / std::max(open, 1e-9));
+	std::printf("  %-13s: filter open %.4f, closed %.4f; RETURN looped from SEND %.4f (%+.2f dB from open), silent RETURN %.5f; send %.4f\n",
+		name, open, low, loop, dB, silent, s2);
+	CHECK(open > 0.01 && low < 0.5 * open, "%s: the check cannot fail (open %.4f, closed %.4f)", name, open, low);
+	CHECK(std::fabs(dB) < 1.5, "%s: the looped RETURN is %+.2f dB from the open filter", name, dB);
+	CHECK(silent < 0.02 * open, "%s: a silent RETURN still lets %.5f through", name, silent);
+	CHECK(s2 > 0.1 * open, "%s: the SEND is nearly silent (%.4f)", name, s2);
+}
+
+static void testSendReturn() {
+	std::printf("SEND / RETURN\n");
+	// Marker 1 under the playhead, its CUTOFF closed (0.15, 57 Hz LP). The send is taken before the filter, so a
+	// return that just loops it back sounds like the filter wide open; a silent return silences the marker.
+	checkReturn<WaveRig>("WAVE, MORPH", [](WaveRig& r) {
+		r.in.poly = false;
+		r.in.wantSend = true;
+	});
+	checkReturn<WaveRig>("WAVE, POLY", [](WaveRig& r) {
+		r.in.wantSend = true;
+		for (int m = 0; m < M; m++)
+			r.v.s[m].hold = 1.f;
+	});
+	checkReturn<GrainRig>("GRAIN, MORPH", [](GrainRig& r) {
+		r.in.poly = false;
+	});
+	checkReturn<GrainRig>("SAMPLE, MORPH", [](GrainRig& r) {
+		r.in.poly = false;
+		r.in.player = true;
+	});
+	// Patching a return crossfades the filter out (20 ms): no step larger than the sound's own.
+	{
+		WaveRig r;
+		r.in.poly = false;
+		r.in.wantSend = true;
+		std::vector<float> l;
+		runReturn(r, RETURN_LOOP, 0.6, 0.0, &l, nullptr, 0.3);
+		double steady = maxStep(std::vector<float>(l.begin() + (size_t) (0.1 * SR), l.begin() + (size_t) (0.29 * SR)));
+		double change = maxStep(std::vector<float>(l.begin() + (size_t) (0.29 * SR), l.begin() + (size_t) (0.4 * SR)));
+		std::printf("  patching a RETURN: largest step %.4f, the steady sound's %.4f (limit x1.2)\n", change, steady);
+		CHECK(change < 1.2 * steady, "patching a return steps %.4f (steady %.4f)", change, steady);
+	}
+}
+
 int main() {
+	testSendReturn();
 	testTiedSteps();
 	testAdsr();
 	testTrigger();

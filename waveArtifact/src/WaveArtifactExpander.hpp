@@ -4,9 +4,12 @@
 
 /** Per-marker CV expander. Snap it to the right of waveArtifact (or of another expander, up to 5
 in a row). It adds CV + attenuverter for one marker's WAVE, GAIN, CUTOFF, DRIVE, FINE and PAN,
-picked with the MARKER button, and has two LFOs (same as the markers' WAVE LFO: Hz or synced to
-the main module's CLOCK) on outputs that can be patched anywhere, including its own inputs. */
+picked with the MARKER button, a GATE and V/OCT for it, and the marker's modulation: an LFO and an
+AD envelope, each sent to one of the marker's settings with a depth (MarkerMod.hpp). Those are the
+marker's own settings in the main module (so sequencer trigs can lock them); this panel shows and
+sets them for its marker. The LFO also comes out of a jack. */
 struct WaveArtifactExpander : Module {
+	/** LFO params and lights keep room for the two LFOs this panel once had (IDs stay valid); only LFO 1 is used */
 	static const int NUM_LFOS = 2;
 
 	enum ParamId {
@@ -21,10 +24,9 @@ struct WaveArtifactExpander : Module {
 		ENUMS(LFO_SHAPE_PARAM, NUM_LFOS),
 		/** Output level of each LFO, 0..100% of +-5 V (default 100%) */
 		ENUMS(LFO_AMT_PARAM, NUM_LFOS),
-		/** Gate envelope (applies while GATE is patched): attack and decay times, 0..1 on a log scale */
+		/** No longer used: the AD is the marker's (MARKER_MOD_AD_* in the main module). Kept so later IDs stay valid. */
 		ATTACK_PARAM,
 		DECAY_PARAM,
-		/** 0 = gate (holds while high, DECAY after it falls), 1 = percussive AD (decays even while held) */
 		PERC_PARAM,
 		/** Granular engine: 0..100% amounts of the START and DENSITY CVs. They take the place of the attenuverters
 		of WAVE and FINE, which keep their own values for the wavetable engine. (GRAIN_SPREAD_AMT_PARAM is no longer
@@ -44,7 +46,7 @@ struct WaveArtifactExpander : Module {
 	};
 	enum OutputId {
 		ENUMS(LFO_OUTPUT, NUM_LFOS),
-		/** The gate envelope, 0..10 V (0 V without a gate) */
+		/** No longer used (the gate envelope's output): kept so the ID stays valid */
 		ENV_OUTPUT,
 		OUTPUTS_LEN
 	};
@@ -56,26 +58,13 @@ struct WaveArtifactExpander : Module {
 		LIGHTS_LEN
 	};
 
-	wa::Lfo lfos[NUM_LFOS];
-	/** Used while not linked (no clock): synced LFOs run at the 120 BPM fallback */
-	wa::ClockTracker idleClock;
 	dsp::ClockDivider lightDivider;
 	dsp::SchmittTrigger gateTrigger;
 
-	/** Gate envelope state (audio thread) */
-	enum EnvStage {ENV_IDLE, ENV_ATTACK, ENV_HOLD, ENV_DECAY};
-	EnvStage envStage = ENV_IDLE;
-	float env = 0.f;
-
-	/** Attack / decay time in seconds for a knob value; MIN_ENV_TIME or below means instant. */
-	static constexpr float MIN_ENV_TIME = 0.005f;
-	static float envTime(float knob, float maxTime) {
-		return MIN_ENV_TIME * std::pow(maxTime / MIN_ENV_TIME, knob);
-	}
-	float stepEnvelope(bool gateHigh, bool risingEdge, float sampleTime);
-
 	// For the UI
 	std::atomic<bool> linked{false};
+	/** The marker this expander works on (MARKER), for the panel's controls of the marker's modulation */
+	std::atomic<int> marker{0};
 	/** The main module runs the granular engine (relabels the CV inputs) */
 	std::atomic<bool> granular{false};
 	std::atomic<int> chainIndex{0};

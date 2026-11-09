@@ -50,6 +50,14 @@ struct MarkerBar : widget::Widget {
 		float top = mm2px(layout::SLOTS_TOP);
 		return math::Rect(x0 + i * (w + gap), top, w, mm2px(layout::SLOTS_BOTTOM) - top);
 	}
+	/** The slot's tags, left to right after its number: CV, then RET (its RETURN replaces its filter) */
+	math::Rect retTagRect(int i) {
+		math::Rect r = slotRect(i);
+		float pad = mm2px(0.8f);
+		bool cv = module->isMarkerActive(i) && module->shownCv[i].load(std::memory_order_relaxed);
+		return math::Rect(Vec(r.pos.x + pad + (cv ? 24.f : 9.f), r.pos.y + pad), Vec(17.f, 8.5f));
+	}
+
 	math::Rect slotsArea() {
 		math::Rect a = slotRect(0);
 		a.size.x = slotRect(wa::NUM_MARKERS - 1).getRight() - a.pos.x;
@@ -421,20 +429,28 @@ struct MarkerBar : widget::Widget {
 				nvgFontSize(args.vg, 9.f);
 				nvgFillColor(args.vg, nvgTransRGBAf(c, 1.f));
 			}
-			// OUT tag: this artifact's own output is patched, so it plays there and not in L/R.
-			if (module && (module->outputs[WaveArtifact::ARTIFACT_L_OUTPUT + i].isConnected() || module->outputs[WaveArtifact::ARTIFACT_R_OUTPUT + i].isConnected())) {
-				bool cv = active && module->shownCv[i].load(std::memory_order_relaxed);
-				float tx = r.pos.x + pad + (cv ? 24.f : 9.f), ty = r.pos.y + pad, tw = 17.f, th = 8.5f;
+			// RET tag: the artifact's RETURN replaces its filter.
+			auto tag = [&](math::Rect t, const char* text, bool filled) {
 				nvgBeginPath(args.vg);
-				nvgRoundedRect(args.vg, tx + 0.4f, ty + 0.4f, tw - 0.8f, th - 0.8f, 2.f);
-				nvgStrokeColor(args.vg, c);
-				nvgStrokeWidth(args.vg, 0.8f);
-				nvgStroke(args.vg);
+				nvgRoundedRect(args.vg, t.pos.x + 0.4f, t.pos.y + 0.4f, t.size.x - 0.8f, t.size.y - 0.8f, 2.f);
+				if (filled) {
+					nvgFillColor(args.vg, c);
+					nvgFill(args.vg);
+				}
+				else {
+					nvgStrokeColor(args.vg, c);
+					nvgStrokeWidth(args.vg, 0.8f);
+					nvgStroke(args.vg);
+				}
 				nvgFontSize(args.vg, 7.f);
 				nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
-				nvgText(args.vg, tx + tw / 2.f, ty + th / 2.f + 0.35f * 7.f, "OUT", NULL);
+				nvgFillColor(args.vg, filled ? nvgRGB(0x12, 0x14, 0x1c) : c);
+				nvgText(args.vg, t.pos.x + t.size.x / 2.f, t.pos.y + t.size.y / 2.f + 0.35f * 7.f, text, NULL);
 				nvgFontSize(args.vg, 9.f);
-			}
+				nvgFillColor(args.vg, nvgTransRGBAf(c, 1.f));
+			};
+			if (module && active && module->shownReturn[i].load(std::memory_order_relaxed))
+				tag(retTagRect(i), "RET", false);
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
 			std::string info;
 			if (!active)

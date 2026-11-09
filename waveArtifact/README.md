@@ -4,27 +4,39 @@ A VCV Rack 2 wavetable morph oscillator. It turns one imported WAV file (max 10 
 50-100 single-cycle wavetables ("artifacts") and morphs between up to 5 user-placed markers.
 A wavetable map along the bottom shows the whole sample, with each marker's bullet at the
 artifact it plays. The **Wave Artifacts Expander** (up to 5, to the right) adds per-marker CV
-inputs, a gate with an attack / decay envelope, and two LFOs.
+inputs, a gate, and the marker's own LFO and AD envelope (each sent to a setting, lockable per trig).
 
 ![Wave Artifacts](docs/images/waveArtifact.png)
 
 *Wave Artifacts as it looks before a WAV is loaded. Top row: the selected marker's controls,
 then the tempo section. Middle: the marker bar (the five slots, the bullets and the playhead).
 Bottom: POSITION and its LFO, FREQ / V/OCT, the master section and the wavetable map.
-Right: the five ARTIFACT OUT pairs.*
+Right: each artifact's SEND and RETURN.*
 
-Each artifact also has its own stereo output (ARTIFACT OUT, right of the panel): its own chain
-before the master section, at its share of the position crossfade (full level while the
-playhead is on its marker, fading out toward the neighbors, silent elsewhere). Patching an
-artifact's output takes that artifact out of the main L/R (a 20 ms fade, no click), so it
-becomes a separate audio stream; unpatch it to bring it back. The screen tags it "OUT" while it
-is routed out.
+**SEND / RETURN (right column, one row per artifact, numbered in its color): put any module in place of an
+artifact's filter.** SEND carries what the artifact's filter gets (after GAIN and DRIVE; on WAVE in MORPH, at its
+share of the position crossfade). Patch it through a filter (or any effect) back into the row's RETURN: the
+returned sound takes the filter's place (a 20 ms crossfade, no click), and everything after the filter goes on
+as before: the envelope, GAIN, PAN, the main mix, the master filter and the limiter. The voice stays in the main
+L/R. With RETURN unpatched the artifact keeps its own filter (patching only SEND changes nothing). The screen tags
+an artifact **RET** while its return replaces its filter.
+
+- **Stereo on one cable.** SEND has 2 channels (a poly cable): left, right. A poly module (VCV VCF, Vult Freak,
+  Surge XT's filters...) filters both and answers with 2 channels on RETURN: the voice stays stereo (a stereo
+  sample, grain SPREAD).
+- **A mono module works too** (Vult Freak-HW, most hardware clones): it reads one channel and answers with one.
+  The artifact notices (one channel back for 5 ms) and its SEND carries left + right on one channel from then on,
+  so the module gets the whole voice; the one returned channel feeds both sides. Unplug the RETURN (or the SEND)
+  to go back to stereo, e.g. after swapping in a poly module.
+- The loop goes through one Rack cable, one sample late (0.02 ms).
+- SEND / RETURN replace the earlier ARTIFACT OUT jacks (separate outputs per artifact). Cables to those jacks are
+  dropped when an old patch loads.
 
 The plugin and module slugs stay `waveArtifact` and `waveArtifactExpander`, so patches saved
 with earlier builds still load.
 
 Status: playable. Oscillator, markers, per-artifact controls, master filter, internal tempo and
-clock, artifact outputs and the expander (CV, gate envelope, LFOs) are done. Saving the loaded
+clock, per-artifact send / return and the expander (CV, gate, the marker's LFO and AD) are done. Saving the loaded
 WAV inside the patch is still to come.
 
 ## Quick start: your first patch
@@ -88,8 +100,8 @@ Useful to know:
   Smooth / Soft), *Clock resolution* for the CLOCK input, *Restart LFOs* and *Add expander*.
 - **Randomize** (right-click menu) leaves the STOP button alone and also randomizes the
   expanders snapped on to the right.
-- To use the artifacts as separate voices, patch **ARTIFACT OUT 1-5**: each artifact then
-  leaves the main L/R and plays on its own jacks, following the position.
+- To give each artifact its own filter or effect, patch its **SEND** through the module into its **RETURN**
+  (right column, one row per artifact).
 
 ## Play modes: MORPH and POLY
 
@@ -112,11 +124,11 @@ The **MORPH | POLY** button under the wavetable map chooses what the POSITION pl
 - **Play a marker directly, without POSITION.** Patch a gate to the **GATE** of an expander set to that marker:
   the note starts when the gate rises, holds while it is high (H does not apply) and releases when it falls. That
   marker then ignores the playhead; the others keep following it. For a keyboard or pads, Rack's MIDI-Gate module
-  gives each note its own gate output. In POLY the expander's ATTACK and DECAY only shape its ENV output.
+  gives each note its own gate output. In POLY the expander's AD runs on each note, on its DEST.
 - **Or hold a marker's slot down** on the screen: it plays until you let go, and selects the marker as usual.
 - Every marker keeps its own WAVE, filter, drive, pan and pitch, with nothing blended between markers.
 - Markers on the same spot of the bar start together, as a chord. V/OCT still sets one note for the module.
-- An artifact output carries that marker's whole note. As in MORPH, patching it takes the voice out of L/R.
+- An artifact's SEND / RETURN carries its own note: the returned sound gets the note's envelope after it.
 - On GRAIN, a note starts at once (even with SYNC) with its grains already overlapping, so a short attack is
   heard however long the grains are. Free SCAN restarts from START with each note.
 - One or two voices play at full level; beyond that they share the headroom.
@@ -267,7 +279,7 @@ Locks, conditions, slide and ties are saved with the patch; older patches load w
 
 The toggle in the header switches the module from the wavetable engine (**WAVE**) to a granular
 engine (**GRAIN**) that plays the same loaded sample. The panel stays the same: the markers, the
-POSITION playhead and its LFO, the master section and the artifact outputs all work as before. Each
+POSITION playhead and its LFO, the master section and each artifact's send / return all work as before. Each
 marker is now a **grain cloud** that reads the sample from its own START, and the playhead
 crossfades the two neighboring clouds exactly like the wavetable morph. Several knobs change title
 and meaning (the labels, tooltips and values follow):
@@ -276,7 +288,8 @@ and meaning (the labels, tooltips and values follow):
 |---|---|---|
 | WAVE | **START** | where in the sample the cloud reads (same value, so the wavetable map and bullets still work) |
 | SMOOTH | **DENSITY** | grains per second (0.5-500), or the note value of the grain grid with SYNC |
-| LFO shape | **WINDOW** | grain window: Hann, Tukey, Gauss, Triangle, Percussive, Swell, Box, Smear (click the little screen) |
+| (bottom strip) | **WINDOW** | grain window: Hann, Tukey, Gauss, Triangle, Percussive, Swell, Box, Smear (click the little screen) |
+| (under START) | **◀ HIT ▶** and **HITS** | as on SAMPLE: with HIT on, the grains (and the SCAN loop) start from the nearest hit to START; the arrows step START from hit to hit; HITS sets how many hits are found. Shared with SAMPLE: the same HITS amount, and each marker keeps its HIT when you switch engine |
 | RATE | **SIZE** | grain length (2 ms-1 s), or a multiple of the grain interval with SYNC |
 | AMT | **SPRAY** | random offset of each grain's start (up to 2 s) |
 | SYNC / T / D | **SYNC / T / D** | lock the grains (and SCAN) to the tempo; triplet and dotted note values |
@@ -298,8 +311,9 @@ there; it scatters left and right best with PAN away from the ends.
 **Clock-locked grains.** With SYNC on, grains start on a grid of note values locked to the internal
 tempo or CLOCK, with sub-sample timing; RESET is beat 0.
 
-In GRAIN the WAVE / LFO section becomes one grain group: START, DENSITY, SIZE, SCAN and FADE on top; the WINDOW
-screen, SYNC / T / D (under DENSITY), SPRAY and LOOP / PING below. WAVE mode keeps its own layout.
+In GRAIN the WAVE / LFO section becomes one grain group: START, DENSITY, SIZE, SCAN and FADE on top; ◀ HIT ▶ with
+the HITS slider (under START, as on SAMPLE), SYNC / T / D, SPRAY and LOOP / PING below. The WINDOW screen is in the
+bottom strip with SPREAD and KEEP. WAVE mode keeps its own layout.
 
 **Seeing and setting the loop.** On the wavetable map along the bottom, each scanning marker's loop is shaded in its
 color from START to its end, with a small flag at the end: drag the flag to make the loop shorter or longer (it can
@@ -345,9 +359,74 @@ grains (little overlap) stay lighter, like pulses. Grains that all start at the 
 off, no SPRAY) repeat one short loop, so tonal samples are pulled toward multiples of the grain
 rate: add SPRAY or SCAN for a steady pitch.
 
-Right-click menu: *Engine*, *Grain direction (selected marker)* (forward / reverse / random) and
+Right-click menu: *Engine*, *Direction (selected marker, GRAIN / SAMPLE)* (forward / reverse / random) and
 *Grain scatter repeats every loop*, *Every note restarts the grains (POLY / SEQ)*. The wavetable audition (double-click the map) is for the WAVE
 engine only. Not yet: grain clock from the played pitch (PITCH trigger mode).
+
+## The sample player (SAMPLE)
+
+The third position of the engine toggle (**WAVE → GRAIN → SAMPLE**) plays the loaded sample as it is. Each marker
+is one read head: it starts at the marker's **START** and plays its slice (up to the next marker's START, or
+**LENGTH**) at the pitch you set. At 0 st the head reads the sample frame by frame, so you hear the file itself:
+nothing is windowed, scattered or resynthesized. The level is the module's usual one (the same loudness gain as the
+other engines; use GAIN to trim it).
+
+The sample's controls sit together in the top-left section, in playing order: **START, LENGTH, LOOP, FADE** on the
+top row, and under each what belongs to it: **◀ HIT ▶** and the **HITS** slider under START, **FREE / BEAT / FIT** under LENGTH,
+**ONE / LOOP / PING** under LOOP and the direction (**FWD / REV / RND**) under FADE.
+
+| Control | In SAMPLE |
+|---|---|
+| START | where the slice starts in the sample (the map shows the sample, the slice and the play head) |
+| **HIT** | START snaps to the hits (transients): turn the knob and the slice jumps from hit to hit, starting exactly where each hit starts (the map shows where it plays). The HITS slider under it sets how many hits there are |
+| ◀ ▶ (either side of HIT) | move START to the previous / next hit, one at a time (exact in a long sample with many hits, where the knob is coarse). Undo with Ctrl + Z |
+| LENGTH | the slice length (top: up to the next marker), also dragged from the map's loop handle. In **BEAT** it is a note value at the tempo instead: 1/128 up to 4 bars, longer clockwise (the tooltip names it; right-click > *BEAT lengths: triplets / dotted too* adds those) |
+| **FREE / BEAT / FIT** | how the slice meets the tempo. **FREE**: LENGTH and LOOP in time, the sample at its own speed. **BEAT**: LENGTH is a note value as you hear it and LOOP sits on a grid of the slice; the slice is cut from the sample at its own speed (the pitch stays), and a loop pass lasts exactly that note value at any PITCH or V/OCT (a lower pitch plays less of the sample, slower, in the same time) (the crossfade reads on past it, so a pass is not shortened). Best for one-shots, slices and chopped loops. **FIT**: the speed changes (like tape) so what repeats lasts a whole number of beats, 1/4 to 64, the nearest to its own length (the tooltip shows how many); ONE fits the slice, LOOP the loop, PING the loop there and back; LOOP on the grid too. Best for a whole loop at another tempo. BEAT stays in time at any PITCH; FIT does at PITCH 0 (PITCH changes its speed on top) |
+| LOOP | the loop point: where LOOP and PING repeat from, as a share of the slice (0 = the whole slice); in BEAT and FIT on a grid of the slice: 1/128 notes, but at least 8 places (a 1/128 slice still loops from 1/8, 2/8 …) and at most 64 (4 bars: 16th notes); the tooltip says which place. The first run always plays from START, so a note can have its attack once and then loop a sustained part. A flag on the map marks it. Reverse mirrors it (measured from the slice end). A step can lock it |
+| **ONE / LOOP / PING** | what the slice end does: ONE stops (each note plays the slice once), LOOP goes back to the loop point, PING turns round there. In MORPH there are no notes, so ONE loops too |
+| FADE | the LOOP crossfade, as a share of the slice (at 0 a 2 ms crossfade, so the loop point never clicks) |
+| **FWD / REV / RND** | forward, reverse (from the slice end towards START), or a random one per note. The same setting as GRAIN's direction (also in the right-click menu), and a step can lock it |
+| PITCH, FINE, V/OCT | speed and pitch together, like tape. Above about +7 st the head reads the sample's decimated copies, so high notes do not alias |
+| DRIVE | the wavetable engine's warm drive, before the filter. At 0 the sample is untouched; turning it up crossfades in (5 ms) |
+| CUTOFF, RES, TYPE, GAIN, PAN | as on the other engines. An LP fully open with RES at 0 is no filter at all |
+
+**Finding the hits: the HITS slider** (under ◀ HIT ▶, 0 to 100 %, 50 % by default). It sets how many hits are found:
+at 0 % only the main hits (a hit must jump 8 dB, be within 6 dB of the loudest sound within 0.6 s of it, and come at
+least 250 ms after the last one), at 100 % the softest too (3 dB, 60 dB, 12 ms apart). The hits are found again as
+soon as it moves (about 5 ms for 60 s of sample) and when a sample loads; the ticks along the bottom of the map follow
+it, and HIT and the arrows use them. A hit is what you see on the waveform: the outline jumps up from the dip just
+before it. Two outlines are watched: the plain one (falling slowly, so a bass does not ripple it) and the top end's
+(where the click of an attack is, so a soft hat over a loud bass still shows). Each hit only has to stand out from
+what is around it, not from the whole sample: dense rolls and fast hats are found at high settings, and the loud
+shakes between a shaker loop's beats are left out at low ones. Its place is where the attack starts (within about
+1 ms; a slow swell from where it starts to rise), on a zero crossing when there is one just before. On a 70 bpm
+shaker loop, 0 % finds exactly its 16 beats. On a test drum loop (kick, snare, soft 16th hats over a bass, a 32nd roll
+and a 50 ms buzz run) every setting finds the kicks and snares, 50 % adds the buzz run and some hats, and 75 % and
+100 % find every hit but a hat buried in a snare's tail; low settings add none that are not hits, 100 % adds some in
+noisy tails.
+
+**Every note fades in over 1 ms, read from 1 ms before START**, so a note never starts on a step, even where there
+is no quiet zero crossing (a hit in noise: a shaker, a hat, a snare). The fade is over the quiet just before the hit,
+and from START on the hit plays exactly as it is in the sample, 1 ms after the trigger. On a shaker loop this makes
+the step at a note's start 30 to 40 dB smaller than starting at full level. A note over one still sounding (a
+sequencer step over a decaying note) fades the old one out over 5 ms at the level it had: the new note's attack does
+not bring the old tail back up.
+
+**Snap to zero crossings** (right-click, on by default; not in BEAT, where the places are musical times): START, the slice end and the loop point move to the
+nearest zero crossing (at most 5 ms away), so a slice never starts on a step, whatever its attack. Transients are
+placed on zero crossings too, and HIT is never moved off its hit by this snap. **Spread the markers over the transients** (right-click) puts the active markers'
+STARTs on transients spread evenly over the sample: a quick way to chop a loop across the sequencer rows.
+
+The expander's CV inputs work as on WAVE (WAVE moves START; FINE and DRIVE are themselves).
+
+In POLY and SEQ every note starts from START (a tied step goes on), so equal trigs always sound the same. A note
+over a sounding one fades the old head out in 5 ms; every other jump of the head (the loop point, a pitch moving
+between decimated copies) is a crossfade too. In MORPH the playhead crossfades the markers as in the other
+engines, and a marker starts from START again when the playhead comes back to it.
+
+The grain-only controls (DENSITY, SIZE, SPRAY, WINDOW, SCAN, SPREAD, P.SPRD, KEEP, SYNC) are hidden on SAMPLE.
+The clean path is delayed by the drive's latency (31 samples, 0.65 ms at 48 kHz), so turning DRIVE never moves the sound.
+It is the lightest engine: five markers playing short loops measure under 1 µs per sample.
 
 ## The expander
 
@@ -371,14 +450,39 @@ From the top of the panel down:
 
 - **V/OCT** adds pitch to this marker only (1 V/oct), on top of the main V/OCT.
 - **GATE** turns the marker into a note: while the jack is patched, the marker sounds only
-  while the gate is high (1 V or more) and is silent otherwise. Nothing is gated while it is
-  unpatched. In POLY it plays the marker's own ADSR instead (see *Play modes*).
-- **ATTACK / DECAY** shape the gate in MORPH, and the ENV output in both modes (5 ms to 2 s and 5 ms to 4 s). At the minimum the gate
-  opens and closes instantly (still click-free). The level holds while the gate is high and
-  DECAY starts when it falls. **PERC** makes it a true AD: attack then decay even if the
-  gate is held.
-- **ENV** outputs the envelope (0-10 V) so you can patch it to cutoff or anything else. It
-  reads 0 V without a gate.
+  while the gate is high (1 V or more) and is silent otherwise, shaped by the marker's AD. Nothing is
+  gated while it is unpatched. In POLY it plays the marker's own ADSR instead (see *Play modes*). It
+  also starts the AD.
+- **The marker's AD: ATTACK, DECAY, PERC, AD DEST, DEPTH.** An attack / decay envelope (5 ms to 2 s and
+  5 ms to 4 s; instant at the minimum) sent to one of the marker's settings: **AD DEST** (click to step
+  through WAVE / START, GAIN, CUTOFF, RES, DRIVE / P.SPRD, PITCH, PAN) by **DEPTH** (-100% .. 100%). It
+  starts on each of the marker's notes (POLY, STEP, ALL, and each sequencer trig in SEQ) and on GATE. A
+  note runs attack then decay; GATE holds it at the top while high (decaying when it falls), unless
+  **PERC** is on (attack then decay even while held). In MORPH the GATE also plays the marker through it.
+- **CV inputs with an AMT trimpot** for WAVE, GAIN, CUTOFF, DRIVE, FINE and PAN. AMT starts at
+  0, so nothing moves until you turn it up. At 100%, 10 V sweeps the whole sample for WAVE,
+  the whole cutoff range (about 1 V/oct) for CUTOFF, the whole range for DRIVE, 2 semitones
+  for FINE and hard left to hard right for PAN. **GAIN works as a VCA**: at AMT 0 it does
+  nothing, at 100% the marker's level follows the CV (silent at 0 V, full at 10 V).
+  On the GRAIN engine the inputs become START, GAIN, CUTOFF, P.SPRD, DENSITY and PAN, and the
+  START and DENSITY trimpots go 0-100% (no inverting). They keep their own values, separate from
+  WAVE and FINE. At 100%, 10 V adds the whole sample to START and the whole knob to DENSITY. PAN
+  works as on WAVE, with the same trimpot: 10 V at 100% goes hard left to hard right.
+- **The marker's LFO: shape, RATE, SYNC / T / D, LFO DEST, DEPTH**, running free (Hz, or synced to
+  Wave Artifacts' tempo or CLOCK; restarts on RESET), sent to one of the marker's settings like the AD.
+  It also comes out of its jack at +-5 V times **AMT**: patch it anywhere, including the expander's own CV
+  inputs.
+- **DEPTH at 100%** moves WAVE / START, CUTOFF, RES and DRIVE across their whole range, PAN from one side
+  to the other, PITCH by 2 octaves, and GAIN from silent to x2 (+6 dB). Both start at 0: nothing moves
+  until you turn them up.
+
+**Trig locks (SEQ, Elektron style).** The LFO and AD are the marker's own settings (they live in Wave
+Artifacts; the expander shows them for its marker), so a sequencer step locks them like CUTOFF: select a
+step and turn the expander's DEPTH, DEST, RATE, shape, ATTACK or DECAY (SYNC / T / D and PERC do not lock),
+or draw them in the sequencer's lane (*Expander LFO / AD*). **To modulate a single trig**, leave DEPTH at
+0 on the expander and lock a DEPTH on that one step: the LFO, which keeps running, moves that trig only (at
+whatever point of its cycle it is when the trig plays), and the AD sweeps that trig only. A lock holds until
+the row's next step. Copy / paste of a marker carries its LFO and AD too.
 - **CV inputs with an AMT trimpot** for WAVE, GAIN, CUTOFF, DRIVE, FINE and PAN. AMT starts at
   0, so nothing moves until you turn it up. At 100%, 10 V sweeps the whole sample for WAVE,
   the whole cutoff range (about 1 V/oct) for CUTOFF, the whole range for DRIVE, 2 semitones
@@ -399,13 +503,12 @@ VCAs multiply (the marker sounds only while all of their gates are high).
 
 1. Add an expander (right-click Wave Artifacts, **Add expander**) and make sure its MARKER
    shows the marker you want to move.
-2. Patch **LFO 1** to the **WAVE** input and turn the WAVE **AMT** up to about 30%. The marker
-   now sweeps through the sample's artifacts by itself.
+2. Set **LFO DEST** to WAVE and turn the LFO's **DEPTH** up to about 30%. The marker now sweeps
+   through the sample's artifacts by itself (no cable needed; the LFO jack still works too).
 3. To play that marker like a voice, send a keyboard's **gate** to **GATE** and its **1V/oct**
    to the main **V/OCT**. Set DECAY to a second or so and the marker rings out after each key.
    Turn PERC on for a pluck even if you hold the key. (In the main L/R you hear a marker
-   while the POSITION playhead is on it, so park the playhead on that marker, or patch the
-   marker's **ARTIFACT OUT** jacks, which follow the position the same way.)
+   while the POSITION playhead is on it, so park the playhead on that marker, or play in POLY.)
 4. For a second voice, add another expander: it gets the next free marker, ready for its own
    gate and CV.
 

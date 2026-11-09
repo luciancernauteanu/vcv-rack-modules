@@ -152,12 +152,12 @@ static const Vec LEFT_OUTPUT = Vec(155.3f, 97.6f);
 static const Vec RIGHT_OUTPUT = Vec(164.1f, 97.6f);
 static const float OUTPUT_LABEL_Y = 104.1f;
 
-// Right column: each artifact's own output, a stereo pair per row (artifact 1 on top), numbered in
+// Right column: each artifact's SEND (left) and RETURN (right), a pair per row (artifact 1 on top), numbered in
 // the artifact's color, on an inverted background like the main outputs.
 static const Vec ARTOUT_BOX_POS = Vec(180.88f, 11.f);
 static const Vec ARTOUT_BOX_SIZE = Vec(26.48f, 109.f);
-static const float ARTOUT_L_X = 188.32f; // jacks centered in the box (center 194.12), like the number badges
-static const float ARTOUT_R_X = 199.92f;
+static const float ARTOUT_L_X = 188.32f; // SEND; jacks centered in the box (center 194.12), like the number badges
+static const float ARTOUT_R_X = 199.92f; // RETURN
 static const float ARTOUT_ROW0_Y = 28.f;
 static const float ARTOUT_ROW_STEP = 19.5f;
 /** Number badge above each pair */
@@ -184,27 +184,52 @@ static const Vec ADSR_SCREEN_POS = Vec(97.f, 121.5f);
 static const Vec ADSR_SCREEN_SIZE = Vec(25.f, 5.6f);
 
 // GRAIN: its own grain group in the WAVE / LFO section (18..66), where the wavetable's SMOOTH and LFO are.
-// START stays the WAVE knob. Row 1: START, DENSITY, SIZE, SCAN, FADE. Row 2: the WINDOW screen (under START),
-// SYNC / T / D under DENSITY, SPRAY under SCAN, LOOP | PING under FADE.
+// START stays the WAVE knob. Row 1: START, DENSITY, SIZE, SCAN, FADE. Row 2: ◀ HIT ▶ and the HITS slider under
+// START (SAMPLE's, in the same place), SYNC / T / D under DENSITY and SIZE, SPRAY under SCAN, LOOP | PING under
+// FADE. The WINDOW screen is in the bottom strip, with SPREAD and KEEP.
 static const Vec GRAIN_DENSITY_KNOB = Vec(37.5f, ROW1_Y);
 static const Vec GRAIN_SIZE_KNOB = Vec(46.f, ROW1_Y);
 static const Vec GRAIN_SCAN_KNOB = Vec(54.5f, ROW1_Y);
 static const Vec GRAIN_FADE_KNOB = Vec(62.5f, ROW1_Y);
-static const Vec GRAIN_WINDOW_SCREEN = Vec(25.5f, ROW2_Y);
-static const Vec GRAIN_WINDOW_SIZE = Vec(10.f, 6.f);
-static const Vec GRAIN_SYNC_BUTTON = Vec(35.f, ROW2_Y);
-static const Vec GRAIN_TRIP_BUTTON = Vec(40.9f, ROW2_Y);
-static const Vec GRAIN_DOT_BUTTON = Vec(45.7f, ROW2_Y);
-static const Vec GRAIN_SPRAY_KNOB = Vec(54.5f, ROW2_Y);
+// SYNC starts just after ▶ (it ends at 35.0)
+static const Vec GRAIN_SYNC_BUTTON = Vec(38.8f, ROW2_Y);
+static const Vec GRAIN_TRIP_BUTTON = Vec(44.6f, ROW2_Y);
+static const Vec GRAIN_DOT_BUTTON = Vec(49.1f, ROW2_Y);
+static const Vec GRAIN_SPRAY_KNOB = Vec(55.2f, ROW2_Y);
 static const Vec GRAIN_SCAN_MODE_BUTTON = Vec(62.5f, ROW2_Y);
 static const Vec GRAIN_SCAN_MODE_SIZE = Vec(6.8f, 4.4f);
 
-// SPREAD and KEEP (speed) (GRAIN only) in the same strip, right of the envelope, in one box
+// SAMPLE: its own group in the same section, in playing order. Row 1: START (the WAVE knob), LENGTH, LOOP, FADE.
+// Row 2, each under what it belongs to: ◀ HIT ▶ under START, BEAT under LENGTH, ONE | LOOP | PING
+// under LOOP, the direction under FADE.
+static const Vec SAMPLE_LENGTH_KNOB = Vec(38.5f, ROW1_Y);
+static const Vec SAMPLE_LOOP_KNOB = Vec(48.5f, ROW1_Y);
+static const Vec SAMPLE_FADE_KNOB = Vec(58.5f, ROW1_Y);
+static const Vec SAMPLE_PREV_BUTTON = Vec(21.2f, ROW2_Y);
+/** HIT (START snaps to the hits), between the arrows that step START from hit to hit */
+static const Vec SAMPLE_HIT_BUTTON = Vec(27.f, ROW2_Y);
+static const Vec SAMPLE_HIT_SIZE = Vec(6.f, 4.4f);
+static const Vec SAMPLE_NEXT_BUTTON = Vec(32.8f, ROW2_Y);
+static const Vec SAMPLE_ARROW_SIZE = Vec(4.4f, 4.4f);
+static const Vec SAMPLE_BEAT_SIZE = Vec(6.6f, 4.4f);
+static const Vec SAMPLE_BEAT_BUTTON = Vec(38.5f, ROW2_Y);
+static const Vec SAMPLE_LOOP_MODE_BUTTON = Vec(48.5f, ROW2_Y);
+static const Vec SAMPLE_DIR_BUTTON = Vec(58.5f, ROW2_Y);
+static const Vec SAMPLE_BUTTON_SIZE = Vec(7.4f, 4.4f);
+/** HITS: how many hits are found (0 .. 100 %), a slider under ◀ HIT ▶ (top-left corner, size) */
+static const Vec SAMPLE_HITS_SLIDER_POS = Vec(19.2f, 38.3f);
+static const Vec SAMPLE_HITS_SLIDER_SIZE = Vec(15.8f, 3.2f);
+
+// WINDOW, SPREAD and KEEP (speed) (GRAIN only) in the same strip, right of the envelope, in one box (its right edge
+// lines up with the artifact outputs' box above)
 static const Vec SPREAD_BOX_POS = Vec(126.f, 120.6f);
-static const Vec SPREAD_BOX_SIZE = Vec(38.f, 7.4f);
-static const float SPREAD_LABEL_X = 132.f;
-static const Vec SPREAD_KNOB = Vec(142.f, ADSR_Y);
-static const Vec KEEP_SPEED_BUTTON = Vec(155.f, ADSR_Y);
+static const Vec SPREAD_BOX_SIZE = Vec(54.88f, 7.4f);
+static const float GRAIN_WINDOW_LABEL_X = 131.5f;
+static const Vec GRAIN_WINDOW_SCREEN = Vec(142.5f, ADSR_Y);
+static const Vec GRAIN_WINDOW_SIZE = Vec(10.f, 5.6f);
+static const float SPREAD_LABEL_X = 154.f;
+static const Vec SPREAD_KNOB = Vec(163.5f, ADSR_Y);
+static const Vec KEEP_SPEED_BUTTON = Vec(173.8f, ADSR_Y);
 static const Vec KEEP_SPEED_BUTTON_SIZE = Vec(11.f, 4.4f);
 
 // Pastel, blue through purple to red.

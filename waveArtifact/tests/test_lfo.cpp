@@ -1,6 +1,7 @@
 // Offline tests for the WAVE LFO and clock tracker (no Rack needed).
 
 #include "Lfo.hpp"
+#include "MarkerMod.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -541,7 +542,80 @@ static void testLfoSmoother() {
 	}
 }
 
+/** Runs an envelope `seconds` and returns the time (s) it first reaches `level` from below (-1 if never) */
+static double modEnvRise(wa::ModEnvelope& e, float level, double seconds, bool perc, float attack, float decay, float sr) {
+	long n = (long) (seconds * sr);
+	for (long i = 0; i < n; i++)
+		if (e.process(false, false, false, perc, attack, decay, 1.f / sr) >= level)
+			return (i + 1) / (double) sr;
+	return -1.0;
+}
+
+static void testModEnvelope() {
+	std::printf("expander AD (MarkerMod.hpp)\n");
+	const float sr = 48000.f, dt = 1.f / sr;
+	// A note: attack, then the decay at once (no gate holds it). ATTACK 0.5 = 0.1 s, DECAY 0.5 = 0.141 s to -60 dB.
+	{
+		wa::ModEnvelope e;
+		e.process(true, false, false, false, 0.5f, 0.5f, dt);
+		double peak = modEnvRise(e, 1.f, 1.0, false, 0.5f, 0.5f, sr) + 1.0 / sr;
+		long n = (long) (wa::modAdTime(0.5f, wa::MOD_AD_DECAY_MAX) * sr);
+		float l = 0.f;
+		for (long i = 0; i < n; i++)
+			l = e.process(false, false, false, false, 0.5f, 0.5f, dt);
+		std::printf("  note: peak at %.4f s (want %.4f), %.4f s later %.5f (want 0.001, -60 dB)\n", peak,
+			wa::modAdTime(0.5f, wa::MOD_AD_ATTACK_MAX), wa::modAdTime(0.5f, wa::MOD_AD_DECAY_MAX), l);
+		CHECK(std::fabs(peak - 0.1) < 0.001, "attack peak at %.4f s", peak);
+		CHECK(l > 0.0009f && l < 0.0012f, "decay to %.5f", l);
+	}
+	// GATE in gate mode: holds at 1 while high, decays once it falls. PERC: decays while still held.
+	for (int perc = 0; perc < 2; perc++) {
+		wa::ModEnvelope e;
+		e.process(true, true, true, perc == 1, 0.f, 0.6f, dt);
+		float held = 0.f;
+		for (long i = 0; i < (long) (0.5 * sr); i++)
+			held = e.process(false, true, true, perc == 1, 0.f, 0.6f, dt);
+		float after = 0.f;
+		for (long i = 0; i < (long) (0.05 * sr); i++)
+			after = e.process(false, true, false, perc == 1, 0.f, 0.6f, dt);
+		std::printf("  GATE, %s: 0.5 s held %.4f, 50 ms after release %.4f\n", perc ? "PERC" : "gate mode", held, after);
+		if (perc)
+			CHECK(held < 0.01f, "PERC still held at %.4f", held);
+		else
+			CHECK(held == 1.f && after < 0.99f && after > 0.1f, "gate mode: held %.4f, after %.4f", held, after);
+	}
+	// A note in gate mode with no gate: it does not hold (a sequencer trig plays attack then decay).
+	{
+		wa::ModEnvelope e;
+		e.process(true, false, false, false, 0.f, 0.3f, dt);
+		float l = 0.f;
+		for (long i = 0; i < (long) (0.5 * sr); i++)
+			l = e.process(false, false, false, false, 0.f, 0.3f, dt);
+		std::printf("  note in gate mode: 0.5 s later %.5f (decayed, not held)\n", l);
+		CHECK(l < 0.01f, "a note held the AD at %.4f", l);
+	}
+	// Both stages at the minimum: the peak for one sample, then silence.
+	{
+		wa::ModEnvelope e;
+		float a = e.process(true, false, false, false, 0.f, 0.f, dt);
+		float b = e.process(false, false, false, false, 0.f, 0.f, dt);
+		std::printf("  instant: %.2f, then %.2f\n", a, b);
+		CHECK(a == 1.f && b == 0.f, "instant AD %.2f %.2f", a, b);
+	}
+	// Destinations: PITCH 2 octaves, PAN side to side, GAIN a level x0..x2
+	{
+		wa::ModSum s;
+		s.put(wa::MOD_DEST_PITCH, 0.5f);
+		s.put(wa::MOD_DEST_PAN, -1.f);
+		s.put(wa::MOD_DEST_GAIN, -2.f);
+		s.put(99, 1.f); // out of range: ignored
+		std::printf("  depth x source: PITCH 0.5 -> %+.1f st, PAN -1 -> %+.1f, GAIN -2 -> x%.1f\n", s.add[wa::MOD_DEST_PITCH],
+			s.add[wa::MOD_DEST_PAN], s.gainMul());
+		CHECK(s.add[wa::MOD_DEST_PITCH] == 12.f && s.add[wa::MOD_DEST_PAN] == -2.f && s.gainMul() == 0.f, "destination scaling");
+	}
+}
 int main() {
+	testModEnvelope();
 	testLfoSmoother();
 	testInternalClock();
 	testRestartInternal();
