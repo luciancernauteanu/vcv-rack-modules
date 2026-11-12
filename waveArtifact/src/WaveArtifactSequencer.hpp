@@ -8,7 +8,7 @@ its own row of up to 16 steps, each with a velocity, a length, and a clock multi
 the row): rows can run at different speeds and lengths (polyrhythms).
 
 Elektron style, each step can also carry parameter locks (its own value for any of the marker's settings), a trig
-condition (chance, A:B, FILL) and slide (see StepLocks.hpp). */
+condition (chance, A:B) and slide (see StepLocks.hpp). */
 struct WaveArtifactSequencer : Module {
 	static const int ROWS = wa::NUM_MARKERS;
 	static const int STEPS = 16;
@@ -16,22 +16,24 @@ struct WaveArtifactSequencer : Module {
 	enum ParamId {
 		/** Per row: -4..4 (whole steps). Right of the middle multiplies the clock, left divides it. */
 		ENUMS(CLOCK_MULT_PARAM, ROWS),
-		/** Latching FILL: steps with a FILL condition play, NOT FILL ones do not (also while the FILL input is high) */
-		FILL_PARAM,
+		/** Unused: was FILL (removed). Kept so the params after it keep their IDs in saved patches. */
+		UNUSED_FILL_PARAM,
 		/** Latching REC: live record. While the pattern plays, the selected row's knobs are written into each of its lit
 		steps as the playhead passes (see WaveArtifact::recordStep) */
 		REC_PARAM,
 		/** Momentary RND: random locks on the lit steps of the lane's row (Shift: every row), see randomizeLocks() */
 		RND_PARAM,
-		/** 0..1: how many of the lockable settings each lit step gets locked by RND. 0 = none (RND clears the locks),
-		1 = every one. */
+		/** 0..1: how many of the lockable settings each lit step gets locked by RND (0 = none: RND clears the locks,
+		1 = every one) */
 		RND_AMOUNT_PARAM,
-		/** Momentary COND RND: random trig conditions on the lit steps of the lane's row (Shift: every row) */
-		COND_RND_PARAM,
-		/** 0..1: share of the lit steps COND RND gives a condition (the others: Always). 0 = none, 1 = every one. */
-		COND_RND_AMOUNT_PARAM,
+		/** Unused: were COND RND (removed) and its own amount. Kept so the params after them keep their IDs in saved
+		patches. */
+		UNUSED_COND_RND_PARAM,
+		UNUSED_COND_AMOUNT_PARAM,
 		/** Momentary COND CLR: every condition of the lane's row back to Always (Shift: every row) */
 		COND_CLR_PARAM,
+		/** Per row: the MOD output's level, 0..1 of 10 V (default 1, full). Last, so older patches keep their IDs. */
+		ENUMS(MOD_LEVEL_PARAM, ROWS),
 		PARAMS_LEN
 	};
 
@@ -45,23 +47,20 @@ struct WaveArtifactSequencer : Module {
 		return table[std::min(std::max(index, -4), 4) + 4];
 	}
 	enum InputId {
-		/** Gate: FILL while high */
-		FILL_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
 		/** Per row: 10 V from each trig that plays for half a step; through a group of tied trigs (a long gate) it
 		stays high until half way through the group's last step. The clock is unchanged. */
 		ENUMS(GATE_OUTPUT, ROWS),
-		/** Per row: the velocity of the step that played last, 0..10 V, held until the next one plays; a step with slide
-		glides there over its slide x one step (as the locks do) */
+		/** Per row: the velocity of the step that played last, 0..10 V times the row's MOD level, held until the next one
+		plays; a step with slide glides there over its slide x one step (as the locks do) */
 		ENUMS(MOD_OUTPUT, ROWS),
 		OUTPUTS_LEN
 	};
 	/** Share of a step a trig's GATE stays high */
 	static constexpr double GATE_LENGTH = 0.5;
 	enum LightId {
-		FILL_LIGHT,
 		REC_LIGHT,
 		LIGHTS_LEN
 	};
@@ -73,6 +72,9 @@ struct WaveArtifactSequencer : Module {
 	int length[ROWS] = {16, 16, 16, 16, 16};
 	/** The step each row played last (-1 before the first), for the display */
 	std::atomic<int> playing[ROWS];
+	/** The row's marker is on (from the main module): a row whose marker is off keeps time, plays nothing, and is
+	drawn dimmed */
+	std::atomic<bool> rowOn[ROWS];
 	std::atomic<bool> linked{false};
 
 	// UI thread only
@@ -81,6 +83,13 @@ struct WaveArtifactSequencer : Module {
 	int selRow = -1, selStep = -1;
 	/** The lane under the grid: which row, and which setting (an index into WaveArtifact::MARKER_SETTING_PARAMS) */
 	int laneRow = 0, laneSetting = 9;
+	/** The lane shows the row's trig conditions instead of a setting's locks */
+	bool laneCondition = false;
+	/** The lane shows setting k's locks (what is being locked) */
+	void showLock(int k) {
+		laneSetting = k;
+		laneCondition = false;
+	}
 
 	WaveArtifactSequencer();
 	~WaveArtifactSequencer();
@@ -169,9 +178,6 @@ struct WaveArtifactSequencer : Module {
 	/** RND: random locks on the lit steps of the lane's row (allRows: every row), RND AMOUNT deciding how many settings
 	each step locks. False when the main module is not linked. UI thread. */
 	bool randomizeLocks(bool allRows);
-	/** COND RND: each lit step of the lane's row (allRows: every row) gets a random condition with probability COND
-	AMOUNT, else Always. Tied steps are skipped (their group's first trig decides). UI thread. */
-	void randomizeConditions(bool allRows);
 	/** COND CLR: every condition of the lane's row (allRows: every row) back to Always. UI thread. */
 	void clearConditions(bool allRows);
 	void clearRow(int r);
@@ -197,7 +203,6 @@ private:
 	int position[ROWS] = {-1, -1, -1, -1, -1};
 	/** Passes of each row since RESET (0 = the first), for A:B conditions */
 	long pass[ROWS] = {-1, -1, -1, -1, -1};
-	bool fill = false;
 	uint32_t rng = 1;
 	static const int WARM_UP_SAMPLES = 4;
 	int warmUp = WARM_UP_SAMPLES;
@@ -207,3 +212,7 @@ private:
 };
 
 bool isWaveArtifactSequencer(Module* m);
+
+/** The condition choices of lock k on step s of row r (Always, a chance, A:B): when the trig plays and the condition
+fails, that setting plays the knob. For the lane's and the main module's right-click menus. UI thread. */
+void appendLockConditionItems(ui::Menu* menu, WaveArtifactSequencer* m, int r, int s, int k);

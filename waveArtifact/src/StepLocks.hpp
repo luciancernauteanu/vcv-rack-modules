@@ -67,13 +67,41 @@ enum TrigCondition {
 	COND_CHANCE,
 	/** A:B: plays on pass A of every B passes of the row (pass 1 = the first after RESET) */
 	COND_RATIO,
-	COND_FILL,
-	COND_NOT_FILL,
 	NUM_CONDITIONS
 };
 
 /** The chances offered in the menu, in percent */
 static const int CHANCES[5] = {10, 25, 50, 75, 90};
+
+/** A condition: a trig's (whether it plays) or one lock's (whether that lock applies when its trig plays) */
+struct Condition {
+	uint8_t cond = COND_ALWAYS;
+	uint8_t chance = 50;
+	uint8_t a = 1, b = 2;
+};
+
+/** Whether a condition passes this time. `pass` counts the row's passes since RESET (0 = the first), `random01` is a
+uniform number in [0, 1) drawn for it. */
+inline bool conditionPasses(const Condition& c, long pass, float random01) {
+	switch (c.cond) {
+		case COND_CHANCE: return random01 * 100.f < (float) c.chance;
+		case COND_RATIO: {
+			int b = c.b < 1 ? 1 : c.b;
+			int a = c.a < 1 ? 1 : (c.a > b ? b : c.a);
+			return (pass % b) + 1 == a;
+		}
+		default: return true;
+	}
+}
+
+/** Short text for a condition: "50%", "1:2" (empty for ALWAYS) */
+inline void conditionText(const Condition& c, char* out, int size) {
+	switch (c.cond) {
+		case COND_CHANCE: std::snprintf(out, size, "%d%%", (int) c.chance); break;
+		case COND_RATIO: std::snprintf(out, size, "%d:%d", (int) c.a, (int) c.b); break;
+		default: if (size > 0) out[0] = 0; break;
+	}
+}
 
 /** Everything a step carries besides its velocity */
 struct StepData {
@@ -89,6 +117,41 @@ struct StepData {
 	/** Tied to the trig before it (a long gate): the note that trig started goes on through this step instead of
 	starting again; only counts while the step before is lit (see isTied()). */
 	bool tie = false;
+	/** Each lock's own condition: when the trig plays, a lock whose condition fails this time does not apply (that
+	setting plays the knob). Only the locks whose bit is set in `condMask` have one (always a subset of `mask`). */
+	Condition lockCond[NUM_LOCKABLE];
+	uint64_t condMask = 0;
+
+	/** The trig's own condition */
+	Condition trigCondition() const {
+		Condition c;
+		c.cond = cond;
+		c.chance = chance;
+		c.a = a;
+		c.b = b;
+		return c;
+	}
+	void setTrigCondition(const Condition& c) {
+		cond = c.cond;
+		chance = c.chance;
+		a = c.a;
+		b = c.b;
+	}
+	/** Lock k's condition (Always when it has none) */
+	Condition lockCondition(int k) const {
+		return ((condMask >> k) & 1u) ? lockCond[k] : Condition();
+	}
+	/** Gives lock k a condition (Always removes it). Nothing when k is not locked. */
+	void setLockCondition(int k, const Condition& c) {
+		if (!locked(k))
+			return;
+		uint64_t bit = (uint64_t) 1u << k;
+		lockCond[k] = c;
+		if (c.cond == COND_ALWAYS)
+			condMask &= ~bit;
+		else
+			condMask |= bit;
+	}
 
 	bool locked(int k) const {
 		return (mask >> k) & 1u;
@@ -99,8 +162,15 @@ struct StepData {
 		value[k] = v;
 		mask |= (uint64_t) 1u << k;
 	}
+	/** Removes lock k, with its condition */
 	void clearLock(int k) {
 		mask &= ~((uint64_t) 1u << k);
+		condMask &= ~((uint64_t) 1u << k);
+	}
+	/** Removes every lock, with their conditions */
+	void clearLocks() {
+		mask = 0;
+		condMask = 0;
 	}
 	bool isPlain() const {
 		return mask == 0 && cond == COND_ALWAYS && slide <= 0.f && !tie;
@@ -125,19 +195,24 @@ inline StepData mergeTied(const StepData& group, const StepData& step) {
 	return out;
 }
 
-/** Whether a step plays this time. `pass` counts the row's passes since RESET (0 = the first), `random01` is a
-uniform number in [0, 1) drawn for this step. */
-inline bool conditionPasses(const StepData& s, long pass, bool fill, float random01) {
-	switch (s.cond) {
-		case COND_CHANCE: return random01 * 100.f < (float) s.chance;
-		case COND_RATIO: {
-			int b = s.b < 1 ? 1 : s.b;
-			int a = s.a < 1 ? 1 : (s.a > b ? b : s.a);
-			return (pass % b) + 1 == a;
-		}
-		case COND_FILL: return fill;
-		case COND_NOT_FILL: return !fill;
-		default: return true;
+/** Whether a step plays this time (its trig condition). `pass` counts the row's passes since RESET (0 = the first),
+`random01` is a uniform number in [0, 1) drawn for this step. */
+inline bool conditionPasses(const StepData& s, long pass, float random01) {
+	return conditionPasses(s.trigCondition(), pass, random01);
+}
+
+/** A trig plays: the locks of `src` whose own condition fails this time come off `out` (those settings play the knob).
+`rnd()` gives a uniform number in [0, 1), drawn once per lock with a chance. */
+template <class Rnd>
+inline void applyLockConditions(StepData& out, const StepData& src, long pass, Rnd rnd) {
+	uint64_t m = src.mask & src.condMask;
+	while (m) {
+		int k = __builtin_ctzll(m);
+		m &= m - 1;
+		const Condition& c = src.lockCond[k];
+		float u = (c.cond == COND_CHANCE) ? rnd() : 0.f;
+		if (!conditionPasses(c, pass, u))
+			out.mask &= ~((uint64_t) 1u << k);
 	}
 }
 
@@ -176,36 +251,9 @@ struct GlideValue {
 	}
 };
 
-/** COND RND: a random condition from three uniform numbers in [0, 1). Mostly chances (half) and A:B (a third);
-FILL and NOT FILL are rare, as they silence a step until FILL is used (or until it is). */
-inline void randomCondition(StepData& d, float u1, float u2, float u3) {
-	if (u1 < 0.5f) {
-		d.cond = COND_CHANCE;
-		int i = (int) (u2 * 5.f);
-		d.chance = (uint8_t) CHANCES[i < 0 ? 0 : (i > 4 ? 4 : i)];
-	}
-	else if (u1 < 0.85f) {
-		d.cond = COND_RATIO;
-		int b = 2 + (int) (u2 * 7.f);
-		b = b > 8 ? 8 : b;
-		int a = 1 + (int) (u3 * (float) b);
-		d.b = (uint8_t) b;
-		d.a = (uint8_t) (a > b ? b : a);
-	}
-	else {
-		d.cond = (u1 < 0.925f) ? COND_FILL : COND_NOT_FILL;
-	}
-}
-
-/** Short text for a condition, drawn in the step and in the menu: "50%", "1:2", "FILL", "!FILL" (empty for ALWAYS) */
+/** Short text for a condition, drawn in the step, in the lane and in the menu: "50%", "1:2" (empty for ALWAYS) */
 inline void conditionText(const StepData& s, char* out, int size) {
-	switch (s.cond) {
-		case COND_CHANCE: std::snprintf(out, size, "%d%%", (int) s.chance); break;
-		case COND_RATIO: std::snprintf(out, size, "%d:%d", (int) s.a, (int) s.b); break;
-		case COND_FILL: std::snprintf(out, size, "FILL"); break;
-		case COND_NOT_FILL: std::snprintf(out, size, "!FILL"); break;
-		default: if (size > 0) out[0] = 0; break;
-	}
+	conditionText(s.trigCondition(), out, size);
 }
 
 /** The locks one marker is playing, from the step that played last until its row plays another one. With slide, the

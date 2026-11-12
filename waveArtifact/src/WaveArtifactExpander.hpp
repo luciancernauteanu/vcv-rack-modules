@@ -22,7 +22,7 @@ struct WaveArtifactExpander : Module {
 		ENUMS(LFO_DOTTED_PARAM, NUM_LFOS),
 		/** wa::LfoShape of each LFO */
 		ENUMS(LFO_SHAPE_PARAM, NUM_LFOS),
-		/** Output level of each LFO, 0..100% of +-5 V (default 100%) */
+		/** Output level of each LFO, 0..100% of +-10 V (default 100%) */
 		ENUMS(LFO_AMT_PARAM, NUM_LFOS),
 		/** No longer used: the AD is the marker's (MARKER_MOD_AD_* in the main module). Kept so later IDs stay valid. */
 		ATTACK_PARAM,

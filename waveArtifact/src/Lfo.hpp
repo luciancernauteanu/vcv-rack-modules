@@ -89,10 +89,17 @@ no smoothing. */
 class LfoSmoother {
 public:
 	float process(float x, float timeConstant, float sampleTime) {
-		if (timeConstant <= 0.f)
+		if (timeConstant <= 0.f) {
 			y = x;
-		else
-			y += (x - y) * (1.f - std::exp(-sampleTime / timeConstant));
+			return y;
+		}
+		// The coefficient only changes with the time: worked out again only then
+		if (timeConstant != lastTime || sampleTime != lastSampleTime) {
+			lastTime = timeConstant;
+			lastSampleTime = sampleTime;
+			coef = 1.f - std::exp(-sampleTime / timeConstant);
+		}
+		y += (x - y) * coef;
 		return y;
 	}
 
@@ -102,6 +109,7 @@ public:
 
 private:
 	float y = 0.f;
+	float lastTime = -1.f, lastSampleTime = -1.f, coef = 1.f;
 };
 
 /** Clock resolutions offered for the CLOCK input, in pulses per quarter note. */
@@ -307,8 +315,19 @@ public:
 			}
 		}
 		double freq;
+		// The note value (sync) or the rate in Hz (free) only changes with the knob: worked out again only then
+		if (rateKnob != cachedKnob || sync != cachedSync || triplets != cachedTriplets || dotted != cachedDotted) {
+			cachedKnob = rateKnob;
+			cachedSync = sync;
+			cachedTriplets = triplets;
+			cachedDotted = dotted;
+			if (sync)
+				cachedBeats = SYNC_DIVISIONS[lfoDivision(rateKnob, triplets, dotted)].beats;
+			else
+				cachedFreeHz = lfoFreeHz(rateKnob);
+		}
 		if (sync) {
-			double beats = SYNC_DIVISIONS[lfoDivision(rateKnob, triplets, dotted)].beats;
+			double beats = cachedBeats;
 			freq = 1.0 / (beats * clock.beatPeriod());
 			// Lock the phase to the clock on every pulse: beat k of an n-beat cycle is phase k/n.
 			// The error is not snapped (that would jump WAVE) but pulled in over ~20 ms, so the
@@ -321,7 +340,7 @@ public:
 			}
 		}
 		else {
-			freq = lfoFreeHz(rateKnob);
+			freq = cachedFreeHz;
 			correction = 0.0;
 		}
 		float out;
@@ -363,6 +382,11 @@ public:
 
 private:
 	static constexpr double CORRECTION_TIME = 0.02;
+	/** The rate as last worked out (process() recomputes it only when one of these changes) */
+	float cachedKnob = -1.f;
+	bool cachedSync = false, cachedTriplets = false, cachedDotted = false;
+	double cachedBeats = 1.0;
+	double cachedFreeHz = 1.0;
 	/** Largest step of the drunk walk per cycle (of the full -1..1 range) */
 	static constexpr float DRUNK_STEP = 0.35f;
 

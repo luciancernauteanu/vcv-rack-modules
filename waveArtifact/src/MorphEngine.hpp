@@ -82,7 +82,8 @@ struct EngineInput {
 	bool holdSilent = false;
 	/** Table to audition instead of the morph, or -1. Switching crossfades over 20 ms. */
 	int previewTable = -1;
-	/** Render this artifact's own output (see getDirect); only patched outputs cost CPU. */
+	/** Measuring output (tests): render each artifact's own chain for getDirect. The module never sets it (its old
+	ARTIFACT OUT jacks became SEND / RETURN), so it costs nothing there. */
 	bool wantDirect[NUM_MARKERS] = {};
 	/** SEND / RETURN (an expander's jacks): render each marker's send (getSend) */
 	bool wantSend = false;
@@ -379,12 +380,6 @@ public:
 		*r = sendR[m];
 	}
 
-	/** The marker's level for the ENV output, 0..1: its ADSR in POLY, its position share in MORPH (before an
-	artifact output or a return takes it out of the morph's voice) */
-	float getLevel(int m) const {
-		return posWeight[m];
-	}
-
 	/** Output gain reduction of the limiter (1 = not limiting), for a meter */
 	float getLimiterGain() const {
 		return limiter.getGain();
@@ -500,7 +495,9 @@ private:
 		panS += (panT - panS) * smoothCoef;
 
 		float driven = drive.process(dry, driveS < 1e-5f ? 0.f : driveS);
-		float out = markerSvf.process(driven, filterHz(cutoffS), filterQ(resS), sampleRate, mixS) * gain;
+		float q;
+		float fc = markerParams.get(cutoffS, resS, &q);
+		float out = markerSvf.process(driven, fc, q, sampleRate, mixS) * gain;
 
 		if (!std::isfinite(out)) {
 			markerSvf.reset();
@@ -574,7 +571,9 @@ private:
 				float k = insertS[m];
 				float y = 0.f;
 				if (k < 1.f) {
-					y = d.svf.process(driven, filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
+					float q;
+					float fc = d.params.get(d.cutS, d.resS, &q);
+					y = d.svf.process(driven, fc, q, sampleRate, d.mixS);
 					if (!std::isfinite(y)) {
 						d.svf.reset();
 						y = 0.f;
@@ -678,7 +677,9 @@ private:
 			float k = insertS[m];
 			float y = 0.f;
 			if (k < 1.f) {
-				y = d.svf.process(driven, filterHz(d.cutS), filterQ(d.resS), sampleRate, d.mixS);
+				float q;
+				float fc = d.params.get(d.cutS, d.resS, &q);
+				y = d.svf.process(driven, fc, q, sampleRate, d.mixS);
 				if (!std::isfinite(y)) {
 					d.svf.reset();
 					y = 0.f;
@@ -794,6 +795,8 @@ private:
 	float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
 	WarmDrive drive;
 	Svf markerSvf;
+	/** CUTOFF / RES as Hz and Q, worked out again only when they move */
+	FilterParams markerParams;
 	MasterFilter master;
 	float gainS[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	SafetyLimiter limiter;
@@ -803,6 +806,7 @@ private:
 	struct DirectChain {
 		WarmDrive drive;
 		Svf svf;
+		FilterParams params;
 		SafetyLimiter limiter;
 		float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
 		float cutS = 1.f;

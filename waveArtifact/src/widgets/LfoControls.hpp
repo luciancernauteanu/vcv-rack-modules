@@ -79,8 +79,10 @@ TKnob* createLfoRateKnob(Vec mmCenter, Module* module, int rateId, int syncId, i
 }
 
 /** Configures an LFO rate param with its display; default ~0.2 Hz. */
-inline LfoRateQuantity* configLfoRate(Module* m, int rateId, int syncId, int tripletId, int dottedId, const std::string& name, float def = 0.394f) {
-	LfoRateQuantity* q = m->configParam<LfoRateQuantity>(rateId, 0.f, 1.f, def, name);
+template <class TModule>
+inline LfoRateQuantity* configLfoRate(TModule* m, int rateId, int syncId, int tripletId, int dottedId, const std::string& name, float def = 0.394f) {
+	// TModule: WaveArtifact's own configParam (its quantities can format trig locks, see ShowsValue)
+	LfoRateQuantity* q = m->template configParam<LfoRateQuantity>(rateId, 0.f, 1.f, def, name);
 	q->syncId = syncId;
 	q->tripletId = tripletId;
 	q->dottedId = dottedId;

@@ -7,6 +7,6 @@
     <g id="sections" fill="#d9d6cf">
       <rect x="4" y="11" width="154.56" height="104" rx="2" ry="2"/>
     </g>
-    <rect id="gate-out-box" x="140.2" y="11.8" width="18.2" height="86.6" rx="1.5" ry="1.5" fill="#26282c"/>
+    <rect id="gate-out-box" x="140.2" y="11.8" width="18.2" height="92.4" rx="1.5" ry="1.5" fill="#26282c"/>
   </g>
 </svg>

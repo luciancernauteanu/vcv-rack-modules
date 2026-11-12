@@ -31,29 +31,36 @@ WaveArtifactSequencer::WaveArtifactSequencer() {
 		paramQuantities[CLOCK_MULT_PARAM + r]->snapEnabled = true;
 		paramQuantities[CLOCK_MULT_PARAM + r]->randomizeEnabled = false;
 	}
-	configSwitch(FILL_PARAM, 0.f, 1.f, 0.f, "Fill", {"Off", "On"});
-	paramQuantities[FILL_PARAM]->randomizeEnabled = false;
-	configInput(FILL_INPUT, "Fill gate (FILL while high)");
-	configLight(FILL_LIGHT, "Fill");
+	// FILL's old slot (FILL was removed): no control on the panel
+	configParam(UNUSED_FILL_PARAM, 0.f, 1.f, 0.f, "Unused");
+	paramQuantities[UNUSED_FILL_PARAM]->randomizeEnabled = false;
 	configSwitch(REC_PARAM, 0.f, 1.f, 0.f, "Record (live: knob moves go into the steps as they play)", {"Off", "On"});
 	paramQuantities[REC_PARAM]->randomizeEnabled = false;
 	configLight(REC_LIGHT, "Record");
 	for (int r = 0; r < ROWS; r++)
 		configOutput(GATE_OUTPUT + r, "Marker " + std::to_string(r + 1) + " row gate (half a step per trig; tied trigs: one long gate)");
 	for (int r = 0; r < ROWS; r++)
-		configOutput(MOD_OUTPUT + r, "Marker " + std::to_string(r + 1) + " row velocity CV (0-10 V, held; glides on slide steps)");
+		configOutput(MOD_OUTPUT + r, "Marker " + std::to_string(r + 1) + " row velocity CV (0-10 V at full level, held; glides on slide steps)");
+	for (int r = 0; r < ROWS; r++) {
+		// Full by default, so a patch from before it sounds the same
+		configParam(MOD_LEVEL_PARAM + r, 0.f, 1.f, 1.f, "Marker " + std::to_string(r + 1) + " row MOD level", "%", 0.f, 100.f);
+		paramQuantities[MOD_LEVEL_PARAM + r]->randomizeEnabled = false;
+	}
 	configButton(RND_PARAM, "Random locks on the lit steps of the lane's row (Shift + click: every row)");
 	paramQuantities[RND_PARAM]->randomizeEnabled = false;
-	configParam(RND_AMOUNT_PARAM, 0.f, 1.f, 0.5f, "RND amount (share of the settings locked on each lit step)", "%", 0.f, 100.f);
+	configParam(RND_AMOUNT_PARAM, 0.f, 1.f, 0.5f, "Random locks amount (share of the settings locked on each lit trig)", "%", 0.f, 100.f);
 	paramQuantities[RND_AMOUNT_PARAM]->randomizeEnabled = false;
-	configButton(COND_RND_PARAM, "Random trig conditions on the lit steps of the lane's row (Shift + click: every row)");
-	paramQuantities[COND_RND_PARAM]->randomizeEnabled = false;
-	configParam(COND_RND_AMOUNT_PARAM, 0.f, 1.f, 0.5f, "COND RND amount (share of the lit steps given a condition)", "%", 0.f, 100.f);
-	paramQuantities[COND_RND_AMOUNT_PARAM]->randomizeEnabled = false;
+	// The old COND RND button and its amount: no control on the panel
+	configParam(UNUSED_COND_RND_PARAM, 0.f, 1.f, 0.f, "Unused");
+	paramQuantities[UNUSED_COND_RND_PARAM]->randomizeEnabled = false;
+	configParam(UNUSED_COND_AMOUNT_PARAM, 0.f, 1.f, 0.5f, "Unused");
+	paramQuantities[UNUSED_COND_AMOUNT_PARAM]->randomizeEnabled = false;
 	configButton(COND_CLR_PARAM, "Reset the trig conditions of the lane's row to Always (Shift + click: every row)");
 	paramQuantities[COND_CLR_PARAM]->randomizeEnabled = false;
-	for (int r = 0; r < ROWS; r++)
+	for (int r = 0; r < ROWS; r++) {
 		playing[r] = -1;
+		rowOn[r] = true;
+	}
 	// Per-instance seed: two sequencers must not roll the same chances.
 	rng = random::u32() | 1u;
 	// This module sits on the left of the main one: it talks through its right side.
@@ -121,6 +128,13 @@ void WaveArtifactSequencer::tickRow(int r) {
 		pass[r]++;
 	int p = position[r];
 	playing[r] = p;
+	// The row's marker is off: the row keeps time (so it is in step when the marker comes back) and plays nothing
+	if (!rowOn[r]) {
+		groupPlaying[r] = false;
+		gateHigh[r] = false;
+		holdOpen[r] = false;
+		return;
+	}
 	float v = velocity[r][p];
 	bool played = false;
 	if (v > 0.f) {
@@ -130,15 +144,17 @@ void WaveArtifactSequencer::tickRow(int r) {
 			// for the whole group). It does not start a new note, and keeps the group's velocity and locks.
 			if (groupPlaying[r]) {
 				lastStep[r] = wa::mergeTied(lastStep[r], s);
+				wa::applyLockConditions(lastStep[r], s, std::max(pass[r], 0L), [this]() { return random01(); });
 				lastLegato[r] = true;
 				fires[r]++;
 				played = true;
 			}
 		}
 		// A step that does not play also leaves the locks of the one before in place.
-		else if (wa::conditionPasses(s, std::max(pass[r], 0L), fill, random01())) {
+		else if (wa::conditionPasses(s, std::max(pass[r], 0L), random01())) {
 			lastVelocity[r] = v;
 			lastStep[r] = s;
+			wa::applyLockConditions(lastStep[r], s, std::max(pass[r], 0L), [this]() { return random01(); });
 			lastLegato[r] = false;
 			fires[r]++;
 			played = true;
@@ -157,19 +173,28 @@ void WaveArtifactSequencer::process(const ProcessArgs& args) {
 	Module* main = rightExpander.module;
 	bool isLinked = isMainModule(main);
 	linked = isLinked;
-	fill = params[FILL_PARAM].getValue() > 0.5f || inputs[FILL_INPUT].getVoltage() >= 1.f;
-	lights[FILL_LIGHT].setBrightness(fill ? 1.f : 0.f);
 	lights[REC_LIGHT].setBrightness(params[REC_PARAM].getValue() > 0.5f ? 1.f : 0.f);
 	if (!isLinked) {
 		warmUp = WARM_UP_SAMPLES;
 		for (int r = 0; r < ROWS; r++) {
 			gateHigh[r] = false;
+			rowOn[r] = true;
 			outputs[GATE_OUTPUT + r].setVoltage(0.f);
 			outputs[MOD_OUTPUT + r].setVoltage(0.f);
 		}
 		return;
 	}
 	const wa::ToSequencerMessage* in = (const wa::ToSequencerMessage*) rightExpander.consumerMessage;
+	// Rows whose marker is off: silent (their GATE closes, MOD goes to 0)
+	for (int r = 0; r < ROWS; r++) {
+		bool on = in->markerOn[r];
+		if (!on && rowOn[r]) {
+			gateHigh[r] = false;
+			holdOpen[r] = false;
+			groupPlaying[r] = false;
+		}
+		rowOn[r] = on;
+	}
 	// MOD glides move with the clock: the beats since the last sample (none across a jump back or a big leap).
 	{
 		double d = in->beatPos - lastBeatPos;
@@ -230,7 +255,7 @@ void WaveArtifactSequencer::process(const ProcessArgs& args) {
 				gateHigh[r] = false;
 		}
 		outputs[GATE_OUTPUT + r].setVoltage(gateHigh[r] ? 10.f : 0.f);
-		outputs[MOD_OUTPUT + r].setVoltage(10.f * mod[r].value);
+		outputs[MOD_OUTPUT + r].setVoltage(rowOn[r] ? 10.f * params[MOD_LEVEL_PARAM + r].getValue() * mod[r].value : 0.f);
 	}
 	main->leftExpander.requestMessageFlip();
 }
@@ -266,6 +291,21 @@ json_t* WaveArtifactSequencer::dataToJson() {
 					if (d.locked(k))
 						json_object_set_new(locks, wa::LOCK_NAMES[k], json_real(d.value[k]));
 				json_object_set_new(step, "locks", locks);
+				if (d.mask & d.condMask) {
+					json_t* conds = json_object();
+					for (int k = 0; k < wa::NUM_LOCKABLE; k++) {
+						if (!d.locked(k) || !((d.condMask >> k) & 1u))
+							continue;
+						const wa::Condition& c = d.lockCond[k];
+						json_t* cj = json_object();
+						json_object_set_new(cj, "cond", json_integer(c.cond));
+						json_object_set_new(cj, "chance", json_integer(c.chance));
+						json_object_set_new(cj, "a", json_integer(c.a));
+						json_object_set_new(cj, "b", json_integer(c.b));
+						json_object_set_new(conds, wa::LOCK_NAMES[k], cj);
+					}
+					json_object_set_new(step, "lockConds", conds);
+				}
 			}
 			if (d.cond != wa::COND_ALWAYS) {
 				json_object_set_new(step, "cond", json_integer(d.cond));
@@ -284,6 +324,7 @@ json_t* WaveArtifactSequencer::dataToJson() {
 	json_object_set_new(root, "stepData", data);
 	json_object_set_new(root, "laneRow", json_integer(laneRow));
 	json_object_set_new(root, "laneSetting", json_string(wa::LOCK_NAMES[clamp(laneSetting, 0, wa::NUM_LOCKABLE - 1)]));
+	json_object_set_new(root, "laneCondition", json_boolean(laneCondition));
 	return root;
 }
 
@@ -332,9 +373,26 @@ void WaveArtifactSequencer::dataFromJson(json_t* root) {
 						d.setLock(k, (float) json_number_value(value));
 				}
 			}
+			json_t* conds = json_object_get(step, "lockConds");
+			if (conds) {
+				json_object_foreach(conds, key, value) {
+					int k = lockIndexByName(key);
+					if (k < 0 || !json_is_object(value))
+						continue;
+					wa::Condition c;
+					int cv = (int) json_integer_value(json_object_get(value, "cond"));
+					c.cond = (cv >= 0 && cv < wa::NUM_CONDITIONS) ? (uint8_t) cv : (uint8_t) wa::COND_ALWAYS;
+					c.chance = (uint8_t) clamp((int) json_integer_value(json_object_get(value, "chance")), 0, 100);
+					c.b = (uint8_t) clamp((int) json_integer_value(json_object_get(value, "b")), 1, 8);
+					c.a = (uint8_t) clamp((int) json_integer_value(json_object_get(value, "a")), 1, (int) c.b);
+					d.setLockCondition(k, c);
+				}
+			}
 			json_t* cond = json_object_get(step, "cond");
 			if (cond) {
-				d.cond = (uint8_t) clamp((int) json_integer_value(cond), 0, wa::NUM_CONDITIONS - 1);
+				// FILL and NOT FILL (3 and 4, removed) and anything unknown play Always.
+				int c = (int) json_integer_value(cond);
+				d.cond = (c >= 0 && c < wa::NUM_CONDITIONS) ? (uint8_t) c : (uint8_t) wa::COND_ALWAYS;
 				json_t* j;
 				if ((j = json_object_get(step, "chance")))
 					d.chance = (uint8_t) clamp((int) json_integer_value(j), 0, 100);
@@ -358,6 +416,7 @@ void WaveArtifactSequencer::dataFromJson(json_t* root) {
 		if (wa::isLockable(k))
 			laneSetting = k;
 	}
+	laneCondition = json_is_true(json_object_get(root, "laneCondition"));
 }
 
 // Panel: 32 HP. Geometry matches res/waveArtifactSequencer.svg.
@@ -372,6 +431,8 @@ static const float GRID_X1 = 139.8f;
 static const float GATE_X = 144.4f;
 /** MOD output of each row (its steps' velocities as CV), right of GATE in the same box */
 static const float MOD_X = 154.2f;
+/** Each row's MOD level trimpot, under its MOD jack (in the gap before the next row's jack) */
+static const float MOD_LEVEL_DY = 8.4f;
 static const float GATE_LABEL_Y = 14.5f;
 static const float ROW_Y0 = 19.f;
 /** A row's cells; under them, in the gap, the SLIDE strips of the lit trigs (same row pitch as before: 16.6 mm) */
@@ -385,10 +446,6 @@ static const float LANE_LABEL_X = 15.7f;
 /** CLR, left of the lane's name: clears the lane's setting in its row */
 static const float CLR_X0 = 2.4f, CLR_W = 5.2f;
 static const float CLR_Y0 = LANE_Y0 + 2.2f, CLR_H = 5.0f;
-/** FILL button and gate input, under the lane's name */
-static const Vec FILL_BUTTON = Vec(13.5f, 119.6f);
-static const Vec FILL_INPUT = Vec(24.5f, 119.6f);
-static const float FILL_LABEL_Y = 115.4f;
 /** REC (live record) in the top-left corner, under the screw, with its label to the right */
 static const Vec REC_BUTTON = Vec(14.f, 9.6f);
 static const Vec REC_LABEL = Vec(22.f, 10.6f);
@@ -398,13 +455,9 @@ static const Vec RND_BUTTON = Vec(121.5f, 9.6f);
 static const Vec RND_BUTTON_SIZE = Vec(8.f, 4.f);
 static const Vec RND_SLIDER = Vec(138.f, 9.6f);
 static const Vec RND_SLIDER_SIZE = Vec(21.f, 3.6f);
-/** COND: random trig conditions (RND + amount slider) and CLR, in the top bar right of REC. The title moves right
-to make room. */
+/** COND CLR (every trig condition of the lane's row back to Always), in the top bar right of REC */
 static const Vec COND_LABEL = Vec(30.5f, 10.6f);
-static const Vec COND_RND_BUTTON = Vec(38.5f, 9.6f);
-static const Vec COND_SLIDER = Vec(51.f, 9.6f);
-static const Vec COND_SLIDER_SIZE = Vec(13.f, 3.6f);
-static const Vec COND_CLR_BUTTON = Vec(62.f, 9.6f);
+static const Vec COND_CLR_BUTTON = Vec(38.f, 9.6f);
 static const Vec COND_CLR_SIZE = Vec(7.f, 4.f);
 static const float TITLE_X = 84.f;
 /** Accent of the COND controls (warm, apart from the locks' blue) */
@@ -460,7 +513,7 @@ bool WaveArtifactSequencer::randomizeLocks(bool allRows) {
 			if (m->velocity[r][s] <= 0.f)
 				continue;
 			wa::StepData& d = m->stepData[r][s];
-			d.mask = 0;
+			d.clearLocks();
 			for (int k = 0; k < wa::NUM_LOCKABLE; k++) {
 				ParamQuantity* q = main->getParamQuantity(WaveArtifact::MARKER_SETTING_PARAMS[k] + r);
 				if (!wa::isLockable(k) || !q || !q->randomizeEnabled)
@@ -479,25 +532,8 @@ bool WaveArtifactSequencer::randomizeLocks(bool allRows) {
 	return true;
 }
 
-void WaveArtifactSequencer::randomizeConditions(bool allRows) {
-	float amount = clamp(params[COND_RND_AMOUNT_PARAM].getValue(), 0.f, 1.f);
-	for (int r = 0; r < ROWS; r++) {
-		if (!allRows && r != laneRow)
-			continue;
-		for (int s = 0; s < STEPS; s++) {
-			if (velocity[r][s] <= 0.f)
-				continue;
-			wa::StepData& d = stepData[r][s];
-			d.cond = wa::COND_ALWAYS;
-			// amount 1: uniform() < 1 always; amount 0: never. A tied step plays with its group, so it stays Always.
-			if (isTied(r, s) || random::uniform() >= amount)
-				continue;
-			wa::randomCondition(d, random::uniform(), random::uniform(), random::uniform());
-		}
-	}
-}
-
 void WaveArtifactSequencer::clearConditions(bool allRows) {
+	laneCondition = true;
 	for (int r = 0; r < ROWS; r++)
 		for (int s = 0; s < STEPS; s++)
 			if (allRows || r == laneRow)
@@ -577,12 +613,44 @@ static void appendRowMenu(ui::Menu* menu, WaveArtifactSequencer* m, int r) {
 	}));
 	menu->addChild(createMenuItem("Clear locks in this row", "", [=]() {
 		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
-			m->stepData[r][s].mask = 0;
+			m->stepData[r][s].clearLocks();
 	}));
 	menu->addChild(createMenuItem("Clear row", "", [=]() { m->clearRow(r); }));
 	menu->addChild(new MenuSeparator);
 	menu->addChild(createMenuItem("Clear all", "", [=]() { m->clearAll(); }));
 	menu->addChild(createMenuItem("Default pattern", "", [=]() { m->loadDefault(); }));
+}
+
+/** Condition choices: Always, a chance, or A:B, read and written through get / set (a trig's condition, or a lock's) */
+static void appendConditionItems(ui::Menu* sub, std::function<wa::Condition()> get, std::function<void(wa::Condition)> set) {
+	sub->addChild(createCheckMenuItem("Always", "", [=]() { return get().cond == wa::COND_ALWAYS; }, [=]() { set(wa::Condition()); }));
+	sub->addChild(new MenuSeparator);
+	for (int pct : wa::CHANCES)
+		sub->addChild(createCheckMenuItem(string::f("%d%% chance", pct), "",
+			[=]() { wa::Condition c = get(); return c.cond == wa::COND_CHANCE && c.chance == pct; },
+			[=]() { wa::Condition c; c.cond = wa::COND_CHANCE; c.chance = (uint8_t) pct; set(c); }));
+	sub->addChild(new MenuSeparator);
+	sub->addChild(createMenuLabel("A:B - pass A of every B passes of the row"));
+	for (int b = 2; b <= 8; b++) {
+		sub->addChild(createSubmenuItem(string::f("every %d passes", b), "", [=](ui::Menu* sub2) {
+			for (int a = 1; a <= b; a++)
+				sub2->addChild(createCheckMenuItem(string::f("%d:%d", a, b), "",
+					[=]() { wa::Condition c = get(); return c.cond == wa::COND_RATIO && c.a == a && c.b == b; },
+					[=]() { wa::Condition c; c.cond = wa::COND_RATIO; c.a = (uint8_t) a; c.b = (uint8_t) b; set(c); }));
+		}));
+	}
+}
+
+/** A trig's condition: whether it plays (the trig's menu and the lane's CONDITION view) */
+static void appendTrigConditionItems(ui::Menu* sub, WaveArtifactSequencer* m, int r, int s) {
+	wa::StepData* d = &m->stepData[r][s];
+	appendConditionItems(sub, [=]() { return d->trigCondition(); }, [=](wa::Condition c) { d->setTrigCondition(c); });
+}
+
+void appendLockConditionItems(ui::Menu* sub, WaveArtifactSequencer* m, int r, int s, int k) {
+	wa::StepData* d = &m->stepData[r][s];
+	sub->addChild(createMenuLabel("When it fails, the trig plays the knob for this setting"));
+	appendConditionItems(sub, [=]() { return d->lockCondition(k); }, [=](wa::Condition c) { d->setLockCondition(k, c); });
 }
 
 /** The step's own menu: its condition, slide, locks; the row's items in a submenu */
@@ -592,24 +660,8 @@ static void openStepMenu(WaveArtifactSequencer* m, int r, int s) {
 	wa::StepData* d = &m->stepData[r][s];
 	char text[16];
 	wa::conditionText(*d, text, sizeof(text));
-	menu->addChild(createSubmenuItem("Condition", d->cond == wa::COND_ALWAYS ? "always" : text, [=](ui::Menu* sub) {
-		sub->addChild(createCheckMenuItem("Always", "", [=]() { return d->cond == wa::COND_ALWAYS; }, [=]() { d->cond = wa::COND_ALWAYS; }));
-		sub->addChild(new MenuSeparator);
-		for (int c : wa::CHANCES)
-			sub->addChild(createCheckMenuItem(string::f("%d%% chance", c), "", [=]() { return d->cond == wa::COND_CHANCE && d->chance == c; },
-				[=]() { d->cond = wa::COND_CHANCE; d->chance = (uint8_t) c; }));
-		sub->addChild(new MenuSeparator);
-		sub->addChild(createMenuLabel("A:B - pass A of every B passes of the row"));
-		for (int b = 2; b <= 8; b++) {
-			sub->addChild(createSubmenuItem(string::f("every %d passes", b), "", [=](ui::Menu* sub2) {
-				for (int a = 1; a <= b; a++)
-					sub2->addChild(createCheckMenuItem(string::f("%d:%d", a, b), "", [=]() { return d->cond == wa::COND_RATIO && d->a == a && d->b == b; },
-						[=]() { d->cond = wa::COND_RATIO; d->a = (uint8_t) a; d->b = (uint8_t) b; }));
-			}));
-		}
-		sub->addChild(new MenuSeparator);
-		sub->addChild(createCheckMenuItem("FILL (only while FILL is on)", "", [=]() { return d->cond == wa::COND_FILL; }, [=]() { d->cond = wa::COND_FILL; }));
-		sub->addChild(createCheckMenuItem("NOT FILL (only while FILL is off)", "", [=]() { return d->cond == wa::COND_NOT_FILL; }, [=]() { d->cond = wa::COND_NOT_FILL; }));
+	menu->addChild(createSubmenuItem("Condition (also in the lane: CONDITION)", d->cond == wa::COND_ALWAYS ? "always" : text, [=](ui::Menu* sub) {
+		appendTrigConditionItems(sub, m, r, s);
 	}));
 	menu->addChild(createSubmenuItem("Slide (glide to this step's values)", d->slide > 0.f ? string::f("%d%%", (int) std::round(d->slide * 100.f)) : "off",
 		[=](ui::Menu* sub) {
@@ -623,7 +675,7 @@ static void openStepMenu(WaveArtifactSequencer* m, int r, int s) {
 	int locks = 0;
 	for (int k = 0; k < wa::NUM_LOCKABLE; k++)
 		locks += d->locked(k) ? 1 : 0;
-	menu->addChild(createMenuItem("Clear locks on this step", string::f("%d", locks), [=]() { d->mask = 0; }));
+	menu->addChild(createMenuItem("Clear locks on this step", string::f("%d", locks), [=]() { d->clearLocks(); }));
 	menu->addChild(createMenuItem("Delete step", "", [=]() { m->deleteStep(r, s); }));
 	menu->addChild(new MenuSeparator);
 	menu->addChild(createSubmenuItem(string::f("Row %d", r + 1), "", [=](ui::Menu* sub) { appendRowMenu(sub, m, r); }));
@@ -978,6 +1030,10 @@ struct StepGrid : widget::OpaqueWidget {
 		float cw = seqlayout::cellW();
 		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
 		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
+			// A row whose marker is off plays nothing: drawn dimmed (its steps can still be edited)
+			nvgSave(vg);
+			if (module && !module->rowOn[r].load(std::memory_order_relaxed))
+				nvgGlobalAlpha(vg, 0.3f);
 			NVGcolor col = layout::MARKER_COLORS[r];
 			float top = seqlayout::rowTop(r);
 			int len = module ? module->length[r] : 16;
@@ -1122,13 +1178,17 @@ struct StepGrid : widget::OpaqueWidget {
 				nvgLineCap(vg, NVG_ROUND);
 				nvgStroke(vg);
 			}
+			nvgRestore(vg);
 		}
 	}
 };
 
 /** The lock lane: one setting of one row, a bar per step (the steps that are on). Drag to draw the step's lock at the
 mouse height, click a locked bar to remove its lock, Shift + drag to remove the locks you pass. Unlocked steps show the
-knob's value as a faint line. Click the name on the left to pick the setting. The row follows the selected step. */
+knob's value as a faint line. Click the name on the left to pick the setting. The row follows the selected step.
+Its CONDITION view shows the row's trig conditions instead: drag draws chances (5 % steps, the top = Always), a click on
+a trig with a condition sets it back to Always, Shift + drag erases, right-click a trig for every condition (A:B too).
+Tied trigs follow their group's first trig, so they are left alone. */
 struct LockLane : widget::OpaqueWidget {
 	WaveArtifactSequencer* module = nullptr;
 	int dragCol = -1;
@@ -1165,7 +1225,9 @@ struct LockLane : widget::OpaqueWidget {
 	void openSettingMenu() {
 		WaveArtifactSequencer* m = module;
 		ui::Menu* menu = createMenu();
-		menu->addChild(createMenuLabel("Lane: the setting to draw"));
+		menu->addChild(createMenuLabel("Lane: what to draw"));
+		menu->addChild(createCheckMenuItem("CONDITION (trig chances, A:B)", "", [=]() { return m->laneCondition; }, [=]() { m->laneCondition = true; }));
+		menu->addChild(new MenuSeparator);
 		struct Group {
 			const char* name;
 			int from, to;
@@ -1179,7 +1241,7 @@ struct LockLane : widget::OpaqueWidget {
 			menu->addChild(createSubmenuItem(GROUP_NAMES[g], "", [=](ui::Menu* sub) {
 				for (int k = from; k <= to; k++) {
 					if (wa::isLockable(k))
-						sub->addChild(createCheckMenuItem(wa::LOCK_LABELS[k], "", [=]() { return m->laneSetting == k; }, [=]() { m->laneSetting = k; }));
+						sub->addChild(createCheckMenuItem(wa::LOCK_LABELS[k], "", [=]() { return !m->laneCondition && m->laneSetting == k; }, [=]() { m->showLock(k); }));
 				}
 			}));
 		}
@@ -1187,6 +1249,25 @@ struct LockLane : widget::OpaqueWidget {
 
 	void setLock(int s, float v) {
 		module->stepData[module->laneRow][s].setLock(clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1), v);
+	}
+
+	/** CONDITION view: the step can take a condition (lit, and not tied: a tied trig follows its group) */
+	bool conditionStep(int s) {
+		int row = module->laneRow;
+		return s >= 0 && s < WaveArtifactSequencer::STEPS && module->velocity[row][s] > 0.f && !module->isTied(row, s);
+	}
+	/** CONDITION view: a chance from the mouse height, in 5 % steps; the top is Always */
+	void setChance(int s, float yPx) {
+		float t = clamp(1.f - (yPx / SVG_DPI * MM_PER_IN) / seqlayout::LANE_H, 0.f, 1.f);
+		int pct = clamp((int) std::round(t * 20.f) * 5, 5, 100);
+		wa::StepData& d = module->stepData[module->laneRow][s];
+		if (pct >= 100) {
+			d.cond = wa::COND_ALWAYS;
+		}
+		else {
+			d.cond = wa::COND_CHANCE;
+			d.chance = (uint8_t) pct;
+		}
 	}
 
 	void onButton(const ButtonEvent& e) override {
@@ -1200,9 +1281,15 @@ struct LockLane : widget::OpaqueWidget {
 				int row = clamp(module->laneRow, 0, WaveArtifactSequencer::ROWS - 1);
 				int k = clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1);
 				bool all = (e.mods & RACK_MOD_MASK) == GLFW_MOD_SHIFT;
+				// CONDITION view: the row's conditions back to Always (Shift: every row's)
+				if (module->laneCondition) {
+					module->clearConditions(all);
+					e.consume(this);
+					return;
+				}
 				for (int s = 0; s < WaveArtifactSequencer::STEPS; s++) {
 					if (all)
-						module->stepData[row][s].mask = 0;
+						module->stepData[row][s].clearLocks();
 					else
 						module->stepData[row][s].clearLock(k);
 				}
@@ -1213,6 +1300,61 @@ struct LockLane : widget::OpaqueWidget {
 		if (x < seqlayout::GRID_X0) {
 			if (e.button == GLFW_MOUSE_BUTTON_LEFT || e.button == GLFW_MOUSE_BUTTON_RIGHT)
 				openSettingMenu();
+			e.consume(this);
+			return;
+		}
+		if (module->laneCondition) {
+			int s = colAt(e.pos.x + box.pos.x);
+			if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
+				if (conditionStep(s)) {
+					int row = module->laneRow;
+					selectStep(module, row, s);
+					ui::Menu* menu = createMenu();
+					menu->addChild(createMenuLabel(string::f("Marker %d, step %d: condition", row + 1, s + 1)));
+					appendTrigConditionItems(menu, module, row, s);
+					e.consume(this);
+				}
+				return;
+			}
+			if (e.button != GLFW_MOUSE_BUTTON_LEFT)
+				return;
+			e.consume(this);
+			if (!conditionStep(s)) {
+				dragCol = -1;
+				return;
+			}
+			wa::StepData& d = module->stepData[module->laneRow][s];
+			dragCol = s;
+			pressY = e.pos.y;
+			moved = false;
+			erasing = (e.mods & RACK_MOD_MASK) == GLFW_MOD_SHIFT;
+			wasLocked = d.cond != wa::COND_ALWAYS;
+			selectStep(module, module->laneRow, s);
+			if (erasing)
+				d.cond = wa::COND_ALWAYS;
+			else if (!wasLocked)
+				setChance(s, e.pos.y);
+			return;
+		}
+		// Right-click a lit trig: the condition of its lock of the lane's setting
+		if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
+			int s = colAt(e.pos.x + box.pos.x);
+			int row = module->laneRow;
+			if (s < 0 || s >= WaveArtifactSequencer::STEPS || module->velocity[row][s] <= 0.f)
+				return;
+			int k = clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1);
+			selectStep(module, row, s);
+			ui::Menu* menu = createMenu();
+			menu->addChild(createMenuLabel(string::f("Marker %d, step %d: %s lock", row + 1, s + 1, wa::LOCK_LABELS[k])));
+			if (module->stepData[row][s].locked(k)) {
+				appendLockConditionItems(menu, module, row, s, k);
+				menu->addChild(new MenuSeparator);
+				WaveArtifactSequencer* m = module;
+				menu->addChild(createMenuItem("Remove this lock", "", [=]() { m->stepData[row][s].clearLock(k); }));
+			}
+			else {
+				menu->addChild(createMenuLabel("Not locked: draw a lock first, then give it a condition here"));
+			}
 			e.consume(this);
 			return;
 		}
@@ -1241,6 +1383,29 @@ struct LockLane : widget::OpaqueWidget {
 	void onDragMove(const DragMoveEvent& e) override {
 		if (!module || dragCol < 0 || e.button != GLFW_MOUSE_BUTTON_LEFT)
 			return;
+		if (module->laneCondition) {
+			Vec local = mouseOverride ? mouseAt : APP->scene->getMousePos().minus(getAbsoluteOffset(Vec(0, 0))).div(getAbsoluteZoom());
+			if (std::fabs(local.y - pressY) > 2.f)
+				moved = true;
+			int col = clamp(colAt(local.x + box.pos.x), 0, WaveArtifactSequencer::STEPS - 1);
+			int dir = (col > dragCol) ? 1 : -1;
+			auto touch = [&](int s) {
+				if (!conditionStep(s))
+					return;
+				if (erasing)
+					module->stepData[module->laneRow][s].cond = wa::COND_ALWAYS;
+				else
+					setChance(s, local.y);
+			};
+			while (dragCol != col) {
+				dragCol += dir;
+				moved = true;
+				touch(dragCol);
+			}
+			if (moved)
+				touch(dragCol);
+			return;
+		}
 		ParamQuantity* q = quantity();
 		if (!q)
 			return;
@@ -1269,10 +1434,76 @@ struct LockLane : widget::OpaqueWidget {
 
 	void onDragEnd(const DragEndEvent& e) override {
 		// A click on a bar that was locked, without a drag: the step plays the knob again.
-		if (module && dragCol >= 0 && wasLocked && !moved && !erasing)
-			module->stepData[module->laneRow][dragCol].clearLock(clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1));
+		if (module && dragCol >= 0 && wasLocked && !moved && !erasing) {
+			if (module->laneCondition)
+				module->stepData[module->laneRow][dragCol].cond = wa::COND_ALWAYS;
+			else
+				module->stepData[module->laneRow][dragCol].clearLock(clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1));
+		}
 		dragCol = -1;
 		erasing = false;
+	}
+
+	/** A short text in the middle of a cell, on a dark backing (it reads over a bar and an empty cell alike) */
+	void drawTag(NVGcontext* vg, std::shared_ptr<window::Font> font, const char* text, float x, float w, float h, NVGcolor color) {
+		nvgFontFaceId(vg, font->handle);
+		nvgFontSize(vg, 6.5f);
+		float bounds[4];
+		nvgTextBounds(vg, 0.f, 0.f, text, NULL, bounds);
+		float tw = bounds[2] - bounds[0] + 2.f, th = 7.f;
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, x + (w - tw) / 2.f, (h - th) / 2.f, tw, th, 1.5f);
+		nvgFillColor(vg, nvgRGBA(0x16, 0x18, 0x22, 0xc8));
+		nvgFill(vg);
+		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFillColor(vg, color);
+		nvgText(vg, x + w / 2.f, h / 2.f + 0.3f, text, NULL);
+	}
+
+	/** CONDITION view, one lit trig: a chance as a bar from the bottom (its height the chance) with its %, A:B as an outline
+	with its text, Always as a faint line at the top; a tied trig (it follows its group) as a dash. The selected trig is
+	framed. */
+	void drawCondition(NVGcontext* vg, std::shared_ptr<window::Font> font, int row, int s, float x, float w, float h) {
+		const wa::StepData& d = module->stepData[row][s];
+		NVGcolor cc = seqlayout::COND_COLOR;
+		if (module->isTied(row, s)) {
+			nvgBeginPath(vg);
+			nvgRect(vg, x + w * 0.3f, h * 0.5f - 0.5f, w * 0.4f, 1.f);
+			nvgFillColor(vg, nvgRGBAf(0.6f, 0.62f, 0.66f, 0.8f));
+			nvgFill(vg);
+			return;
+		}
+		if (d.cond == wa::COND_CHANCE) {
+			float bh = h * clamp(d.chance / 100.f, 0.f, 1.f);
+			nvgBeginPath(vg);
+			nvgRoundedRect(vg, x, h - bh, w, std::max(bh, 1.f), 1.f);
+			nvgFillColor(vg, cc);
+			nvgFill(vg);
+		}
+		else if (d.cond == wa::COND_RATIO) {
+			nvgBeginPath(vg);
+			nvgRoundedRect(vg, x + 0.6f, 0.6f, w - 1.2f, h - 1.2f, 1.f);
+			nvgStrokeColor(vg, cc);
+			nvgStrokeWidth(vg, 1.2f);
+			nvgStroke(vg);
+		}
+		else {
+			nvgBeginPath(vg);
+			nvgRect(vg, x + 1.f, 0.4f, w - 2.f, 1.2f);
+			nvgFillColor(vg, nvgRGBAf(0.6f, 0.62f, 0.66f, 0.8f));
+			nvgFill(vg);
+		}
+		char text[16];
+		wa::conditionText(d, text, sizeof(text));
+		if (text[0] && font)
+			drawTag(vg, font, text, x, w, h, nvgRGB(0xff, 0xff, 0xff));
+		if (module->selRow == row && module->selStep == s) {
+			nvgBeginPath(vg);
+			nvgRoundedRect(vg, x - 0.8f, -0.8f, w + 1.6f, h + 1.6f, 1.6f);
+			nvgStrokeColor(vg, nvgRGB(0x8f, 0xb8, 0xff));
+			nvgStrokeWidth(vg, 1.6f);
+			nvgStroke(vg);
+		}
 	}
 
 	void draw(const DrawArgs& args) override {
@@ -1281,6 +1512,7 @@ struct LockLane : widget::OpaqueWidget {
 		bool dark = settings::preferDarkPanels;
 		int row = module ? clamp(module->laneRow, 0, WaveArtifactSequencer::ROWS - 1) : 1;
 		int k = module ? clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1) : 9;
+		bool condView = module && module->laneCondition;
 		NVGcolor col = layout::MARKER_COLORS[row];
 		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
 		// The lane's name: the row (in its color) and the setting, with a menu arrow
@@ -1294,13 +1526,13 @@ struct LockLane : widget::OpaqueWidget {
 			nvgFillColor(vg, dark ? nvgRGB(0xe6, 0xe8, 0xee) : nvgRGB(0x22, 0x24, 0x2c));
 			// Sized for the longest name ("WAVE / START") in the space left of the steps
 			nvgFontSize(vg, 6.4f);
-			nvgText(vg, lx, 4.6f * mm, (std::string(wa::LOCK_LABELS[k]) + " \xe2\x96\xbe").c_str(), NULL);
+			nvgText(vg, lx, 4.6f * mm, (std::string(condView ? "CONDITION" : wa::LOCK_LABELS[k]) + " \xe2\x96\xbe").c_str(), NULL);
 		}
 		// CLR button: lit while the row has locks of the lane's setting (dim when there is nothing to clear)
 		{
 			bool any = false;
 			for (int s = 0; module && s < WaveArtifactSequencer::STEPS; s++)
-				any = any || module->stepData[row][s].locked(k);
+				any = any || (condView ? module->stepData[row][s].cond != wa::COND_ALWAYS : module->stepData[row][s].locked(k));
 			float bx = (seqlayout::CLR_X0 - box.pos.x / mm) * mm, by = (seqlayout::CLR_Y0 - seqlayout::LANE_Y0) * mm;
 			float bw = seqlayout::CLR_W * mm, bh = seqlayout::CLR_H * mm;
 			nvgBeginPath(vg);
@@ -1330,6 +1562,10 @@ struct LockLane : widget::OpaqueWidget {
 			nvgRoundedRect(vg, x, 0.f, w, h, 1.2f);
 			nvgFillColor(vg, dark ? (on ? nvgRGB(0x34, 0x38, 0x42) : nvgRGB(0x24, 0x27, 0x2e)) : (on ? nvgRGB(0xc4, 0xc1, 0xb9) : nvgRGB(0xd8, 0xd5, 0xce)));
 			nvgFill(vg);
+			if (on && condView) {
+				drawCondition(vg, font, row, s, x, w, h);
+				continue;
+			}
 			if (!on || hi <= lo)
 				continue;
 			const wa::StepData* d = module ? &module->stepData[row][s] : nullptr;
@@ -1343,6 +1579,11 @@ struct LockLane : widget::OpaqueWidget {
 				nvgRoundedRect(vg, x, y0, w, std::max(y1 - y0, 1.f), 1.f);
 				nvgFillColor(vg, col);
 				nvgFill(vg);
+				// Its own condition: the text in the COND color, on a dark backing in the middle of the cell
+				char text[16];
+				wa::conditionText(d->lockCondition(k), text, sizeof(text));
+				if (text[0] && font)
+					drawTag(vg, font, text, x, w, h, seqlayout::COND_COLOR);
 			}
 			else {
 				// Not locked: the knob's own value, faint
@@ -1371,13 +1612,13 @@ struct LockLane : widget::OpaqueWidget {
 				nvgStroke(vg);
 			}
 		}
-		if (bipolar) {
+		if (bipolar && !condView) {
 			nvgBeginPath(vg);
 			nvgRect(vg, (seqlayout::GRID_X0 - box.pos.x / mm) * mm, h * 0.5f - 0.3f, (seqlayout::GRID_X1 - seqlayout::GRID_X0) * mm, 0.6f);
 			nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, 0.25f));
 			nvgFill(vg);
 		}
-		if (module && !q && font) {
+		if (module && !q && font && !condView) {
 			nvgFontFaceId(vg, font->handle);
 			nvgFontSize(vg, 7.f);
 			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
@@ -1445,7 +1686,7 @@ struct StepRowLabels : widget::TransparentWidget {
 	}
 };
 
-/** A panel action button (RND, COND RND, COND CLR): lit while held; the press runs the action, undoable (Shift:
+/** A panel action button (RND, COND CLR): lit while held; the press runs the action, undoable (Shift:
 every row). */
 struct ActionButton : MomentaryLitButton {
 	std::string undoName;
@@ -1490,7 +1731,7 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		labels->add(Vec(TITLE_X, 6.f), "wA SEQUENCER", 9.f);
 		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
 			labels->add(Vec(GRID_X0 + (s + 0.5f) * cellW(), slideTop(WaveArtifactSequencer::ROWS - 1) + SLIDE_H + 1.9f), string::f("%d", s + 1), 5.f);
-		// Help between the FILL jack and the panel's right edge
+		// Help, bottom
 		const float helpX = 89.f;
 		labels->add(Vec(helpX, 117.6f), "drag: draw (height = velocity)  click: select  double-click: delete  Shift+drag: erase  strip under a trig: slide", 5.5f);
 		labels->add(Vec(helpX, 121.1f), "selected step: turn the marker's knobs to lock  Ctrl+click: row end  + between trigs: tie (long gate)  right-click: step", 5.5f);
@@ -1499,7 +1740,6 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		labels->add(Vec(BADGE_X, 14.5f), "LEN", 5.f);
 		labels->add(Vec(GATE_X, GATE_LABEL_Y), "GATE", 5.f, true);
 		labels->add(Vec(MOD_X, GATE_LABEL_Y), "MOD", 5.f, true);
-		labels->add(Vec((FILL_BUTTON.x + FILL_INPUT.x) / 2.f, FILL_LABEL_Y), "FILL", 5.f);
 		labels->add(REC_LABEL, "REC", 6.f);
 		labels->add(RND_LABEL, "LOCKS", 6.f);
 		labels->add(COND_LABEL, "COND", 6.f);
@@ -1524,8 +1764,6 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		// The row clock knobs go on top of the grid, which covers the whole panel.
 		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
 			addParam(createParamCentered<Trimpot>(mm2px(Vec(CLOCK_KNOB_X, rowTop(r) + 4.8f)), module, WaveArtifactSequencer::CLOCK_MULT_PARAM + r));
-		addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<WhiteLight>>>(mm2px(FILL_BUTTON), module, WaveArtifactSequencer::FILL_PARAM, WaveArtifactSequencer::FILL_LIGHT));
-		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(FILL_INPUT), module, WaveArtifactSequencer::FILL_INPUT));
 		addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<RedLight>>>(mm2px(REC_BUTTON), module, WaveArtifactSequencer::REC_PARAM, WaveArtifactSequencer::REC_LIGHT));
 		addParam(createActionButton(RND_BUTTON, module, WaveArtifactSequencer::RND_PARAM, "RND", layout::SCREEN_TEXT, RND_BUTTON_SIZE, "random locks",
 			[](WaveArtifactSequencer* m, bool all) { return m->randomizeLocks(all); }));
@@ -1537,9 +1775,6 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 			addParam(slider);
 		};
 		addSlider(RND_SLIDER, RND_SLIDER_SIZE, WaveArtifactSequencer::RND_AMOUNT_PARAM, layout::SCREEN_TEXT);
-		addParam(createActionButton(COND_RND_BUTTON, module, WaveArtifactSequencer::COND_RND_PARAM, "RND", COND_COLOR, RND_BUTTON_SIZE, "random conditions",
-			[](WaveArtifactSequencer* m, bool all) { m->randomizeConditions(all); return true; }));
-		addSlider(COND_SLIDER, COND_SLIDER_SIZE, WaveArtifactSequencer::COND_RND_AMOUNT_PARAM, COND_COLOR);
 		addParam(createActionButton(COND_CLR_BUTTON, module, WaveArtifactSequencer::COND_CLR_PARAM, "CLR", COND_COLOR, COND_CLR_SIZE, "reset conditions",
 			[](WaveArtifactSequencer* m, bool all) { m->clearConditions(all); return true; }));
 		// Row GATE outputs, on top of the grid like the knobs
@@ -1547,6 +1782,8 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(GATE_X, rowTop(r) + ROW_H / 2.f)), module, WaveArtifactSequencer::GATE_OUTPUT + r));
 		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
 			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(MOD_X, rowTop(r) + ROW_H / 2.f)), module, WaveArtifactSequencer::MOD_OUTPUT + r));
+		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
+			addParam(createParamCentered<Trimpot>(mm2px(Vec(MOD_X, rowTop(r) + ROW_H / 2.f + MOD_LEVEL_DY)), module, WaveArtifactSequencer::MOD_LEVEL_PARAM + r));
 	}
 
 	void step() override {
@@ -1645,7 +1882,7 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Clear all locks", "", [=]() {
 			for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
 				for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
-					m->stepData[r][s].mask = 0;
+					m->stepData[r][s].clearLocks();
 		}));
 		menu->addChild(createMenuItem("Default pattern", "", [=]() { m->loadDefault(); }));
 	}

@@ -116,16 +116,30 @@ struct Svf {
 	ones compress and gain odd harmonics instead of ringing without bound. 0 = ideal (clean). */
 	float process(float x, float fc, float q, float sampleRate, const float mix[NUM_MIX], float stateLimit = 0.f) {
 		fc = std::min(std::max(fc, 5.f), 0.45f * sampleRate);
-		float k = 1.f / q;
 		// Notch share: its core runs at the notch's own (wider) Q. Blending the damping by the share
 		// keeps a mode crossfade smooth; with no notch in the mix, nothing changes.
 		float wNotch = mix[4];
-		float res = 0.f;
-		if (wNotch > 0.f) {
-			res = resFromQ(q);
-			float qNotch = NOTCH_Q_MIN * std::pow(NOTCH_Q_MAX / NOTCH_Q_MIN, res);
-			k += wNotch * (1.f / qNotch - k);
+		// The coefficients only change with the cutoff, Q, notch share and rate (which glide, then settle): worked
+		// out again only then, with the same arithmetic.
+		if (fc != cFc || q != cQ || wNotch != cNotch || sampleRate != cRate) {
+			cFc = fc;
+			cQ = q;
+			cNotch = wNotch;
+			cRate = sampleRate;
+			float k = 1.f / q;
+			float res = 0.f;
+			if (wNotch > 0.f) {
+				res = resFromQ(q);
+				float qNotch = NOTCH_Q_MIN * std::pow(NOTCH_Q_MAX / NOTCH_Q_MIN, res);
+				k += wNotch * (1.f / qNotch - k);
+			}
+			cK = k;
+			cRes = res;
+			cG = std::tan(3.141592654f * fc / sampleRate);
+			cBpGain = std::sqrt(q / FILTER_Q_MIN);
 		}
+		float k = cK;
+		float res = cRes;
 		// Resonant shoulders, in series BEFORE the notch core: the core's zero at the cutoff then
 		// removes the shoulders' own output there too, so the dip stays infinitely deep. They grow
 		// with RES (none at 0), move in towards the cutoff and sharpen. Only the notch share hears
@@ -149,7 +163,8 @@ struct Svf {
 			resetEdges();
 		}
 
-		float g = std::tan(3.141592654f * fc / sampleRate);
+		// From the cached tan, as they always were (only tan and sqrt are the costly part)
+		float g = cG;
 		float a1 = 1.f / (1.f + g * (g + k));
 		float a2 = g * a1;
 		float a3 = g * a2;
@@ -166,9 +181,32 @@ struct Svf {
 		float bp = k * v1; // unity gain at the center
 		float hp = u - bp - lp;
 		lastBp = bp;
-		float bpGain = std::sqrt(q / FILTER_Q_MIN);
-		return mix[0] * x + mix[1] * lp + mix[3] * hp + mix[2] * bp * bpGain + mix[4] * (u - bp);
+		return mix[0] * x + mix[1] * lp + mix[3] * hp + mix[2] * bp * cBpGain + mix[4] * (u - bp);
 	}
+
+private:
+	/** The coefficients as last worked out, and what they were worked out for */
+	float cFc = -1.f, cQ = -1.f, cNotch = -1.f, cRate = -1.f;
+	float cK = 1.f, cRes = 0.f, cG = 0.f, cBpGain = 1.f;
+};
+
+/** CUTOFF and RES as Hz and Q (filterHz, filterQ), worked out again only when they change (they glide, then settle) */
+struct FilterParams {
+	float get(float cutoff, float res, float* q) {
+		if (cutoff != lastCutoff) {
+			lastCutoff = cutoff;
+			hz = filterHz(cutoff);
+		}
+		if (res != lastRes) {
+			lastRes = res;
+			qValue = filterQ(res);
+		}
+		*q = qValue;
+		return hz;
+	}
+
+private:
+	float lastCutoff = -1.f, lastRes = -1.f, hz = 20.f, qValue = FILTER_Q_MIN;
 };
 
 /** 63-tap halfband low-pass (Blackman-windowed sinc) at the 2x rate, for 2x oversampling. */

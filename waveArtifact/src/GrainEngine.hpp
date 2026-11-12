@@ -56,8 +56,9 @@
 // live pitch change that still reaches an end fades out there); clouds fade in and out with their weight
 // (5 ms); a bank swap or STOP fades everything out first (5 ms) and clears the grains while silent.
 //
-// The Smear window turns a cloud into a continuous sound: grains last at least SMEAR_OVERLAP grain intervals
-// (SIZE becomes a minimum), each one starts where it best matches the grain it fades in over, and the cloud's
+// The Smear window turns a cloud into a continuous sound: SIZE sets how much of the sample each grain plays (at least
+// SMEAR_MIN_SECONDS) and grains fire often enough for SMEAR_OVERLAP of them to overlap (DENSITY only counts above
+// that rate, so a low DENSITY cannot turn the cloud into playback of the sample), each one starts where it best matches the grain it fades in over, and the cloud's
 // bus runs through a short allpass diffuser that spreads the attacks repeated by every grain.
 
 namespace wa {
@@ -353,6 +354,8 @@ struct GrainInput {
 	/** Random scatter repeats every loop cycle while synced */
 	bool seeded = true;
 	bool holdSilent = false;
+	/** Measuring output (tests): each cloud's own output for getDirect. The module never sets it, so it costs nothing
+	there. */
 	bool wantDirect[NUM_MARKERS] = {};
 	/** SEND / RETURN (an expander's jacks): the marker's filter is replaced by the returned signal (engine units, retR = retL when mono) */
 	bool insert[NUM_MARKERS] = {};
@@ -503,11 +506,6 @@ public:
 		return keepLengthSeconds(size, rate);
 	}
 
-	/** Grain window RMS^2, used for level compensation (tests) */
-	float getWindowMeanSquare(int shape) const {
-		return meanSquare[std::min(std::max(shape, 0), NUM_GRAIN_WINDOWS - 1)];
-	}
-
 	float getLimiterGain() const {
 		return limiter.getGain();
 	}
@@ -522,11 +520,6 @@ public:
 	void getSend(int m, float* l, float* r) const {
 		*l = sendL[m];
 		*r = sendR[m];
-	}
-
-	/** The marker's level for the ENV output, 0..1: its ADSR in POLY, its position share in MORPH */
-	float getLevel(int m) const {
-		return heard[m];
 	}
 
 	void process(const GrainInput& in, float* outL, float* outR) {
@@ -694,6 +687,15 @@ public:
 					k *= gr.fade * gr.fade * (3.f - 2.f * gr.fade);
 					gr.fade -= gr.fadeOut;
 				}
+				if (gr.fadeIn > 0.f) {
+					float x = gr.fadeInLevel;
+					k *= x * x * (3.f - 2.f * x);
+					gr.fadeInLevel += gr.fadeIn;
+					if (gr.fadeInLevel >= 1.f) {
+						gr.fadeInLevel = 1.f;
+						gr.fadeIn = 0.f;
+					}
+				}
 				bufL[gr.marker] += l * k * gr.gl;
 				bufR[gr.marker] += r * k * gr.gr;
 				gr.pos += gr.inc * c.liveMul;
@@ -741,7 +743,8 @@ public:
 					c.mixS[k] += (mixT[k] - c.mixS[k]) * smoothCoef;
 				c.cutS += (std::min(std::max(M.cutoff, 0.f), 1.f) - c.cutS) * smoothCoef;
 				c.resS += (std::min(std::max(M.res, 0.f), 1.f) - c.resS) * smoothCoef;
-				float fc = filterHz(c.cutS), q = filterQ(c.resS);
+				float q;
+				float fc = c.filterParams.get(c.cutS, c.resS, &q);
 				float xl = bufL[m], xr = bufR[m];
 				if (c.scanLevelTarget < 1.f || c.scanLevel < 1.f) {
 					c.scanLevel += (c.scanLevelTarget - c.scanLevel) * smoothCoef;
@@ -870,6 +873,8 @@ private:
 	static constexpr double FIT_MARGIN = 32.0;
 	/** Smear: grains overlapping at any time. Hann grains sum flat at whole numbers. */
 	static constexpr double SMEAR_OVERLAP = 3.0;
+	/** Smear: the shortest grain (SIZE's low end, 2 ms, would need hundreds of grains a second) */
+	static constexpr double SMEAR_MIN_SECONDS = 0.02;
 	/** Smear: above this grain rate the cloud is noise-like anyway and the search would cost too much */
 	static constexpr double SMEAR_ALIGN_MAX_HZ = 50.0;
 	/** Smear: how far a grain start may move to match the running grain (one period of 50 Hz) */
@@ -894,6 +899,11 @@ private:
 		/** RESTART: a grain of the last note fades out (fadeOut > 0, per sample) under the new note */
 		float fade = 1.f;
 		float fadeOut = 0.f;
+		/** RESTART over a sounding note: the new note's grains fade in (fadeIn > 0, per sample) as the old ones fade
+		out, so the restart is a crossfade. (They start part way through their windows, and without it each would
+		begin with a step: a burst of noise on every trig.) */
+		float fadeInLevel = 1.f;
+		float fadeIn = 0.f;
 	};
 
 	struct Cloud {
@@ -958,6 +968,8 @@ private:
 		float wDelayed = 0.f;
 		/** RETURN: how far the returned sound has replaced the cloud's filter (0..1, 20 ms each way) */
 		float insertS = 0.f;
+		/** CUTOFF / RES as Hz and Q, worked out again only when they move */
+		FilterParams filterParams;
 		int cleanPos = 0;
 		/** Samples the drive has run since it started (heard once past DRIVE_LATENCY) */
 		int drivePrimed = 0;
@@ -1328,10 +1340,21 @@ private:
 			double kept = keepLengthSeconds(size, c.liveMul);
 			return std::min(std::max((int) std::ceil(size / kept - 1e-6), 1), KEEP_MAX_SUBDIVISIONS);
 		};
+		// Smear: SIZE sets the grain, and the grain rate rises (free) or the grid subdivides (synced) to keep
+		// SMEAR_OVERLAP grains overlapping
+		bool smearRate = M.window == GRAIN_SMEAR;
 		if (sync) {
 			float division = SYNC_DIVISIONS[lfoDivision(M.density, M.triplet, M.dotted)].beats;
-			sizeSeconds = grainSizeSyncRatio(M.size) * division * beatSec;
-			float interval = division / (float) keepFactor(sizeSeconds);
+			float ratio = grainSizeSyncRatio(M.size);
+			sizeSeconds = ratio * division * beatSec;
+			int sub = keepFactor(sizeSeconds);
+			if (smearRate && ratio * sub < SMEAR_OVERLAP) {
+				// From the knob alone (not the tempo), so the grid stays put; the grain is rounded to exactly
+				// SMEAR_OVERLAP subdivisions, where Hann grains sum flat
+				sub = (int) std::ceil(SMEAR_OVERLAP / ratio - 1e-6);
+				sizeSeconds = SMEAR_OVERLAP * division * beatSec / sub;
+			}
+			float interval = division / (float) sub;
 			// The epsilon (about 0.001 samples) keeps a position that lands on a grid point up to rounding
 			// from missing it by one sample.
 			double x = beat / interval;
@@ -1361,7 +1384,11 @@ private:
 				c.lastCycle = LONG_MIN;
 			}
 			sizeSeconds = grainSizeFreeSeconds(M.size);
+			if (smearRate)
+				sizeSeconds = std::max(sizeSeconds, SMEAR_MIN_SECONDS);
 			double hz = grainFreeHz(M.density) * keepFactor(sizeSeconds);
+			if (smearRate)
+				hz = std::max(hz, SMEAR_OVERLAP / sizeSeconds);
 			c.gph += hz / sampleRate;
 			if (c.gph >= 1.0) {
 				fire = true;
@@ -1426,9 +1453,7 @@ private:
 		float scatter = std::exp2(rPitch * grainPitchScatterSemitones(M.pitchScatter) / 12.f);
 		float rate = std::min(scatter * c.liveMul, (float) MAX_RATE);
 		int level = rate <= 1.f ? 0 : rate <= 2.f ? 1 : rate <= 4.f ? 2 : 3;
-		bool smear = M.window == GRAIN_SMEAR;
-		if (smear)
-			sizeSeconds = std::max(sizeSeconds, SMEAR_OVERLAP / grainsPerSecond);
+		bool smear = smearRate;
 		int len = (int) std::lround(std::min(std::max(sizeSeconds * sampleRate, (double) MIN_LENGTH), 4.0 * sampleRate));
 		double stepLevel0 = scatter * srcStep; // per output sample, before the live rate
 		double scale = 1.0 / (double) (1 << level);
@@ -1453,11 +1478,16 @@ private:
 		g->marker = m;
 		g->fade = 1.f;
 		g->fadeOut = 0.f;
+		// RESTART over a sounding note: fade in while the last note's grains fade out (fadeCloudGrains, the same time)
+		bool crossfade = restart && !fromSilence;
+		g->fadeInLevel = crossfade ? 0.f : 1.f;
+		g->fadeIn = crossfade ? 1.f / (DECLICK_TIME * sampleRate) : 0.f;
 		g->level = level;
 		g->len = len;
 		g->age = 0;
 		g->window = std::min(std::max(M.window, 0), NUM_GRAIN_WINDOWS - 1);
 		double overlapNow = grainsPerSecond * (len / sampleRate);
+		// A note starts with the cloud a running one would have (all its overlapping grains at once).
 		if (startNote && k == 0 && overlapNow >= 1.0) {
 			grainCount = std::min((int) std::ceil(overlapNow - 1e-6), MAX_NOTE_GRAINS);
 			noteSpacing = (double) len / grainCount;
@@ -1472,9 +1502,11 @@ private:
 		else if (startNote)
 			startAge = (int) (k * noteSpacing);
 		g->age = std::min(startAge, std::max(len - 1, 0));
-		// Smear keeps every grain of the note on one read position, so they add up instead of cancelling.
-		bool readAhead = startNote && overlapNow >= 1.0 && !smear;
-		if (startNote && smear && grainCount > 1)
+		// From silence, Smear keeps every grain of the note on one read position, so they add up instead of cancelling.
+		// Over a sounding note (RESTART) they read on by their age, as in a running cloud: started on one place there, they
+		// added up to a loud, phasey onset over the old note, heard as a burst of noise on every trig.
+		bool readAhead = startNote && overlapNow >= 1.0 && (!smear || crossfade);
+		if (startNote && smear && !crossfade && grainCount > 1)
 			correlation = 1.0;
 		g->inc = (reverse ? -1.0 : 1.0) * stepLevel0 * scale;
 		double span = (double) len * stepLevel0 * c.liveMul; // frames of level 0 the grain covers
