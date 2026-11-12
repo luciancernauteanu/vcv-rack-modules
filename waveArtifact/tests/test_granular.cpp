@@ -655,13 +655,15 @@ static void testSmear() {
 				s += std::sin(2 * PI * hz * h * i / SRC_SR) / h;
 		chord[i] = (float) (0.12 * s);
 	}
-	// Continuous: grains at the settings that leave gaps with any other window.
+	// Continuous: grains at the settings that leave gaps with any other window. (SIZE sets a Smear grain: 378 ms here,
+	// at 8 grains/s. The hits, a 110 ms pulse, keep some of their own rhythm in a grain that short: -4.7 dB, where the
+	// 1.5 s grains Smear made at 2 grains/s before SIZE set the length gave -2.2.)
 	struct Source {
 		const char* name;
 		const std::vector<float>* data;
 		double holesLimit;
 	};
-	const Source sources[] = {{"sine", &sine, 1.0}, {"chord", &chord, 2.0}, {"noise", &noise, 3.0}, {"hits", &hits, 4.0}};
+	const Source sources[] = {{"sine", &sine, 1.0}, {"chord", &chord, 2.0}, {"noise", &noise, 3.0}, {"hits", &hits, 6.0}};
 	double lo = 1e9, hi = 0.0;
 	for (const Source& s : sources) {
 		Render h = renderCloud(*s.data, wa::GRAIN_HANN, nop), r = renderCloud(*s.data, wa::GRAIN_SMEAR, nop);
@@ -1340,7 +1342,46 @@ static void testNoteRestart() {
 		CHECK(jump < 1.5 * typical, "fade step %.3f against %.3f", jump, typical);
 	}
 }
+/** Smear at the lowest DENSITY used to stretch each grain to 3 grain intervals (4 s, capped): a frozen cloud played
+the sample back. SIZE now sets the grain, and the rate rises to keep 3 overlapping. */
+static void testSmearSizeSetsGrain() {
+	std::printf("Smear: SIZE sets the grain, not DENSITY\n");
+	Rig rig(makeBank(noiseSource(15.0)));
+	wa::GrainMarkerInput& m = rig.in.markers[0];
+	m.window = wa::GRAIN_SMEAR;
+	m.sync = false;
+	m.start = 0.6f;
+	m.density = 0.f; // 0.5 grains/s
+	const float sizes[] = {0.f, sizeKnob(0.1f), sizeKnob(0.5f)};
+	const double expect[] = {0.02, 0.1, 0.5}; // seconds (SIZE 0 is 2 ms: Smear's shortest grain is 20 ms)
+	for (int i = 0; i < 3; i++) {
+		m.size = sizes[i];
+		settle(rig, 0.5);
+		uint32_t before = rig.engine->eventCount();
+		double longest = 0.0;
+		long n = (long) SR;
+		for (long k = 0; k < n; k++) {
+			rig.run(1);
+			uint32_t now = rig.engine->eventCount();
+			for (uint32_t e = before; e < now; e++)
+				longest = std::max(longest, (double) rig.engine->events()[e % wa::GrainEngine::NUM_EVENTS].seconds);
+			before = now;
+		}
+		uint32_t perSecond = 0;
+		{
+			uint32_t a = rig.engine->eventCount();
+			rig.run(n);
+			perSecond = rig.engine->eventCount() - a;
+		}
+		double overlap = perSecond * expect[i];
+		std::printf("  SIZE %.0f ms at DENSITY 0: grains of %.0f ms, %u a second (%.1f overlapping; limits +-10 %%, 2.5 .. 4)\n",
+			expect[i] * 1000.0, longest * 1000.0, perSecond, overlap);
+		CHECK(std::fabs(longest / expect[i] - 1.0) < 0.1, "SIZE %.0f ms: grains of %.0f ms", expect[i] * 1000.0, longest * 1000.0);
+		CHECK(overlap > 2.5 && overlap < 4.0, "SIZE %.0f ms: %.1f grains overlap", expect[i] * 1000.0, overlap);
+	}
+}
 int main() {
+	testSmearSizeSetsGrain();
 	testNoteRestart();
 	testSampleBuffer();
 	testLevelFlat();

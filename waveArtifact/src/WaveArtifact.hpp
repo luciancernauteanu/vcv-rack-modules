@@ -14,8 +14,33 @@
 
 struct WaveArtifactSequencer;
 
+/** Lets a param's quantity format a value other than its param's, the way its tooltip shows it (custom quantities
+included): see WaveArtifact::valueText. UI thread only; the param itself is never touched. */
+struct ValueShown {
+	bool showing = false;
+	float shown = 0.f;
+};
+template <class TQ>
+struct ShowsValue : TQ, ValueShown {
+	float getValue() override {
+		return showing ? shown : TQ::getValue();
+	}
+};
+
 struct WaveArtifact : Module {
 	static const int NUM_MARKERS = wa::NUM_MARKERS;
+
+	/** Module::configParam / configSwitch, with a quantity that can also format other values (ShowsValue), so the
+	tooltips can show trig locks in the setting's own units. */
+	template <class TQ = ParamQuantity>
+	TQ* configParam(int paramId, float minValue, float maxValue, float defaultValue, std::string name = "", std::string unit = "",
+		float displayBase = 0.f, float displayMultiplier = 1.f, float displayOffset = 0.f) {
+		return Module::configParam<ShowsValue<TQ>>(paramId, minValue, maxValue, defaultValue, name, unit, displayBase, displayMultiplier, displayOffset);
+	}
+	template <class TQ = SwitchQuantity>
+	TQ* configSwitch(int paramId, float minValue, float maxValue, float defaultValue, std::string name = "", std::vector<std::string> labels = {}) {
+		return Module::configSwitch<ShowsValue<TQ>>(paramId, minValue, maxValue, defaultValue, name, labels);
+	}
 
 	enum ParamId {
 		POSITION_PARAM,
@@ -288,6 +313,44 @@ struct WaveArtifact : Module {
 	wa::Lfo posLfo;
 	/** Each marker's modulation (MarkerMod.hpp): its expander LFO and AD, the LFO's last value (sent to the expanders'
 	LFO jacks), a note that starts the AD on the next sample, and the GATE as last seen (for its edges) */
+	/** A marker's settings as they play (its knobs, or in SEQ the playing step's locks), and what follows from them
+	(times, note values, lengths). The knobs only move at the screen's rate, so these are read every
+	SETTINGS_INTERVAL samples instead of every sample (the module's main CPU saving); a marker whose locks just
+	changed or glide (SLIDE), or a new bank, reads them on that very sample. Audio-rate inputs (expander CV, the
+	LFOs, the AD, velocity) still act on every sample. */
+	struct MarkerSettings {
+		bool active = false, muted = false;
+		float pos = 0.f, wave = 0.f;
+		bool lfoSync = false, lfoTriplets = false, lfoDotted = false;
+		int lfoShape = 0;
+		float lfoRate = 0.f, lfoAmount = 0.f, waveSmooth = 0.f;
+		float gain = 1.f, res = 0.f, pitch = 0.f, cutoff = 1.f, drive = 0.f, fine = 0.f, pan = 0.f;
+		int filterMode = 0;
+		bool modLfoSync = false, modLfoTriplets = false, modLfoDotted = false, adPerc = false;
+		int modLfoShape = 0, modLfoDest = 0, adDest = 0;
+		float modLfoRate = 0.f, modLfoDepth = 0.f, adAttack = 0.f, adDecay = 0.f, adDepth = 0.f;
+		wa::AdsrSettings adsr;
+		// GRAIN / SAMPLE
+		float density = 0.f, size = 0.f, spray = 0.f, loopPoint = 0.f, beatLength = 1.f, pScatter = 0.f, scan = 0.f;
+		float spread = 0.f, scanFade = 0.f, scanLength = -1.f;
+		int window = 0, loopMode = 0, beatMode = 0, direction = 0;
+		bool hitSnap = false, grainSync = false, grainTriplets = false, grainDotted = false, keepSpeed = false, scanPing = false;
+	};
+	static const int SETTINGS_INTERVAL = 32;
+	MarkerSettings settings[NUM_MARKERS];
+	int settingsCountdown = 0;
+	/** The position LFO's SMOOTH time, read with the settings */
+	float posSmoothTime = 0.f;
+	const wa::WavetableBank* settingsBank = nullptr;
+	/** Per marker: the locks it read with, its locks were gliding then, a new step's locks arrived */
+	uint64_t settingsLockMask[NUM_MARKERS] = {};
+	bool settingsGliding[NUM_MARKERS] = {};
+	bool settingsDirty[NUM_MARKERS] = {};
+	void refreshSettings(int i);
+	/** LFOs only run while they are heard: these count down (samples) after the last moment they were, so a fade of
+	their amount in the engine still gets their values */
+	int waveLfoLive[NUM_MARKERS] = {};
+	int modLfoLive[NUM_MARKERS] = {};
 	wa::Lfo modLfos[NUM_MARKERS];
 	wa::ModEnvelope modAds[NUM_MARKERS];
 	float modLfoOut[NUM_MARKERS] = {};
@@ -343,6 +406,26 @@ struct WaveArtifact : Module {
 	void process(const ProcessArgs& args) override;
 	void onSampleRateChange(const SampleRateChangeEvent& e) override;
 	void onReset(const ResetEvent& e) override;
+	/** The loaded WAV goes into the patch (its own storage folder, so the project opens without the original file),
+	with the original path, a checksum, the table count and tone. Loaded again by the UI (loadSavedSample). */
+	json_t* dataToJson() override;
+	void dataFromJson(json_t* root) override;
+	void onSave(const SaveEvent& e) override;
+	/** UI thread, once after a patch or preset is loaded: the patch's copy of its WAV when the checksum matches,
+	else the original file */
+	void loadSavedSample();
+	/** Right-click: L + R on both outputs (saved with the patch), and how far the output has faded to it */
+	std::atomic<bool> monoOutput{false};
+	float monoMix = 0.f;
+	/** What the patch saved, waiting for loadSavedSample */
+	bool savedSamplePending = false;
+	std::string savedFilePath;
+	std::string savedFileName;
+	uint32_t savedHash = 0;
+	/** Checksum of wavBytes, and of the copy last written to the patch's storage folder (and where) */
+	uint32_t wavHash = 0;
+	uint32_t storedHash = 0;
+	std::string storedPath;
 	/** Randomize also randomizes the expanders snapped on to the right (each keeps its own
 	randomizeEnabled flags: MARKER, LFO shape, SYNC, T, D and PERC stay as they are). */
 	void onRandomize(const RandomizeEvent& e) override;
@@ -389,7 +472,12 @@ struct WaveArtifact : Module {
 	int settingIndexOf(int paramId, int marker);
 	/** The value the target step plays for `paramId` (its lock, or the knob) and whether it is locked. False when there
 	is no target or the param is not one of the selected marker's settings. */
-	bool stepValueFor(int paramId, float* value, bool* locked);
+	bool stepValueFor(int paramId, float* value, bool* locked, int* step = nullptr);
+	/** `value` of `paramId` as its tooltip shows it, units included ("12 st", "1/16"). UI thread. */
+	std::string valueText(int paramId, float value);
+	/** Extra tooltip line for a per-marker control while a trig of its row is selected on the sequencer: the value that
+	trig plays for it (its lock, or the knob). Empty otherwise. UI thread. */
+	std::string lockTooltip(int paramId);
 	/** Live record (REC on the sequencer, a step of the selected marker's row selected): the row's step playing now
 	(lock edits go there), -1 while the playhead is on an empty step (edits go nowhere), -2 when not recording. */
 	int recordStep();

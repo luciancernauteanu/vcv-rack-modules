@@ -93,7 +93,7 @@ struct ArtifactSections : widget::Widget {
 				nvgStrokeWidth(args.vg, 1.f);
 				nvgStroke(args.vg);
 			}
-			// The bottom strip follows the selection too: the envelope only exists in POLY, WINDOW / SPREAD / KEEP in GRAIN.
+			// The strip under the knobs follows the selection too: the envelope only exists in POLY, KEEP in GRAIN.
 			auto outline = [&](Vec mmPos, Vec mmSize) {
 				Vec p = mm2px(mmPos);
 				Vec size = mm2px(mmSize);

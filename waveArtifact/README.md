@@ -36,8 +36,13 @@ The plugin and module slugs stay `waveArtifact` and `waveArtifactExpander`, so p
 with earlier builds still load.
 
 Status: playable. Oscillator, markers, per-artifact controls, master filter, internal tempo and
-clock, per-artifact send / return and the expander (CV, gate, the marker's LFO and AD) are done. Saving the loaded
-WAV inside the patch is still to come.
+clock, per-artifact send / return and the expander (CV, gate, the marker's LFO and AD) are done.
+
+**The loaded WAV is saved inside the patch.** Saving a patch (or Rack's autosave) keeps a copy of the WAV in the
+patch file, with its original path, the artifact count and the tone. Opening the project loads it again, also on
+another computer or after the original file moved. If the patch's copy is missing, the original file is loaded
+from where it was; if neither is there, the screen says *Sample not found*. A patch grows by the WAV's size
+(10 MB at most).
 
 ## Quick start: your first patch
 
@@ -105,7 +110,7 @@ Useful to know:
 
 ## Play modes: MORPH and POLY
 
-The **MORPH | POLY** button under the wavetable map chooses what the POSITION playhead does, on both engines.
+The **MORPH | POLY** button (PLAY, in the strip under the artifact knobs) chooses what the POSITION playhead does, on both engines.
 
 **MORPH** (the default) is one voice: the playhead crossfades between the two neighboring markers.
 
@@ -166,6 +171,8 @@ Then press PLAY until it shows **SEQ**. SEQ plays nothing until a sequencer is s
   default x4 gives 16th notes, and /2 a step every two beats. Rows at different speeds drift against each other.
 - **Length per row:** Ctrl + click a step to end that row there (1 to 16), or use the right-click menu; rows of
   different lengths drift against each other (polyrhythms). Steps past the end are shown dimmed.
+- **A row whose marker is off** is dimmed and plays nothing (no trigs, its GATE closed, its MOD at 0 V), but keeps
+  time: turn the marker on again and the row comes in on the right step. Its steps can still be edited.
 - **Copy / paste a trig:** with the mouse over a trig (or a trig selected), **Ctrl + C** copies its velocity, locks,
   condition and slide; **Ctrl + V** pastes them on the trig under the mouse (or the selected one), switching it on,
   and selects it. It works across rows and between sequencers. Away from the steps, with nothing selected, Ctrl + C /
@@ -196,10 +203,14 @@ has none. Expander CV and the LFOs still move a locked value. Locks only play in
 - **See a step's values:** click a step. It gets a blue frame, the main module selects its marker, and a thin bar
   under each of that marker's controls shows the value the step plays: in the marker's color where the step locks
   it, grey (the knob's own value) where it does not. Bipolar settings (PAN, PITCH, FINE, SCAN...) fill from the
-  middle, the others from the left; a switch or list shows the step's choice as text.
+  middle, the others from the left; a switch or list shows the step's choice as lit segments. In the strip under the knobs
+  (A D S H R, and KEEP on GRAIN) the bar stands upright on the right of each control, filling
+  upwards, as the strip is too low for a bar under them.
 - **Which settings are locked:** a small dot above a control of the selected marker means some step of its row locks
   that setting (in the marker's color; white when the selected step itself locks it). No dot: every step plays the
-  knob.
+  knob. With a trig selected, hover the control to read both values: its tooltip shows the knob's own value and the
+  selected trig's, e.g. `Marker 2 pitch: 36 st (knob)` / `Trig 5: -7 st`, in the setting's own units ("not locked"
+  when the trig plays the knob). It updates live while you turn the knob to lock the trig.
 - **Lock from the knobs:** with a step selected, turn any of that marker's knobs. The step's bar moves, the knob
   stays where it is. The filter type, LFO shape, window and direction work the same (a click steps the step's own choice); the other buttons change the marker as usual. **Double-click a knob**
   to remove its lock from the step. Rack has one mouse, so instead of holding a step as on an Elektron, the step
@@ -235,17 +246,25 @@ has none. Expander CV and the LFOs still move a locked value. Locks only play in
   locks on this step**.
 - **Locked steps** show a white dot in their corner. Right-click a step for its menu: condition, slide, tie, **Clear
   locks on this step** and **Delete step** (the row's own menu is in its **Row** submenu).
-- **Trig conditions** (right-click a step > Condition) decide whether a step plays this time: **Always**, a
-  **chance** (10 / 25 / 50 / 75 / 90%), **A:B** (plays on pass A of every B passes of its row, B = 2 to 8; pass 1 is
-  the first after RESET), **FILL** (only while FILL is on) and **NOT FILL** (only while it is off). The condition is
-  shown in the step. A step that does not play leaves the locks of the step before in place.
-- **Random conditions (COND, top left):** **RND** gives the lit steps of the lane's row random conditions
-  (**Shift + click**: every row). The slider next to it sets how many: at 100% every lit step gets one, at 0% none
-  (the press resets the row to Always), in between about that share. Mostly chances and A:B, now and then FILL or NOT
-  FILL. Tied steps stay Always (their group's first trig decides). **CLR** resets the row's conditions to Always
-  (**Shift + click**: every row). Both can be undone (Ctrl + Z). Locks, slide and ties stay.
-- **FILL:** the button under the lane latches FILL on and off; the jack next to it turns FILL on while its gate is
-  high.
+- **Trig conditions** decide whether a step plays this time: **Always**, a **chance**, or **A:B** (plays on pass A
+  of every B passes of its row, B = 2 to 8; pass 1 is the first after RESET). The condition is shown in the step. A
+  step that does not play leaves the locks of the step before in place.
+- **Conditions in the lane:** pick **CONDITION** in the lane's menu (click its name on the left; COND CLR switches
+  to it too). Each lit trig shows its chance as a bar with the % on it, an A:B as an outline with its text,
+  Always as a thin line at the top. Drag over the trigs to draw chances at the mouse height, in 5% steps (the top is
+  Always); click a trig with a condition to set it back to Always; Shift + drag sets the trigs you pass to Always;
+  right-click a trig for every condition (Always, 10 / 25 / 50 / 75 / 90%, A:B). The lane's CLR resets the row's
+  conditions (Shift + click: every row). Tied trigs show a dash: their group's first trig decides. The same choices
+  are still in the trig's own right-click menu (Condition).
+- **A condition on one lock:** each locked value can have its own condition, apart from the trig's. In the lane
+  (showing a setting, e.g. CUTOFF), **right-click a locked bar** and pick Always, a chance or A:B; or select the trig
+  and right-click that setting's knob on Wave Artifacts > **Trig N lock condition**. The trig still plays every time
+  (its own condition decides that); the lock applies only when its condition passes, otherwise that setting plays the
+  knob's value on that trig. The bar shows the condition ("50%", "1:4") in the COND color, and the knob's tooltip
+  shows it after the trig's value ("Trig 5: 12 st (if 50%)"). Removing a lock removes its condition. Saved with the
+  patch.
+- **COND CLR (top left):** resets the trig conditions of the lane's row to Always (**Shift + click**: every row).
+  Undo with Ctrl + Z; it shows the lane's CONDITION view. Locks, their own conditions, slide and ties stay.
 - **Slide:** the thin strip just under each lit trig (apart from the trig, so the whole cell is still velocity).
   Drag (or click) it to the right: the settings this step
   changes (lock to lock, knob to lock, lock back to the knob) glide there instead of jumping, over that share of one
@@ -271,7 +290,8 @@ has none. Expander CV and the LFOs still move a locked value. Locks only play in
 - **MOD outputs:** a jack right of each GATE: the row's step velocities as a CV, 0 to 10 V (the bar's height). Each
   step that plays sets it, and it holds until the next one plays (steps that are off or do not play keep it). A step
   with slide glides there over its slide x one step, like the locks; tied steps send their own height, so a long note
-  can carry a moving CV. GATE + MOD together drive any envelope, filter or VCA in the rack.
+  can carry a moving CV. The small trimpot under each MOD jack sets its level (0-100% of 10 V; full by default).
+  GATE + MOD together drive any envelope, filter or VCA in the rack.
 
 Locks, conditions, slide and ties are saved with the patch; older patches load with plain steps.
 
@@ -288,20 +308,20 @@ and meaning (the labels, tooltips and values follow):
 |---|---|---|
 | WAVE | **START** | where in the sample the cloud reads (same value, so the wavetable map and bullets still work) |
 | SMOOTH | **DENSITY** | grains per second (0.5-500), or the note value of the grain grid with SYNC |
-| (bottom strip) | **WINDOW** | grain window: Hann, Tukey, Gauss, Triangle, Percussive, Swell, Box, Smear (click the little screen) |
+| (grain group, under P.SPRD) | **WINDOW** | grain window: Hann, Tukey, Gauss, Triangle, Percussive, Swell, Box, Smear (the little screen, no title: click it for the list; its tooltip names it) |
 | (under START) | **◀ HIT ▶** and **HITS** | as on SAMPLE: with HIT on, the grains (and the SCAN loop) start from the nearest hit to START; the arrows step START from hit to hit; HITS sets how many hits are found. Shared with SAMPLE: the same HITS amount, and each marker keeps its HIT when you switch engine |
 | RATE | **SIZE** | grain length (2 ms-1 s), or a multiple of the grain interval with SYNC |
 | AMT | **SPRAY** | random offset of each grain's start (up to 2 s) |
 | SYNC / T / D | **SYNC / T / D** | lock the grains (and SCAN) to the tempo; triplet and dotted note values |
-| DRIVE | **P.SPRD** | random pitch per grain (up to 12 semitones) |
-| FINE | (empty) | SCAN now sits with the grain controls |
+| (grain group) | **P.SPRD** | random pitch per grain (up to 12 semitones); DRIVE's place stays empty in GRAIN |
+| FINE | (empty) | LENGTH now sits with the grain controls |
 | (grain group) | **SCAN** | moves the read position through the marker's slice (see below) |
 | (grain group) | **FADE** | dips the level at both ends of the slice (0-50% of it each side), so the loop never clicks |
 | (grain group) | **LOOP / PING** | at the end of the slice: jump back to START, or turn round and run back |
-| FINE | **LENGTH** | the scan loop's length: 10 ms to the end of the sample, or (fully up, the default) to the next marker |
+| (grain group) | **LENGTH** | the scan loop's length: 10 ms to the end of the sample, or (fully up, the default) to the next marker |
 | PAN | **PAN** | where the whole cloud sits, after its filter (on a stereo sample it works as a balance) |
-| (bottom strip) | **SPREAD** | random pan per grain, around PAN |
-| (bottom strip) | **KEEP** | keep speed: pitch (PITCH, FREQ, V/OCT) no longer slows down or speeds up the sample |
+| (grain group, under LENGTH) | **SPREAD** | random pan per grain, around PAN |
+| (strip under the knobs) | **KEEP** | keep speed: pitch (PITCH, FREQ, V/OCT) no longer slows down or speeds up the sample |
 
 GAIN, the filter (CUTOFF / RES / TYPE) and PITCH / FREE work as before, per cloud. The expander's six
 CV inputs follow the new titles (WAVE = START, DRIVE = P.SPRD, FINE = DENSITY; PAN stays PAN). SCAN and SPREAD are knob-only:
@@ -311,9 +331,9 @@ there; it scatters left and right best with PAN away from the ends.
 **Clock-locked grains.** With SYNC on, grains start on a grid of note values locked to the internal
 tempo or CLOCK, with sub-sample timing; RESET is beat 0.
 
-In GRAIN the WAVE / LFO section becomes one grain group: START, DENSITY, SIZE, SCAN and FADE on top; ◀ HIT ▶ with
-the HITS slider (under START, as on SAMPLE), SYNC / T / D, SPRAY and LOOP / PING below. The WINDOW screen is in the
-bottom strip with SPREAD and KEEP. WAVE mode keeps its own layout.
+In GRAIN the WAVE / LFO section becomes one grain group: START, DENSITY, SIZE, SCAN, FADE, LENGTH and P.SPRD on top;
+◀ HIT ▶ with the HITS slider (under START, as on SAMPLE), SYNC / T / D, SPRAY, LOOP / PING, SPREAD and the small
+WINDOW screen below. KEEP is in the strip under the knobs. WAVE mode keeps its own layout.
 
 **Seeing and setting the loop.** On the wavetable map along the bottom, each scanning marker's loop is shaded in its
 color from START to its end, with a small flag at the end: drag the flag to make the loop shorter or longer (it can
@@ -334,8 +354,10 @@ pitch changes SIZE acts as a maximum (40 ms at an octave up, 80 ms at an octave 
 smeared grain gets shorter and grainier. At the original pitch nothing changes.
 
 **Smear.** The Smear window turns a cloud into one continuous sound, with no gaps or jumps between
-grains. Three things change: a grain lasts at least 3 grain intervals (so SIZE becomes a minimum and
-DENSITY sets the smallest length: at 2 grains/s that is 1.5 s, at 8 grains/s it is 375 ms); each
+grains. Three things change: SIZE sets how much of the sample each grain plays (20 ms at least) and
+grains fire often enough for 3 of them to overlap (a 100 ms grain: 30 grains/s), so the cloud stays
+frozen on START however low DENSITY is (DENSITY only counts above that rate; synced, the grid
+subdivides); each
 grain starts where it best matches the grain it fades in over (up to 20 ms from where it would
 start, so tones add up instead of cancelling); and the cloud runs through a short diffuser that
 spreads sharp attacks. Grains with P.SPRD or a random direction cannot always be matched, so they
@@ -349,7 +371,10 @@ drifting (right-click menu: *Grain scatter repeats every loop*).
 the same point: its first grain fires at once, the grain grid and a synced SCAN count from the
 note instead of the beat, and the scatter starts the same random sequence. So a trig copied to
 another step sounds exactly like the original, wherever it lands on the beat. A note over the last
-one's release fades the old grains out (5 ms) and starts like a note from silence. Off: grains and
+one's release crossfades: the old grains fade out as the new note's fade in (5 ms), so a trig over a
+sounding note has no burst of noise; the new cloud starts as a running one would be, every grain part
+way through and reading on by its age (Smear too: started on one place there, its grains made a loud,
+phasey onset). Off: grains and
 a synced SCAN stay locked to the beat grid, so equal trigs on different steps sound different.
 
 Pitch: 0 V plays the sample at its original speed; V/OCT, PITCH and the expander's V/OCT transpose
@@ -470,7 +495,7 @@ From the top of the panel down:
   works as on WAVE, with the same trimpot: 10 V at 100% goes hard left to hard right.
 - **The marker's LFO: shape, RATE, SYNC / T / D, LFO DEST, DEPTH**, running free (Hz, or synced to
   Wave Artifacts' tempo or CLOCK; restarts on RESET), sent to one of the marker's settings like the AD.
-  It also comes out of its jack at +-5 V times **AMT**: patch it anywhere, including the expander's own CV
+  It also comes out of its jack at +-10 V times **AMT**: patch it anywhere, including the expander's own CV
   inputs.
 - **DEPTH at 100%** moves WAVE / START, CUTOFF, RES and DRIVE across their whole range, PAN from one side
   to the other, PITCH by 2 octaves, and GAIN from silent to x2 (+6 dB). Both start at 0: nothing moves
@@ -482,7 +507,10 @@ step and turn the expander's DEPTH, DEST, RATE, shape, ATTACK or DECAY (SYNC / T
 or draw them in the sequencer's lane (*Expander LFO / AD*). **To modulate a single trig**, leave DEPTH at
 0 on the expander and lock a DEPTH on that one step: the LFO, which keeps running, moves that trig only (at
 whatever point of its cycle it is when the trig plays), and the AD sweeps that trig only. A lock holds until
-the row's next step. Copy / paste of a marker carries its LFO and AD too.
+the row's next step. Copy / paste of a marker carries its LFO and AD too. As on the main module, a **dot** above an
+expander control shows that some step of the row locks it (white: the selected step does), and while a step is
+selected a bar under each control shows the value that step plays. A click on an empty part of the expander leaves
+the step, as on the main module.
 - **CV inputs with an AMT trimpot** for WAVE, GAIN, CUTOFF, DRIVE, FINE and PAN. AMT starts at
   0, so nothing moves until you turn it up. At 100%, 10 V sweeps the whole sample for WAVE,
   the whole cutoff range (about 1 V/oct) for CUTOFF, the whole range for DRIVE, 2 semitones
@@ -492,7 +520,7 @@ the row's next step. Copy / paste of a marker carries its LFO and AD too.
   START and DENSITY trimpots go 0-100% (no inverting). They keep their own values, separate from
   WAVE and FINE. At 100%, 10 V adds the whole sample to START and the whole knob to DENSITY. PAN
   works as on WAVE, with the same trimpot: 10 V at 100% goes hard left to hard right.
-- **Two LFOs** (shape, RATE, AMT, SYNC / T / D) with their own outputs at +-5 V. Patch them
+- **Two LFOs** (shape, RATE, AMT, SYNC / T / D) with their own outputs at +-10 V. Patch them
   anywhere, including the expander's own CV inputs. Synced LFOs follow Wave Artifacts' tempo
   or CLOCK, and restart on RESET.
 

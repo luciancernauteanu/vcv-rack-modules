@@ -10,6 +10,11 @@ struct AboveParamTooltip : ui::Tooltip {
 		engine::ParamQuantity* pq = paramWidget->getParamQuantity();
 		if (pq) {
 			text = pq->getString();
+			// With a sequencer on the left: the selected trig's value and the row's trig locks of this setting
+			WaveArtifact* m = dynamic_cast<WaveArtifact*>(paramWidget->module);
+			std::string locks = m ? m->lockTooltip(paramWidget->paramId) : "";
+			if (!locks.empty())
+				text += " (knob)" + locks;
 			std::string description = pq->getDescription();
 			if (description != "")
 				text += "\n" + description;

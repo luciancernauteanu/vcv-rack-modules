@@ -1,10 +1,12 @@
 #include "WaveArtifactExpander.hpp"
+#include "WaveArtifactSequencer.hpp"
 #include "Layout.hpp"
 #include "widgets/LfoControls.hpp"
 #include "widgets/LinkedKnob.hpp"
 #include "widgets/LfoWidgets.hpp"
 #include "widgets/ModeButton.hpp"
 #include "widgets/PanelLabels.hpp"
+#include "widgets/StepValueBars.hpp"
 
 bool isWaveArtifactExpander(Module* m) {
 	return m && m->model == modelWaveArtifactExpander;
@@ -44,7 +46,7 @@ WaveArtifactExpander::WaveArtifactExpander() {
 	configParam(LFO_AMT_PARAM + 0, 0.f, 1.f, 1.f, "LFO output level", "%", 0.f, 100.f);
 	configParam(LFO_AMT_PARAM + 1, 0.f, 1.f, 1.f, "Unused");
 	getParamQuantity(LFO_AMT_PARAM + 1)->randomizeEnabled = false;
-	configOutput(LFO_OUTPUT + 0, "Marker's LFO (+-5 V at 100%)");
+	configOutput(LFO_OUTPUT + 0, "Marker's LFO (+-10 V at 100%)");
 	configInput(VOCT_INPUT, "V/OCT for this artifact (1 V/oct, added to the main V/OCT)");
 	configInput(GATE_INPUT, "Gate for this artifact: starts its AD. MORPH: it sounds only while the gate is high, shaped by the AD. POLY: plays its note with its own ADSR while high, instead of the playhead");
 	for (int id : {ATTACK_PARAM, DECAY_PARAM, PERC_PARAM}) {
@@ -95,6 +97,9 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		acc = *(const wa::ToMainMessage*) rightExpander.consumerMessage;
 	if (active) {
 		int m = getMarker();
+		// The LFO jack patched: the main module runs the marker's LFO even while it is not routed anywhere
+		if (outputs[LFO_OUTPUT + 0].isConnected())
+			acc.lfoJack[m] = true;
 		// A patched GATE goes to the main module, which runs the marker's AD (its settings are marker settings, so
 		// trigs can lock them). In MORPH the artifact's level follows the AD (the main module's 5 ms gain smoothing
 		// keeps even the fastest open / close click-free); in POLY the gate plays the marker's note with its ADSR,
@@ -140,7 +145,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 	// LFO jack: the marker's LFO, which the main module runs (its settings are marker settings, so trigs can lock
 	// them), at this expander's AMT. Silent while not linked.
 	float lfoOut = active ? fromLeft.modLfo[getMarker()] * params[LFO_AMT_PARAM + 0].getValue() : 0.f;
-	outputs[LFO_OUTPUT + 0].setVoltage(5.f * lfoOut);
+	outputs[LFO_OUTPUT + 0].setVoltage(10.f * lfoOut);
 
 	if (lightDivider.process()) {
 		float dt = args.sampleTime * lightDivider.getDivision();
@@ -230,6 +235,8 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 	LinkedKnob<LfoRateKnobT<RoundSmallBlackKnob>>* rateKnob = nullptr;
 	ModeButton* destButtons[2] = {};
 	WaveArtifact* boundMain = nullptr;
+	/** Trig-lock dots and value bars over the bound controls (StepValueBars, as on the main module) */
+	StepValueBars* stepBars = nullptr;
 	int boundMarker = -1;
 
 	template <class T>
@@ -240,6 +247,8 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 
 	void rebind(WaveArtifact* main, int marker) {
 		boundMain = main;
+		if (stepBars)
+			stepBars->module = main;
 		boundMarker = marker;
 		for (Bound& b : bound) {
 			b.widget->module = main;
@@ -254,6 +263,18 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		for (Bound& b : bound) {
 			widget::Widget::ChangeEvent e;
 			b.widget->onChange(e);
+		}
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		ModuleWidget::onButton(e);
+		// A left click on the panel itself (no control took it): leave the sequencer step being locked, as on the main
+		// module. (With "Lock module positions" Rack takes the click with no target.)
+		bool onPanel = e.getTarget() == this || (e.getTarget() == nullptr && e.isConsumed());
+		if (boundMain && onPanel && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
+			WaveArtifactSequencer* seq = boundMain->sequencerOnLeft();
+			if (seq)
+				seq->select(-1, -1);
 		}
 	}
 
@@ -368,6 +389,14 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		destButtons[1] = bind(dest(Vec(LFO_DEST_X, LFO_DEST_Y)), WaveArtifact::MARKER_MOD_LFO_DEST_PARAM);
 		addParam(destButtons[1]);
 		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(LFO_DEST_X, LFO_KNOB_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_LFO_DEPTH_PARAM));
+
+		// Trig locks, as on the main module: a dot above each control some step of the marker's row locks (white
+		// where the selected step does), and while a step is selected a bar under each with the value it plays
+		stepBars = createWidget<StepValueBars>(Vec(0, 0));
+		stepBars->box.size = box.size;
+		for (Bound& b : bound)
+			stepBars->controls.push_back(b.widget);
+		addChild(stepBars);
 	}
 };
 

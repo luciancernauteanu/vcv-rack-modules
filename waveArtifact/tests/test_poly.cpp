@@ -1319,7 +1319,103 @@ static void testSendReturn() {
 	}
 }
 
+/** A GRAIN note retriggered every 0.25 s with RESTART while the last one still sounds (SEQ with a long release). With
+RESTART every note plays the same grains, so one note is measured: its first `seconds` against every other window of
+it from 40 ms on, as the median. `bright` is how much more high end (first difference) the trig has for its level, in
+dB; `level` is its level. A 110 Hz saw: structured material shows the burst (steady noise hides it). */
+static void restartBump(int window, float density, float size, float pitch, double seconds, double* level, double* bright) {
+	std::unique_ptr<wa::WavetableBank> bank = makeBank();
+	std::vector<float> saw((size_t) (6 * SRC_SR));
+	for (size_t i = 0; i < saw.size(); i++) {
+		double t = (double) i / SRC_SR * 110.0;
+		saw[i] = 0.5f * (float) (2.0 * (t - std::floor(t)) - 1.0);
+	}
+	wa::buildSampleBuffer(saw.data(), saw.size(), 1, SRC_SR, bank->sample);
+	wa::GrainEngine g;
+	g.setSampleRate(SR);
+	wa::ClockTracker clock;
+	wa::GrainInput in;
+	in.bank = bank.get();
+	in.clock = &clock;
+	in.poly = true;
+	in.noteRestart = true;
+	in.masterMode = -1;
+	in.wantDirect[0] = true;
+	wa::GrainMarkerInput& mk = in.markers[0];
+	mk.active = true;
+	mk.start = 0.3f;
+	mk.window = window;
+	mk.density = density;
+	mk.size = size;
+	mk.pitch = pitch;
+	std::vector<float> out;
+	long step = (long) (0.25 * SR), n = 4 * step;
+	for (long k = 0; k < n; k++) {
+		in.voiceStart[0] = k % step == 0;
+		in.voiceEnv[0] = 0.8f;
+		clock.processInternal(120.f, SR);
+		float l, r, dl, dr;
+		g.process(in, &l, &r);
+		g.getDirect(0, &dl, &dr);
+		out.push_back(dl);
+	}
+	long w = (long) (seconds * SR), t0 = 2 * step; // a note over a sounding one
+	auto measure = [&](long a, double* e, double* d) {
+		*e = *d = 1e-20;
+		for (long k = a; k < a + w; k++) {
+			*e += (double) out[(size_t) k] * out[(size_t) k];
+			*d += (double) (out[(size_t) k] - out[(size_t) k - 1]) * (out[(size_t) k] - out[(size_t) k - 1]);
+		}
+	};
+	std::vector<double> levels, brights;
+	for (long a = t0 + (long) (0.04 * SR); a + w < t0 + step; a += w / 2) {
+		double e, d;
+		measure(a, &e, &d);
+		levels.push_back(e);
+		brights.push_back(d / e);
+	}
+	std::sort(levels.begin(), levels.end());
+	std::sort(brights.begin(), brights.end());
+	double e, d;
+	measure(t0, &e, &d);
+	*level = 10.0 * std::log10(e / levels[levels.size() / 2]);
+	*bright = 10.0 * std::log10(d / e / brights[brights.size() / 2]);
+}
+
+static void testRestartOverNote() {
+	std::printf("RESTART over a sounding note\n");
+	// The old grains fade out (5 ms) as the new note's fade in, and the new cloud starts as a running one: its grains
+	// part way through their windows and (Smear too) read on by their age. Measured before (6 ms / 20 ms windows), with
+	// Smear 54 % / 48 % at -24 st: the trig +8.4 / +4.4 dB brighter than the note (a burst of noise on every trig).
+	struct Case {
+		const char* name;
+		int window;
+		float density, size, pitch;
+		bool sparse;
+	};
+	const Case cases[] = {
+		{"Smear, 54 % / 48 %, -24 st", wa::GRAIN_SMEAR, 0.544f, 0.477f, -24.f, false},
+		{"Smear, dense", wa::GRAIN_SMEAR, 0.85f, 0.55f, 0.f, false},
+		{"Smear, 540 ms grains", wa::GRAIN_SMEAR, 0.3f, 0.9f, 0.f, false},
+		{"Hann, dense", wa::GRAIN_HANN, 0.85f, 0.55f, 0.f, false},
+		{"Hann, sparse", wa::GRAIN_HANN, 0.544f, 0.477f, 0.f, true},
+	};
+	for (const Case& c : cases) {
+		double l6, b6, l20, b20;
+		restartBump(c.window, c.density, c.size, c.pitch, 0.006, &l6, &b6);
+		restartBump(c.window, c.density, c.size, c.pitch, 0.02, &l20, &b20);
+		// A sparse cloud's trig is a grain starting with a 5 ms fade in (a note onset, louder and brighter than the note's
+		// gaps): its limit only rules out a click (a grain starting at full level, as before the fade in: +31 dB)
+		double brightLimit = c.sparse ? 8.0 : 3.0;
+		std::printf("  %-26s against the note: first 6 ms level %+.1f dB, brightness %+.1f; first 20 ms %+.1f, %+.1f (limits %s, %.0f)\n",
+			c.name, l6, b6, l20, b20, c.sparse ? "-" : "+-4", brightLimit);
+		if (!c.sparse)
+			CHECK(std::fabs(l6) < 4.0 && std::fabs(l20) < 4.0, "%s: the level jumps at a trig (%+.1f, %+.1f dB)", c.name, l6, l20);
+		CHECK(b6 < brightLimit && b20 < brightLimit, "%s: noise at a trig (%+.1f, %+.1f dB)", c.name, b6, b20);
+	}
+}
 int main() {
+	testRestartOverNote();
 	testSendReturn();
 	testTiedSteps();
 	testAdsr();

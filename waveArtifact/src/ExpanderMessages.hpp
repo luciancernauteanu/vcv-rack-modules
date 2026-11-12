@@ -64,6 +64,8 @@ struct ToSequencerMessage {
 	double beatPos = 0.0;
 	/** RESET happened: counts up, the sequencer restarts from step 1 */
 	uint32_t resetCount = 0;
+	/** Which markers are on: a row whose marker is off keeps time but plays nothing */
+	bool markerOn[NUM_MARKERS] = {true, true, true, true, true};
 };
 
 /** Sequencer -> main: which marker was struck last, and how hard, with that step's parameter locks */
@@ -95,6 +97,8 @@ struct ToMainMessage {
 	bool gateHigh[NUM_MARKERS] = {};
 	/** A linked expander is actively modulating this artifact (a CV with a non-zero amount, or V/OCT) */
 	bool modulated[NUM_MARKERS] = {};
+	/** An expander's LFO jack is patched for the artifact: its LFO must run even while it moves nothing */
+	bool lfoJack[NUM_MARKERS] = {};
 };
 
 } // namespace wa

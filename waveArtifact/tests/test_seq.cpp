@@ -34,20 +34,20 @@ static float rnd() {
 static void testConditions() {
 	std::printf("conditions\n");
 	wa::StepData s;
-	CHECK(wa::conditionPasses(s, 0, false, 0.99f), "ALWAYS must play");
+	CHECK(wa::conditionPasses(s, 0, 0.99f), "ALWAYS must play");
 
 	// Chance: 50% over 10000 passes plays about half
 	s.cond = wa::COND_CHANCE;
 	s.chance = 50;
 	int played = 0;
 	for (int i = 0; i < 10000; i++)
-		played += wa::conditionPasses(s, i, false, rnd()) ? 1 : 0;
+		played += wa::conditionPasses(s, i, rnd()) ? 1 : 0;
 	std::printf("  50%% chance: %d of 10000 (want 4800..5200)\n", played);
 	CHECK(played > 4800 && played < 5200, "50%% chance played %d", played);
 	s.chance = 10;
 	played = 0;
 	for (int i = 0; i < 10000; i++)
-		played += wa::conditionPasses(s, i, false, rnd()) ? 1 : 0;
+		played += wa::conditionPasses(s, i, rnd()) ? 1 : 0;
 	std::printf("  10%% chance: %d of 10000 (want 850..1150)\n", played);
 	CHECK(played > 850 && played < 1150, "10%% chance played %d", played);
 
@@ -57,17 +57,14 @@ static void testConditions() {
 	s.b = 4;
 	for (long p = 0; p < 12; p++) {
 		bool want = (p % 4) == 1;
-		CHECK(wa::conditionPasses(s, p, false, 0.f) == want, "2:4 on pass index %ld: got %d", p, (int) !want);
+		CHECK(wa::conditionPasses(s, p, 0.f) == want, "2:4 on pass index %ld: got %d", p, (int) !want);
 	}
 	s.a = 1;
 	s.b = 2;
-	CHECK(wa::conditionPasses(s, 0, false, 0.f) && !wa::conditionPasses(s, 1, false, 0.f) && wa::conditionPasses(s, 2, false, 0.f), "1:2 must play passes 1, 3 ...");
+	CHECK(wa::conditionPasses(s, 0, 0.f) && !wa::conditionPasses(s, 1, 0.f) && wa::conditionPasses(s, 2, 0.f), "1:2 must play passes 1, 3 ...");
 
-	// FILL / NOT FILL
-	s.cond = wa::COND_FILL;
-	CHECK(wa::conditionPasses(s, 0, true, 0.f) && !wa::conditionPasses(s, 0, false, 0.f), "FILL must follow fill");
-	s.cond = wa::COND_NOT_FILL;
-	CHECK(!wa::conditionPasses(s, 0, true, 0.f) && wa::conditionPasses(s, 0, false, 0.f), "NOT FILL must be the opposite");
+	// FILL / NOT FILL were removed: only Always, chance and A:B are left
+	CHECK(wa::NUM_CONDITIONS == 3, "conditions: %d", (int) wa::NUM_CONDITIONS);
 
 	char text[16];
 	s.cond = wa::COND_RATIO;
@@ -247,39 +244,6 @@ static void testSlideAmountAndTie() {
 	CHECK(!t.isPlain(), "a 1%% slide is saved");
 }
 
-/** COND RND's picker: every result is a valid condition, mostly chances and A:B, FILL / NOT FILL rare */
-static void testRandomCondition() {
-	std::printf("random condition\n");
-	int count[wa::NUM_CONDITIONS] = {};
-	bool valid = true;
-	const int N = 20000;
-	for (int i = 0; i < N; i++) {
-		wa::StepData d;
-		wa::randomCondition(d, rnd(), rnd(), rnd());
-		count[d.cond]++;
-		if (d.cond == wa::COND_CHANCE) {
-			bool listed = false;
-			for (int c : wa::CHANCES)
-				listed = listed || d.chance == c;
-			valid = valid && listed;
-		}
-		if (d.cond == wa::COND_RATIO)
-			valid = valid && d.b >= 2 && d.b <= 8 && d.a >= 1 && d.a <= d.b;
-	}
-	// The edges of [0, 1) too
-	for (float u : {0.f, 0.999999f}) {
-		wa::StepData d;
-		wa::randomCondition(d, u, u, u);
-		valid = valid && d.cond != wa::COND_ALWAYS && d.a >= 1 && d.a <= d.b && d.b <= 8;
-	}
-	std::printf("  always %d, chance %.1f%% (50), A:B %.1f%% (35), FILL %.1f%% (7.5), NOT FILL %.1f%% (7.5), all valid %d\n", count[wa::COND_ALWAYS],
-		100.0 * count[wa::COND_CHANCE] / N, 100.0 * count[wa::COND_RATIO] / N, 100.0 * count[wa::COND_FILL] / N, 100.0 * count[wa::COND_NOT_FILL] / N, (int) valid);
-	CHECK(valid, "every random condition must be one the menu offers");
-	CHECK(count[wa::COND_ALWAYS] == 0, "the picker always gives a condition: %d", count[wa::COND_ALWAYS]);
-	CHECK(std::abs(count[wa::COND_CHANCE] - N / 2) < N / 50, "chance share %d", count[wa::COND_CHANCE]);
-	CHECK(count[wa::COND_FILL] > N / 20 && count[wa::COND_FILL] < N / 10, "FILL share %d", count[wa::COND_FILL]);
-}
-
 /** MOD output: jumps without slide, glides over slide x a step with it, holds after */
 static void testGlideValue() {
 	std::printf("glide value (MOD)\n");
@@ -302,9 +266,64 @@ static void testGlideValue() {
 	CHECK(g.progress == 1.0, "the same value does not start a glide");
 }
 
+/** Each lock's own condition: a failing one comes off the locks the trig plays (that setting plays the knob); the
+others, and locks without a condition, stay. Clearing a lock clears its condition. */
+static void testLockConditions() {
+	std::printf("lock conditions\n");
+	const int CUT = 9, DRIVE = 12;
+	wa::StepData s;
+	s.setLock(CUT, 0.3f);
+	s.setLock(DRIVE, 0.7f);
+	wa::Condition half;
+	half.cond = wa::COND_RATIO;
+	half.a = 1;
+	half.b = 2;
+	s.setLockCondition(CUT, half);
+	CHECK(s.condMask == (1ull << CUT), "only CUTOFF has a condition: %llx", (unsigned long long) s.condMask);
+	// 1:2 applies on passes 1, 3 ... (index 0, 2) and not on 2, 4 ...; DRIVE (no condition) always stays
+	for (long p = 0; p < 6; p++) {
+		wa::StepData out = s;
+		wa::applyLockConditions(out, s, p, []() { return 0.f; });
+		bool cut = out.locked(CUT), drive = out.locked(DRIVE);
+		CHECK(cut == (p % 2 == 0) && drive, "pass index %ld: CUTOFF %d DRIVE %d", p, (int) cut, (int) drive);
+	}
+	// A 50% chance over many trigs applies about half the time
+	wa::Condition chance;
+	chance.cond = wa::COND_CHANCE;
+	chance.chance = 50;
+	s.setLockCondition(CUT, chance);
+	int kept = 0;
+	for (int i = 0; i < 10000; i++) {
+		wa::StepData out = s;
+		wa::applyLockConditions(out, s, i, rnd);
+		kept += out.locked(CUT) ? 1 : 0;
+	}
+	std::printf("  50%% lock condition: applied %d of 10000 (want 4800..5200)\n", kept);
+	CHECK(kept > 4800 && kept < 5200, "50%% lock condition applied %d", kept);
+	// Always removes the condition; a lock needs to exist to take one; clearing a lock clears its condition
+	s.setLockCondition(CUT, wa::Condition());
+	CHECK(s.condMask == 0, "Always removes the condition");
+	s.setLockCondition(5, chance);
+	CHECK(s.condMask == 0, "an unlocked setting takes no condition");
+	s.setLockCondition(DRIVE, chance);
+	s.clearLock(DRIVE);
+	CHECK(s.condMask == 0 && !s.locked(DRIVE), "clearing a lock clears its condition");
+	s.setLock(DRIVE, 0.5f);
+	CHECK(s.lockCondition(DRIVE).cond == wa::COND_ALWAYS, "a new lock starts without a condition");
+	s.setLockCondition(DRIVE, chance);
+	s.clearLocks();
+	CHECK(s.mask == 0 && s.condMask == 0, "clearLocks clears the conditions too");
+	// A step without lock conditions: nothing changes (and no random number is drawn)
+	wa::StepData plain;
+	plain.setLock(CUT, 0.2f);
+	int draws = 0;
+	wa::StepData out = plain;
+	wa::applyLockConditions(out, plain, 0, [&]() { draws++; return 0.f; });
+	CHECK(out.mask == plain.mask && draws == 0, "no lock conditions: mask %llx, draws %d", (unsigned long long) out.mask, draws);
+}
 int main() {
+	testLockConditions();
 	testGlideValue();
-	testRandomCondition();
 	testSlideAmountAndTie();
 	testConditions();
 	testLocks();
