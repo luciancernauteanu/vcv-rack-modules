@@ -25,6 +25,7 @@ static const char* const MOD_DEST_NAMES[NUM_MOD_DESTS] = {"WAVE / START", "GAIN"
 /** On the expander's DEST button (WAVE reads START, DRIVE reads P.SPRD on the granular engine) */
 static const char* const MOD_DEST_SHORT[NUM_MOD_DESTS] = {"WAVE", "GAIN", "CUTOFF", "RES", "DRIVE", "PITCH", "PAN"};
 static const char* const MOD_DEST_SHORT_GRAIN[NUM_MOD_DESTS] = {"START", "GAIN", "CUTOFF", "RES", "P.SPRD", "PITCH", "PAN"};
+static const char* const MOD_DEST_SHORT_SAMPLE[NUM_MOD_DESTS] = {"START", "GAIN", "CUTOFF", "RES", "DRIVE", "PITCH", "PAN"};
 
 /** How far each destination moves at DEPTH 100% and a full source (LFO at +-1, AD at 1), in its own units: the whole
 range of WAVE, CUTOFF (20 Hz .. 20 kHz), RES and DRIVE, PAN from one side to the other, PITCH 2 octaves. GAIN is a

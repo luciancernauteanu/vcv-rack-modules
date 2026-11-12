@@ -253,6 +253,8 @@ WaveArtifact::WaveArtifact() {
 	getParamQuantity(GRAIN_NOTE_RESTART_PARAM)->randomizeEnabled = false;
 	configSwitch(SAMPLE_ZERO_SNAP_PARAM, 0.f, 1.f, 1.f, "Sample: snap START and loops to zero crossings", {"Off (exactly where set)", "On (the nearest zero crossing, up to 5 ms away)"});
 	getParamQuantity(SAMPLE_ZERO_SNAP_PARAM)->randomizeEnabled = false;
+	configSwitch(SAMPLE_FADE_IN_PARAM, 0.f, 3.f, 0.f, "Sample: note fade-in (a longer one clicks less on a note that starts mid-sound, and softens a hit)", {"1 ms", "3 ms", "10 ms", "30 ms"});
+	getParamQuantity(SAMPLE_FADE_IN_PARAM)->randomizeEnabled = false;
 	configParam(SAMPLE_HIT_SENSITIVITY_PARAM, 0.f, 1.f, wa::TRANSIENT_DEFAULT_SENSITIVITY, "Hits found (fewer .. more)", "%", 0.f, 100.f);
 	getParamQuantity(SAMPLE_HIT_SENSITIVITY_PARAM)->randomizeEnabled = false;
 
@@ -337,6 +339,10 @@ WaveArtifact::WaveArtifact() {
 		lockIndex[MARKER_SETTING_PARAMS[k]] = wa::isLockable(k) ? (int8_t) k : (int8_t) -1;
 		if (isChoiceSetting(MARKER_SETTING_PARAMS[k]))
 			lockJumpMask |= (uint64_t) 1u << k;
+		// The range an expander CV moves the setting over (10 V at 100% = all of it)
+		ParamQuantity* pq = paramQuantities[MARKER_SETTING_PARAMS[k]];
+		settingMin[k] = pq->minValue;
+		settingMax[k] = pq->maxValue;
 	}
 	setStatus("Load a WAV (max 10 MB)");
 }
@@ -499,6 +505,18 @@ WaveArtifact::~WaveArtifact() {
 
 void WaveArtifact::refreshSettings(int i) {
 	MarkerSettings& s = settings[i];
+	// The expanders' CVs on this marker's knobs that have no audio-rate path (mv adds them)
+	cvMask[i] = 0;
+	for (int n = 0; n < numCvKnobMods; n++) {
+		const wa::CvKnobMod& c = cvKnobMods[n];
+		if (c.marker != i || c.setting < 0 || c.setting >= wa::NUM_LOCKABLE)
+			continue;
+		uint64_t bit = (uint64_t) 1u << c.setting;
+		if (!(cvMask[i] & bit))
+			cvAdd[i][c.setting] = 0.f;
+		cvAdd[i][c.setting] += c.amount * (settingMax[c.setting] - settingMin[c.setting]);
+		cvMask[i] |= bit;
+	}
 	s.active = params[MARKER_ACTIVE_PARAM + i].getValue() > 0.5f;
 	s.muted = isMarkerMuted(i);
 	s.pos = params[MARKER_POS_PARAM + i].getValue();
@@ -620,11 +638,18 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		out->index = 0;
 		out->linked = true;
 		out->reset = reset;
-		out->granular = engineApplied == 1; // SAMPLE reads the CVs like WAVE: WAVE is START, FINE and DRIVE are themselves
+		out->granular = engineApplied == 1;
+		out->sample = engineApplied == 2; // the expanders show this engine's four inputs
 		out->poly = params[PLAY_MODE_PARAM].getValue() > 0.5f;
 		for (int i = 0; i < NUM_MARKERS; i++)
 			out->modLfo[i] = modLfoOut[i];
 		right->leftExpander.requestMessageFlip();
+	}
+	// The CVs on the other knobs: read with the settings (next refreshSettings)
+	numCvKnobMods = std::min(std::max(mod->numKnobMods, 0), wa::MAX_CV_KNOB_MODS);
+	for (int n = 0; n < numCvKnobMods; n++)
+		cvKnobMods[n] = mod->knobMods[n];
+	{
 	}
 	// The step sequencer on the left: which markers it struck this sample, and how hard.
 	bool seqFired[NUM_MARKERS] = {};
@@ -936,10 +961,9 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			g.pos = wm.pos;
 			// START is the marker's WAVE value (plus the expander's WAVE CV), folded at the ends
 			g.start = wa::fold01(wm.wave);
-			// The expander's FINE input is DENSITY here: 0..10 V at AMT 100% adds 0..1 of the knob. (SCAN has no
-			// CV: changing its speed or loop length makes the read position jump. START is for moving by CV.)
+			// The expander CVs on DENSITY, SIZE, LENGTH ... are in the settings already (mv)
 			const MarkerSettings& s = settings[i];
-			g.density = clamp(s.density + 0.5f * modOf(i, wa::MOD_FINE), 0.f, 1.f);
+			g.density = s.density;
 			g.size = s.size;
 			g.spray = s.spray;
 			g.window = s.window;
@@ -953,8 +977,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			g.sync = s.grainSync;
 			g.triplet = s.grainTriplets;
 			g.dotted = s.grainDotted;
-			// The expander's DRIVE input drives P.SPRD while granular. PAN is PAN on both engines.
-			g.pitchScatter = clamp(s.pScatter + modOf(i, wa::MOD_DRIVE) + modDrive[i], 0.f, 1.f);
+			// The marker's LFO / AD on DRIVE / P.SPRD moves P.SPRD while granular. PAN is PAN on every engine.
+			g.pitchScatter = clamp(s.pScatter + modDrive[i], 0.f, 1.f);
 			g.scan = s.scan;
 			g.spread = s.spread;
 			g.pan = wm.pan;
@@ -979,6 +1003,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		gin.noteRestart = params[GRAIN_NOTE_RESTART_PARAM].getValue() > 0.5f;
 		gin.player = engineApplied == 2;
 		gin.zeroSnap = params[SAMPLE_ZERO_SNAP_PARAM].getValue() > 0.5f;
+		gin.noteFade = (float) wa::SAMPLE_FADE_IN_SECONDS[(int) clamp(std::round(params[SAMPLE_FADE_IN_PARAM].getValue()), 0.f, 3.f)];
 		// HIT: take a new hit list from the UI (the old one goes back to be freed there)
 		if (hitsPending.load(std::memory_order_acquire) && !hitsRetired.load(std::memory_order_acquire)) {
 			std::vector<long>* fresh = hitsPending.exchange(nullptr);
@@ -2540,6 +2565,13 @@ struct WaveArtifactWidget : ModuleWidget {
 				p.setValue(p.getValue() > 0.5f ? 0.f : 1.f);
 			}
 		));
+		menu->addChild(createSubmenuItem("Note fade-in (a longer one clicks less)", "", [=](Menu* sub) {
+			static const char* const names[4] = {"1 ms (default)", "3 ms", "10 ms", "30 ms"};
+			for (int i = 0; i < 4; i++)
+				sub->addChild(createCheckMenuItem(names[i], "",
+					[=]() { return (int) std::round(m->params[WaveArtifact::SAMPLE_FADE_IN_PARAM].getValue()) == i; },
+					[=]() { m->params[WaveArtifact::SAMPLE_FADE_IN_PARAM].setValue((float) i); }));
+		}));
 		// BEAT note values for LENGTH: straight always; triplets / dotted per marker (the same T / D as GRAIN's)
 		for (int td = 0; td < 2; td++) {
 			int id = td == 0 ? WaveArtifact::MARKER_GRAIN_TRIPLET_PARAM : WaveArtifact::MARKER_GRAIN_DOTTED_PARAM;

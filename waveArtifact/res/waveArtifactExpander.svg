@@ -17,18 +17,14 @@
     <circle id="LINK_LIGHT" cx="44.5" cy="6" r="1" fill="#ff00ff"/>
     <circle id="VOCT_INPUT" cx="29.5" cy="17.4" r="4" fill="#00ff00"/>
     <circle id="GATE_INPUT" cx="40.5" cy="17.4" r="4" fill="#00ff00"/>
-    <circle id="MOD_INPUT_0" cx="10.2" cy="49.4" r="4" fill="#00ff00"/>
-    <circle id="AMT_PARAM_0" cx="20.4" cy="49.4" r="3" fill="#ff0000"/>
-    <circle id="MOD_INPUT_1" cx="31.6" cy="49.4" r="4" fill="#00ff00"/>
-    <circle id="AMT_PARAM_1" cx="41.8" cy="49.4" r="3" fill="#ff0000"/>
-    <circle id="MOD_INPUT_2" cx="10.2" cy="61.4" r="4" fill="#00ff00"/>
-    <circle id="AMT_PARAM_2" cx="20.4" cy="61.4" r="3" fill="#ff0000"/>
-    <circle id="MOD_INPUT_3" cx="31.6" cy="61.4" r="4" fill="#00ff00"/>
-    <circle id="AMT_PARAM_3" cx="41.8" cy="61.4" r="3" fill="#ff0000"/>
-    <circle id="MOD_INPUT_4" cx="10.2" cy="73.4" r="4" fill="#00ff00"/>
-    <circle id="AMT_PARAM_4" cx="20.4" cy="73.4" r="3" fill="#ff0000"/>
-    <circle id="MOD_INPUT_5" cx="31.6" cy="73.4" r="4" fill="#00ff00"/>
-    <circle id="AMT_PARAM_5" cx="41.8" cy="73.4" r="3" fill="#ff0000"/>
+    <circle id="MOD_INPUT_0" cx="10.2" cy="52" r="4" fill="#00ff00"/>
+    <circle id="AMT_PARAM_0" cx="20.4" cy="52" r="3" fill="#ff0000"/>
+    <circle id="MOD_INPUT_1" cx="31.6" cy="52" r="4" fill="#00ff00"/>
+    <circle id="AMT_PARAM_1" cx="41.8" cy="52" r="3" fill="#ff0000"/>
+    <circle id="MOD_INPUT_2" cx="10.2" cy="70" r="4" fill="#00ff00"/>
+    <circle id="AMT_PARAM_2" cx="20.4" cy="70" r="3" fill="#ff0000"/>
+    <circle id="MOD_INPUT_3" cx="31.6" cy="70" r="4" fill="#00ff00"/>
+    <circle id="AMT_PARAM_3" cx="41.8" cy="70" r="3" fill="#ff0000"/>
     <circle id="MOD_AD_ATTACK (main param)" cx="8.2" cy="34.2" r="3" fill="#ff0000"/>
     <circle id="MOD_AD_DECAY (main param)" cx="15.6" cy="34.2" r="3" fill="#ff0000"/>
     <rect id="MOD_AD_DEST (main param)" x="28.4" y="31.9" width="10" height="4.6" fill="#ff0000"/>

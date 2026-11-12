@@ -20,18 +20,37 @@ WaveArtifactExpander::WaveArtifactExpander() {
 	config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 	configSwitch(MARKER_PARAM, 0.f, 4.f, 0.f, "Marker", {"Marker 1", "Marker 2", "Marker 3", "Marker 4", "Marker 5"});
 	getParamQuantity(MARKER_PARAM)->randomizeEnabled = false;
-	for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
-		std::string name = wa::MOD_TARGET_NAMES[t];
-		// GAIN (a VCA), CUTOFF and DRIVE are unipolar: 0..100%. WAVE, FINE and PAN are
-		// attenuverters. All amounts start at 0 (double-click resets to 0).
-		bool unipolar = (t == wa::MOD_GAIN || t == wa::MOD_CUTOFF || t == wa::MOD_DRIVE);
-		configParam(AMT_PARAM + t, unipolar ? 0.f : -1.f, 1.f, 0.f, name + ((t == wa::MOD_GAIN) ? " VCA amount (100% = silent at 0 V)" : " CV amount"), "%", 0.f, 100.f);
-		configInput(MOD_INPUT + t, name + " CV");
+	// The old fixed inputs' amounts: no control on the panel (an older patch's are read once, see fromJson). Their
+	// ranges stay as they were, so the saved values load as they are.
+	for (int t = 0; t < OLD_CV_INPUTS; t++) {
+		configParam(AMT_PARAM + t, -1.f, 1.f, 0.f, "Unused");
+		getParamQuantity(AMT_PARAM + t)->randomizeEnabled = false;
 	}
-	// Granular engine: START and DENSITY are unipolar amounts, shown in place of the attenuverters.
-	configParam(GRAIN_START_AMT_PARAM, 0.f, 1.f, 0.f, "START CV amount", "%", 0.f, 100.f);
-	configParam(GRAIN_DENSITY_AMT_PARAM, 0.f, 1.f, 0.f, "DENSITY CV amount", "%", 0.f, 100.f);
-	configParam(GRAIN_SPREAD_AMT_PARAM, 0.f, 1.f, 0.f, "Unused", "%", 0.f, 100.f);
+	for (int id : {GRAIN_START_AMT_PARAM, GRAIN_DENSITY_AMT_PARAM, GRAIN_SPREAD_AMT_PARAM}) {
+		configParam(id, 0.f, 1.f, 0.f, "Unused");
+		getParamQuantity(id)->randomizeEnabled = false;
+	}
+	// Four CV inputs, each with its own destination and amount per engine (the panel shows the running engine's)
+	static const char* const ENGINE_NAMES[wa::NUM_CV_ENGINES] = {"WAVE", "GRAIN", "SAMPLE"};
+	std::vector<std::string> destLabels;
+	for (int d = 0; d < wa::NUM_CV_DESTS; d++)
+		destLabels.push_back(wa::CV_DESTS[d].name == std::string(wa::CV_DESTS[d].grainName) ? wa::CV_DESTS[d].name
+			: std::string(wa::CV_DESTS[d].name) + " / " + wa::CV_DESTS[d].grainName);
+	for (int e = 0; e < wa::NUM_CV_ENGINES; e++) {
+		for (int s = 0; s < wa::NUM_CV_SLOTS; s++) {
+			std::string in = "CV " + std::to_string(s + 1) + " (" + ENGINE_NAMES[e] + ")";
+			configSwitch(destParam(e, s), 0.f, wa::NUM_CV_DESTS - 1, (float) wa::CV_DEFAULTS[e][s], in + " goes to", destLabels);
+			getParamQuantity(destParam(e, s))->randomizeEnabled = false;
+			// Attenuverters, from 0 (double-click resets to 0). On GAIN the CV is a VCA: the amount's size is how much.
+			configParam(amtParam(e, s), -1.f, 1.f, 0.f, in + " amount", "%", 0.f, 100.f);
+		}
+	}
+	for (int s = 0; s < OLD_CV_INPUTS; s++) {
+		if (s < wa::NUM_CV_SLOTS)
+			configInput(MOD_INPUT + s, "CV " + std::to_string(s + 1));
+		else
+			configInput(MOD_INPUT + s, "Unused");
+	}
 	// The LFO and the AD now belong to the marker (main module settings, shown on this panel; see the widget). Their
 	// old params here are placeholders, kept so later IDs and saved patches stay valid; only the LFO jack's level is
 	// this expander's own. (LFO 2 and the ENV output are gone.)
@@ -113,17 +132,24 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 			acc.voct[m] += inputs[VOCT_INPUT].getVoltage();
 			acc.modulated[m] = true;
 		}
-		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
-			if (!inputs[MOD_INPUT + t].isConnected())
+		int e = fromLeft.granular ? 1 : (fromLeft.sample ? 2 : 0);
+		for (int s = 0; s < wa::NUM_CV_SLOTS; s++) {
+			if (!inputs[MOD_INPUT + s].isConnected())
 				continue;
-			float amt = params[amtParam(t, fromLeft.granular)].getValue();
-			if (amt != 0.f)
-				acc.modulated[m] = true;
-			float v = inputs[MOD_INPUT + t].getVoltage();
-			if (t == wa::MOD_GAIN)
-				acc.gainMul[m] *= wa::vcaLevel(amt, v);
-			else
-				acc.mod[m][t] += amt * v;
+			float amt = params[amtParam(e, s)].getValue();
+			if (amt == 0.f)
+				continue;
+			acc.modulated[m] = true;
+			float v = inputs[MOD_INPUT + s].getVoltage();
+			const wa::CvDestInfo& d = wa::CV_DESTS[destOf(e, s)];
+			// The knobs with an audio-rate path take it (GAIN as a VCA); the others are added where the main module
+			// reads its settings
+			if (d.fast == wa::MOD_GAIN)
+				acc.gainMul[m] *= wa::vcaLevel(std::fabs(amt), v);
+			else if (d.fast >= 0)
+				acc.mod[m][d.fast] += amt * v;
+			else if (acc.numKnobMods < wa::MAX_CV_KNOB_MODS)
+				acc.knobMods[acc.numKnobMods++] = {(int8_t) m, (int8_t) d.setting, amt * v / 10.f};
 		}
 	}
 	if (leftOk) {
@@ -137,6 +163,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->linked = fromLeft.linked;
 		out->reset = fromLeft.reset;
 		out->granular = fromLeft.granular;
+		out->sample = fromLeft.sample;
 		out->poly = fromLeft.poly;
 		std::copy(fromLeft.modLfo, fromLeft.modLfo + wa::NUM_MARKERS, out->modLfo);
 		right->leftExpander.requestMessageFlip();
@@ -155,8 +182,44 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		lights[LFO_LIGHT + 1].setBrightnessSmooth(std::max(-lfoOut, 0.f), dt);
 		linked = active;
 		chainIndex = index;
-		granular = fromLeft.linked && fromLeft.granular;
+		engine = !fromLeft.linked ? 0 : (fromLeft.granular ? 1 : (fromLeft.sample ? 2 : 0));
 		marker = getMarker();
+	}
+}
+
+json_t* WaveArtifactExpander::dataToJson() {
+	json_t* rootJ = json_object();
+	// Marks a patch with the four assignable inputs (an older one gets its fixed inputs' meanings, see fromJson)
+	json_object_set_new(rootJ, "cvSlots", json_integer(1));
+	return rootJ;
+}
+
+void WaveArtifactExpander::fromJson(json_t* rootJ) {
+	Module::fromJson(rootJ);
+	json_t* dataJ = json_object_get(rootJ, "data");
+	if (!(dataJ && json_object_get(dataJ, "cvSlots")))
+		migrateOldInputs();
+}
+
+void WaveArtifactExpander::migrateOldInputs() {
+	// A patch from before the four assignable inputs had six fixed ones: WAVE GAIN CUTOFF DRIVE FINE PAN (GRAIN:
+	// START GAIN CUTOFF P.SPRD DENSITY PAN). The first four inputs keep what they did, with their amounts; the
+	// last two are gone. Only when one of them was in use: otherwise each engine starts on its own defaults.
+	float old[4];
+	bool used = params[GRAIN_START_AMT_PARAM].getValue() != 0.f;
+	for (int s = 0; s < 4; s++) {
+		old[s] = params[AMT_PARAM + s].getValue();
+		used = used || old[s] != 0.f;
+	}
+	if (!used)
+		return;
+	static const int WAVE_DESTS[4] = {wa::CV_WAVE, wa::CV_GAIN, wa::CV_CUTOFF, wa::CV_DRIVE};
+	static const int GRAIN_DESTS[4] = {wa::CV_WAVE, wa::CV_GAIN, wa::CV_CUTOFF, wa::CV_PSCATTER};
+	for (int e = 0; e < wa::NUM_CV_ENGINES; e++) {
+		for (int s = 0; s < 4; s++) {
+			params[destParam(e, s)].setValue((float) (e == 1 ? GRAIN_DESTS[s] : WAVE_DESTS[s]));
+			params[amtParam(e, s)].setValue(e == 1 && s == 0 ? params[GRAIN_START_AMT_PARAM].getValue() : old[s]);
+		}
 	}
 }
 
@@ -171,14 +234,15 @@ static const Vec GATE_JACK = Vec(40.5f, 17.4f);
 static const Vec LINK_LIGHT_POS = Vec(44.5f, 6.f);
 static const float TOP_LABEL_Y = 22.4f;
 // Order top to bottom: header (MARKER, V/OCT, GATE), the marker's AD, CV grid, the marker's LFO.
-// CV section: two columns of three cells, each a name above a CV jack with its AMT trimpot
-// beside it (WAVE GAIN / CUTOFF DRIVE / FINE PAN).
+// CV section: two columns of two cells, each its destination (a menu) above a CV jack with its AMT
+// trimpot beside it.
 static const float CV_CELL_X[2] = {4.f, 25.4f};
 static const float CV_JACK_DX = 6.2f;
 static const float CV_AMT_DX = 16.4f;
-static const float CV_NAME_DX = 11.3f;
-static const float CV_JACK_Y[3] = {49.4f, 61.4f, 73.4f};
-static const float CV_NAME_DY = -5.6f;
+static const float CV_NAME_DX = 10.7f;
+static const float CV_JACK_Y[2] = {52.f, 70.f};
+static const float CV_NAME_DY = -6.4f;
+static const Vec CV_DEST_SIZE = Vec(19.f, 4.4f);
 // The marker's AD: ATTACK, DECAY, PERC, then where it goes (DEST) and how much (DEPTH); names above.
 static const float AD_NAME_Y = 28.4f;
 static const float AD_Y = 34.2f;
@@ -219,10 +283,53 @@ static WaveArtifact* mainOf(Module* expander) {
 	return nullptr;
 }
 
+/** A CV input's destination: shows where it goes; a click opens the list of the knobs this engine has */
+struct CvDestButton : ModeButton {
+	int engine = 0;
+
+	void onButton(const ButtonEvent& e) override {
+		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == 0) {
+			engine::ParamQuantity* pq = getParamQuantity();
+			if (pq && module) {
+				ui::Menu* menu = createMenu();
+				menu->addChild(createMenuLabel(pq->getLabel()));
+				int64_t moduleId = module->id;
+				int id = paramId;
+				int eng = engine;
+				int now = (int) std::round(pq->getValue());
+				for (int d = 0; d < wa::NUM_CV_DESTS; d++) {
+					if (!wa::cvDestOffered(d, eng))
+						continue;
+					menu->addChild(createCheckMenuItem(wa::cvDestName(d, eng), "",
+						[=]() { return now == d; },
+						[=]() {
+							Module* m = APP->engine->getModule(moduleId);
+							if (!m)
+								return;
+							float oldValue = m->params[id].getValue();
+							m->params[id].setValue((float) d);
+							history::ParamChange* h = new history::ParamChange;
+							h->name = "change CV destination";
+							h->moduleId = moduleId;
+							h->paramId = id;
+							h->oldValue = oldValue;
+							h->newValue = (float) d;
+							APP->history->push(h);
+						}));
+				}
+			}
+			e.consume(this);
+			return;
+		}
+		ParamWidget::onButton(e);
+	}
+};
+
 struct WaveArtifactExpanderWidget : ModuleWidget {
-	/** Per CV input with a separate granular amount: the wavetable knob and the granular knob at the same spot */
-	ParamWidget* waveAmtKnobs[wa::NUM_MOD_TARGETS] = {};
-	ParamWidget* grainAmtKnobs[wa::NUM_MOD_TARGETS] = {};
+	/** Per CV input and engine: its destination and its amount, at the same spots; the running engine's are shown */
+	ParamWidget* cvDests[wa::NUM_CV_ENGINES][wa::NUM_CV_SLOTS] = {};
+	ParamWidget* cvAmts[wa::NUM_CV_ENGINES][wa::NUM_CV_SLOTS] = {};
+	int shownEngine = -1;
 
 	/** The controls of the marker's LFO and AD: main module params (a block of NUM_MARKERS IDs from `base`), shown
 	for this expander's marker. Each frame they point at the main module and the marker as they are now, so a step
@@ -280,20 +387,25 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 
 	void step() override {
 		WaveArtifactExpander* m = dynamic_cast<WaveArtifactExpander*>(module);
-		bool grain = m && m->granular.load(std::memory_order_relaxed);
-		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
-			if (!grainAmtKnobs[t])
-				continue;
-			waveAmtKnobs[t]->setVisible(!grain);
-			grainAmtKnobs[t]->setVisible(grain);
+		int engine = m ? clamp(m->engine.load(std::memory_order_relaxed), 0, wa::NUM_CV_ENGINES - 1) : 0;
+		bool grain = engine == 1, sample = engine == 2;
+		if (engine != shownEngine) {
+			shownEngine = engine;
+			for (int e = 0; e < wa::NUM_CV_ENGINES; e++) {
+				for (int s = 0; s < wa::NUM_CV_SLOTS; s++) {
+					cvDests[e][s]->setVisible(e == engine);
+					cvAmts[e][s]->setVisible(e == engine);
+				}
+			}
 		}
 		WaveArtifact* main = (m && m->linked.load(std::memory_order_relaxed)) ? mainOf(m) : nullptr;
 		int marker = m ? clamp(m->marker.load(std::memory_order_relaxed), 0, wa::NUM_MARKERS - 1) : 0;
 		if (main != boundMain || marker != boundMarker)
 			rebind(main, marker);
+		const char* const* destNames = grain ? wa::MOD_DEST_SHORT_GRAIN : (sample ? wa::MOD_DEST_SHORT_SAMPLE : wa::MOD_DEST_SHORT);
 		for (ModeButton* d : destButtons) {
 			if (d)
-				d->labels.assign(grain ? wa::MOD_DEST_SHORT_GRAIN : wa::MOD_DEST_SHORT, (grain ? wa::MOD_DEST_SHORT_GRAIN : wa::MOD_DEST_SHORT) + wa::NUM_MOD_DESTS);
+				d->labels.assign(destNames, destNames + wa::NUM_MOD_DESTS);
 		}
 		ModuleWidget::step();
 	}
@@ -316,11 +428,6 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->add(Vec(MARKER_BUTTON.x, TOP_LABEL_Y), "MARKER", 6.f);
 		labels->add(Vec(VOCT_JACK.x, TOP_LABEL_Y + 1.f), "V/OCT", 6.f);
 		labels->add(Vec(GATE_JACK.x, TOP_LABEL_Y + 1.f), "GATE", 6.f);
-		// The same six inputs under their granular names while the main module runs the granular engine
-		static const char* const GRAIN_TARGET_NAMES[wa::NUM_MOD_TARGETS] = {"START", "GAIN", "CUTOFF", "P.SPRD", "DENSITY", "PAN"};
-		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++)
-			labels->addModal(Vec(CV_CELL_X[t % 2] + CV_NAME_DX, CV_JACK_Y[t / 2] + CV_NAME_DY), wa::MOD_TARGET_NAMES[t], GRAIN_TARGET_NAMES[t], 6.f);
-		labels->grainFlag = module ? &module->granular : nullptr;
 		labels->add(Vec(ATTACK_X, AD_NAME_Y), "ATTACK", 5.f);
 		labels->add(Vec(DECAY_X, AD_NAME_Y), "DECAY", 5.f);
 		labels->add(Vec(AD_DEST_BUTTON.x, AD_NAME_Y), "AD DEST", 5.f);
@@ -342,18 +449,21 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(VOCT_JACK), module, WaveArtifactExpander::VOCT_INPUT));
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(GATE_JACK), module, WaveArtifactExpander::GATE_INPUT));
 
-		for (int t = 0; t < wa::NUM_MOD_TARGETS; t++) {
-			float cellX = CV_CELL_X[t % 2];
-			float y = CV_JACK_Y[t / 2];
-			addInput(createInputCentered<ThemedPJ301MPort>(mm2px(Vec(cellX + CV_JACK_DX, y)), module, WaveArtifactExpander::MOD_INPUT + t));
-			ParamWidget* amt = createParamCentered<Trimpot>(mm2px(Vec(cellX + CV_AMT_DX, y)), module, WaveArtifactExpander::AMT_PARAM + t);
-			addParam(amt);
-			int grainId = WaveArtifactExpander::amtParam(t, true);
-			if (grainId != WaveArtifactExpander::AMT_PARAM + t) {
-				waveAmtKnobs[t] = amt;
-				grainAmtKnobs[t] = createParamCentered<Trimpot>(mm2px(Vec(cellX + CV_AMT_DX, y)), module, grainId);
-				grainAmtKnobs[t]->setVisible(false);
-				addParam(grainAmtKnobs[t]);
+		for (int s = 0; s < wa::NUM_CV_SLOTS; s++) {
+			float cellX = CV_CELL_X[s % 2];
+			float y = CV_JACK_Y[s / 2];
+			addInput(createInputCentered<ThemedPJ301MPort>(mm2px(Vec(cellX + CV_JACK_DX, y)), module, WaveArtifactExpander::MOD_INPUT + s));
+			for (int e = 0; e < wa::NUM_CV_ENGINES; e++) {
+				CvDestButton* d = createParam<CvDestButton>(Vec(0, 0), module, WaveArtifactExpander::destParam(e, s));
+				d->engine = e;
+				d->box.size = mm2px(CV_DEST_SIZE);
+				d->box.pos = mm2px(Vec(cellX + CV_NAME_DX, y + CV_NAME_DY)).minus(d->box.size.div(2.f));
+				for (int k = 0; k < wa::NUM_CV_DESTS; k++)
+					d->labels.push_back(wa::cvDestName(k, e));
+				cvDests[e][s] = d;
+				addParam(d);
+				cvAmts[e][s] = createParamCentered<Trimpot>(mm2px(Vec(cellX + CV_AMT_DX, y)), module, WaveArtifactExpander::amtParam(e, s));
+				addParam(cvAmts[e][s]);
 			}
 		}
 
