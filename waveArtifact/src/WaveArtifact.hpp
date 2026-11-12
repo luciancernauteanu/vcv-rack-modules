@@ -11,6 +11,7 @@
 #include "PolyVoices.hpp"
 #include "WavetableBank.hpp"
 #include "StepLocks.hpp"
+#include "ExpanderMessages.hpp"
 
 struct WaveArtifactSequencer;
 
@@ -191,6 +192,9 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_MOD_AD_PERC_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_MOD_AD_DEST_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_MOD_AD_DEPTH_PARAM, NUM_MARKERS),
+		/** SAMPLE engine: how long a note fades in, 0..3 = 1 / 3 / 10 / 30 ms (wa::SAMPLE_FADE_IN_SECONDS). Last, so
+		older patches keep their IDs. */
+		SAMPLE_FADE_IN_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -301,12 +305,27 @@ struct WaveArtifact : Module {
 	int8_t lockIndex[PARAMS_LEN];
 	/** Settings that never glide (switches and lists), bit k = MARKER_SETTING_PARAMS[k] */
 	uint64_t lockJumpMask = 0;
-	/** A marker setting as it plays now: the knob, or in SEQ the playing step's lock. `base` is the setting's first ID. */
+	/** A marker setting as it plays now: the knob, or in SEQ the playing step's lock, plus an expander CV sent to it
+	(the knobs without an audio-rate path; see cvAdd). `base` is the setting's first ID. */
 	float mv(int base, int i) {
 		float knob = params[base + i].getValue();
 		int k = lockIndex[base];
-		return k >= 0 ? seqLocks[i].get(k, knob) : knob;
+		if (k < 0)
+			return knob;
+		float v = seqLocks[i].get(k, knob);
+		if ((cvMask[i] >> k) & 1u)
+			v = std::min(std::max(v + cvAdd[i][k], settingMin[k]), settingMax[k]);
+		return v;
 	}
+	/** The expanders' CVs on the knobs without an audio-rate path, as last received (wa::CvKnobMod) */
+	wa::CvKnobMod cvKnobMods[wa::MAX_CV_KNOB_MODS];
+	int numCvKnobMods = 0;
+	/** Per marker, for the settings it is read with (refreshSettings): what the CVs add to each (in the setting's
+	units), bit k set for the settings that have one */
+	float cvAdd[NUM_MARKERS][wa::NUM_LOCKABLE];
+	uint64_t cvMask[NUM_MARKERS] = {};
+	/** Each setting's range (its ParamQuantity's), for the CVs */
+	float settingMin[wa::NUM_LOCKABLE] = {}, settingMax[wa::NUM_LOCKABLE] = {};
 	bool polyRunning = false;
 	wa::ClockTracker clock;
 	wa::Lfo lfos[NUM_MARKERS];

@@ -323,9 +323,9 @@ and meaning (the labels, tooltips and values follow):
 | (grain group, under LENGTH) | **SPREAD** | random pan per grain, around PAN |
 | (strip under the knobs) | **KEEP** | keep speed: pitch (PITCH, FREQ, V/OCT) no longer slows down or speeds up the sample |
 
-GAIN, the filter (CUTOFF / RES / TYPE) and PITCH / FREE work as before, per cloud. The expander's six
-CV inputs follow the new titles (WAVE = START, DRIVE = P.SPRD, FINE = DENSITY; PAN stays PAN). SCAN and SPREAD are knob-only:
-to move through the sample by CV, use START. At a hard-panned PAN one side is off, so SPREAD can only vary the level
+GAIN, the filter (CUTOFF / RES / TYPE) and PITCH / FREE work as before, per cloud. The expander's four
+CV inputs start on START, DENSITY, SIZE and SPRAY here (click a name to pick another knob). SCAN by CV makes the read
+position jump: to move through the sample by CV, use START. At a hard-panned PAN one side is off, so SPREAD can only vary the level
 there; it scatters left and right best with PAN away from the ends.
 
 **Clock-locked grains.** With SYNC on, grains start on a grid of note values locked to the internal
@@ -439,10 +439,13 @@ not bring the old tail back up.
 
 **Snap to zero crossings** (right-click, on by default; not in BEAT, where the places are musical times): START, the slice end and the loop point move to the
 nearest zero crossing (at most 5 ms away), so a slice never starts on a step, whatever its attack. Transients are
-placed on zero crossings too, and HIT is never moved off its hit by this snap. **Spread the markers over the transients** (right-click) puts the active markers'
+placed on zero crossings too, and HIT is never moved off its hit by this snap. **Note fade-in** (right-click, 1 / 3 / 10 / 30 ms,
+default 1 ms): a note that starts in the middle of a sound can still tick even on a zero crossing, because the sound begins
+with full level; a longer fade-in (read from just before START) removes that tick. A hit gets softer with a long one. **Spread the markers over the transients** (right-click) puts the active markers'
 STARTs on transients spread evenly over the sample: a quick way to chop a loop across the sequencer rows.
 
-The expander's CV inputs work as on WAVE (WAVE moves START; FINE and DRIVE are themselves).
+On the expander the four CV inputs start on START, LENGTH, LOOP POINT and CUTOFF (click a name to pick another knob;
+LENGTH by CV steps through the note values in BEAT).
 
 In POLY and SEQ every note starts from START (a tied step goes on), so equal trigs always sound the same. A note
 over a sounding one fades the old head out in 5 ms; every other jump of the head (the loop point, a pitch moving
@@ -484,15 +487,22 @@ From the top of the panel down:
   starts on each of the marker's notes (POLY, STEP, ALL, and each sequencer trig in SEQ) and on GATE. A
   note runs attack then decay; GATE holds it at the top while high (decaying when it falls), unless
   **PERC** is on (attack then decay even while held). In MORPH the GATE also plays the marker through it.
-- **CV inputs with an AMT trimpot** for WAVE, GAIN, CUTOFF, DRIVE, FINE and PAN. AMT starts at
-  0, so nothing moves until you turn it up. At 100%, 10 V sweeps the whole sample for WAVE,
-  the whole cutoff range (about 1 V/oct) for CUTOFF, the whole range for DRIVE, 2 semitones
-  for FINE and hard left to hard right for PAN. **GAIN works as a VCA**: at AMT 0 it does
-  nothing, at 100% the marker's level follows the CV (silent at 0 V, full at 10 V).
-  On the GRAIN engine the inputs become START, GAIN, CUTOFF, P.SPRD, DENSITY and PAN, and the
-  START and DENSITY trimpots go 0-100% (no inverting). They keep their own values, separate from
-  WAVE and FINE. At 100%, 10 V adds the whole sample to START and the whole knob to DENSITY. PAN
-  works as on WAVE, with the same trimpot: 10 V at 100% goes hard left to hard right.
+- **Four CV inputs, each sent where you pick.** Click the name above a jack for the list of the
+  marker's knobs that engine has, and set how much with its **AMT** trimpot (an attenuverter:
+  -100% .. 100%, from 0, so nothing moves until you turn it up). Each engine keeps its own four, so
+  switching engines brings back that engine's set. They start on each engine's main controls:
+  WAVE: WAVE, GAIN, CUTOFF, DRIVE. GRAIN: START, DENSITY, SIZE, SPRAY. SAMPLE: START, LENGTH,
+  LOOP POINT, CUTOFF. The lists: WAVE / START, GAIN, CUTOFF, RES, PITCH, PAN, ATTACK, DECAY,
+  SUSTAIN, HOLD, RELEASE and the expander LFO RATE / DEPTH and AD DEPTH on every engine; DRIVE and
+  FINE on WAVE and SAMPLE; SMOOTH, LFO RATE and LFO AMT on WAVE; DENSITY, SIZE, SPRAY, SPREAD,
+  P.SPRD and SCAN on GRAIN; FADE and LENGTH on GRAIN and SAMPLE; LOOP POINT on SAMPLE.
+  At 100%, 10 V moves a knob over its whole range (WAVE / START the whole sample, CUTOFF about
+  1 V/oct), except FINE (2 semitones) and PAN (hard left to hard right). **GAIN works as a VCA**:
+  at AMT 0 it does nothing, at 100% the marker's level follows the CV (silent at 0 V, full at
+  10 V). WAVE, GAIN, CUTOFF, DRIVE, FINE and PAN follow the CV at audio rate; the others with the
+  knobs (every 32 samples), on top of a trig lock. PITCH by CV steps in semitones unless FREE is on.
+  An older patch keeps what its first four inputs did (WAVE GAIN CUTOFF DRIVE; on GRAIN START GAIN
+  CUTOFF P.SPRD) with their amounts; the old fifth and sixth inputs (FINE / DENSITY, PAN) are gone.
 - **The marker's LFO: shape, RATE, SYNC / T / D, LFO DEST, DEPTH**, running free (Hz, or synced to
   Wave Artifacts' tempo or CLOCK; restarts on RESET), sent to one of the marker's settings like the AD.
   It also comes out of its jack at +-10 V times **AMT**: patch it anywhere, including the expander's own CV
@@ -511,18 +521,6 @@ the row's next step. Copy / paste of a marker carries its LFO and AD too. As on 
 expander control shows that some step of the row locks it (white: the selected step does), and while a step is
 selected a bar under each control shows the value that step plays. A click on an empty part of the expander leaves
 the step, as on the main module.
-- **CV inputs with an AMT trimpot** for WAVE, GAIN, CUTOFF, DRIVE, FINE and PAN. AMT starts at
-  0, so nothing moves until you turn it up. At 100%, 10 V sweeps the whole sample for WAVE,
-  the whole cutoff range (about 1 V/oct) for CUTOFF, the whole range for DRIVE, 2 semitones
-  for FINE and hard left to hard right for PAN. **GAIN works as a VCA**: at AMT 0 it does
-  nothing, at 100% the marker's level follows the CV (silent at 0 V, full at 10 V).
-  On the GRAIN engine the inputs become START, GAIN, CUTOFF, P.SPRD, DENSITY and PAN, and the
-  START and DENSITY trimpots go 0-100% (no inverting). They keep their own values, separate from
-  WAVE and FINE. At 100%, 10 V adds the whole sample to START and the whole knob to DENSITY. PAN
-  works as on WAVE, with the same trimpot: 10 V at 100% goes hard left to hard right.
-- **Two LFOs** (shape, RATE, AMT, SYNC / T / D) with their own outputs at +-10 V. Patch them
-  anywhere, including the expander's own CV inputs. Synced LFOs follow Wave Artifacts' tempo
-  or CLOCK, and restart on RESET.
 
 Several expanders can control the same marker: their CVs add up, and their gates and GAIN
 VCAs multiply (the marker sounds only while all of their gates are high).

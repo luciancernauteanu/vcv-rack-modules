@@ -87,6 +87,8 @@ static constexpr double PLAYER_EDGE_SECONDS = 0.002;
 /** Every note fades in over this, read from this far before START: a note never starts on a step (a hit in noise,
 a shaker, has none near a zero crossing), and the hit itself, from START on, plays untouched */
 static constexpr double PLAYER_ATTACK_SECONDS = 0.001;
+/** The choices of the note fade-in (SAMPLE_FADE_IN_PARAM) */
+static constexpr double SAMPLE_FADE_IN_SECONDS[4] = {0.001, 0.003, 0.010, 0.030};
 /** Rate (source frames per output sample) above which the next decimated copy is read; down again 3% lower */
 static constexpr double PLAYER_LEVEL_UP[SAMPLE_LEVELS - 1] = {1.5, 3.0, 6.0};
 

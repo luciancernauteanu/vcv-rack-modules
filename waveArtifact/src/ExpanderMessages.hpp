@@ -39,6 +39,114 @@ inline float vcaLevel(float amt, float cvVolts) {
 	return 1.f - a + a * cv;
 }
 
+/** The expander's four CV inputs: each goes to one of the artifact's knobs, picked per engine (the name above the
+jack is a menu). */
+static const int NUM_CV_SLOTS = 4;
+static const int NUM_CV_ENGINES = 3;
+
+/** Where a CV input goes. Saved in patches by number: only append. */
+enum CvDest {
+	CV_WAVE,
+	CV_GAIN,
+	CV_CUTOFF,
+	CV_RES,
+	CV_DRIVE,
+	CV_PITCH,
+	CV_FINE,
+	CV_PAN,
+	CV_SMOOTH,
+	CV_LFO_RATE,
+	CV_LFO_AMT,
+	CV_DENSITY,
+	CV_SIZE,
+	CV_SPRAY,
+	CV_SPREAD,
+	CV_PSCATTER,
+	CV_SCAN,
+	CV_FADE,
+	CV_LENGTH,
+	CV_LOOP_POINT,
+	CV_ATTACK,
+	CV_DECAY,
+	CV_SUSTAIN,
+	CV_HOLD,
+	CV_RELEASE,
+	CV_EXP_LFO_RATE,
+	CV_EXP_LFO_DEPTH,
+	CV_EXP_AD_DEPTH,
+	NUM_CV_DESTS
+};
+
+struct CvDestInfo {
+	/** The marker setting it moves (index in LOCK_NAMES, = WaveArtifact::MARKER_SETTING_PARAMS) */
+	int setting;
+	/** Its name on the wavetable engine, and on GRAIN / SAMPLE */
+	const char* name;
+	const char* grainName;
+	/** The engines that offer it: bit 0 WAVE, bit 1 GRAIN, bit 2 SAMPLE */
+	uint8_t engines;
+	/** The audio-rate path (a ModTarget), or -1: added to the knob where the settings are read (every 32 samples) */
+	int fast;
+};
+
+static const CvDestInfo CV_DESTS[NUM_CV_DESTS] = {
+	{0, "WAVE", "START", 7, MOD_WAVE},
+	{8, "GAIN", "GAIN", 7, MOD_GAIN},
+	{9, "CUTOFF", "CUTOFF", 7, MOD_CUTOFF},
+	{10, "RES", "RES", 7, -1},
+	{12, "DRIVE", "DRIVE", 5, MOD_DRIVE},
+	{13, "PITCH", "PITCH", 7, -1},
+	{15, "FINE", "FINE", 5, MOD_FINE},
+	{16, "PAN", "PAN", 7, MOD_PAN},
+	{1, "SMOOTH", "SMOOTH", 1, -1},
+	{2, "LFO RATE", "LFO RATE", 1, -1},
+	{3, "LFO AMT", "LFO AMT", 1, -1},
+	{17, "DENSITY", "DENSITY", 2, -1},
+	{18, "SIZE", "SIZE", 2, -1},
+	{19, "SPRAY", "SPRAY", 2, -1},
+	{24, "SPREAD", "SPREAD", 2, -1},
+	{25, "P.SPRD", "P.SPRD", 2, -1},
+	{26, "SCAN", "SCAN", 2, -1},
+	{35, "FADE", "FADE", 6, -1},
+	{36, "LENGTH", "LENGTH", 6, -1},
+	{38, "LOOP POINT", "LOOP POINT", 4, -1},
+	{28, "ATTACK", "ATTACK", 7, -1},
+	{29, "DECAY", "DECAY", 7, -1},
+	{30, "SUSTAIN", "SUSTAIN", 7, -1},
+	{31, "HOLD", "HOLD", 7, -1},
+	{32, "RELEASE", "RELEASE", 7, -1},
+	{41, "EXP LFO RATE", "EXP LFO RATE", 7, -1},
+	{47, "EXP LFO DEPTH", "EXP LFO DEPTH", 7, -1},
+	{52, "EXP AD DEPTH", "EXP AD DEPTH", 7, -1},
+};
+
+/** A destination's name on an engine (0 WAVE, 1 GRAIN, 2 SAMPLE) */
+inline const char* cvDestName(int dest, int engine) {
+	if (dest < 0 || dest >= NUM_CV_DESTS)
+		return "";
+	return engine == 0 ? CV_DESTS[dest].name : CV_DESTS[dest].grainName;
+}
+
+inline bool cvDestOffered(int dest, int engine) {
+	return dest >= 0 && dest < NUM_CV_DESTS && ((CV_DESTS[dest].engines >> engine) & 1u);
+}
+
+/** Each engine's four inputs to start with: its main controls */
+static const int CV_DEFAULTS[NUM_CV_ENGINES][NUM_CV_SLOTS] = {
+	{CV_WAVE, CV_GAIN, CV_CUTOFF, CV_DRIVE},
+	{CV_WAVE, CV_DENSITY, CV_SIZE, CV_SPRAY},
+	{CV_WAVE, CV_LENGTH, CV_LOOP_POINT, CV_CUTOFF},
+};
+
+/** A CV on a knob that has no audio-rate path: `amount` is the share of the knob's range to add (10 V at 100% = the
+whole range) */
+struct CvKnobMod {
+	int8_t marker;
+	int8_t setting;
+	float amount;
+};
+static const int MAX_CV_KNOB_MODS = MAX_EXPANDERS * NUM_CV_SLOTS;
+
 struct ToExpanderMessage {
 	/** The main module's clock, so expander LFOs can sync to CLOCK */
 	ClockTracker clock;
@@ -50,6 +158,8 @@ struct ToExpanderMessage {
 	bool reset = false;
 	/** The main module runs the granular engine: the CV inputs are labelled START / P.SPRD / DENSITY */
 	bool granular = false;
+	/** The main module runs the sample player: WAVE reads START and FINE is LENGTH */
+	bool sample = false;
 	/** The main module is in POLY: GATE plays the marker's own ADSR instead of scaling its level */
 	bool poly = false;
 	/** Each marker's expander LFO (-1..1, run by the main module: its settings are marker settings, lockable), for
@@ -99,6 +209,9 @@ struct ToMainMessage {
 	bool modulated[NUM_MARKERS] = {};
 	/** An expander's LFO jack is patched for the artifact: its LFO must run even while it moves nothing */
 	bool lfoJack[NUM_MARKERS] = {};
+	/** The CVs on the other knobs (CvDestInfo::fast = -1), from every linked expander */
+	CvKnobMod knobMods[MAX_CV_KNOB_MODS] = {};
+	int numKnobMods = 0;
 };
 
 } // namespace wa

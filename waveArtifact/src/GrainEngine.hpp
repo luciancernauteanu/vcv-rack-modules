@@ -377,6 +377,8 @@ struct GrainInput {
 	bool player = false;
 	/** SAMPLE engine SNAP: START, the slice end and the loop point move to the nearest zero crossing */
 	bool zeroSnap = false;
+	/** SAMPLE engine: seconds a note fades in over (PLAYER_ATTACK_SECONDS by default) */
+	float noteFade = (float) PLAYER_ATTACK_SECONDS;
 	/** SAMPLE engine: the hits HIT snaps to (frames of the sample, sorted; the HITS slider), or null */
 	const std::vector<long>* hits = nullptr;
 
@@ -1161,7 +1163,7 @@ private:
 		p.dir = c.playerDir;
 		if (note)
 			c.player.start(p, wasRunning && c.player.sounding() && c.w > 1e-4f, DECLICK_TIME * sampleRate,
-				std::round((float) (PLAYER_ATTACK_SECONDS * sampleRate)), c.w);
+				std::round(in.noteFade * sampleRate), c.w);
 
 		float a, b;
 		c.player.process(S, p, &a, &b, c.w);
