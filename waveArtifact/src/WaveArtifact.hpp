@@ -12,6 +12,7 @@
 #include "WavetableBank.hpp"
 #include "StepLocks.hpp"
 #include "ExpanderMessages.hpp"
+#include "LoopLayout.hpp"
 
 struct WaveArtifactSequencer;
 
@@ -25,6 +26,71 @@ template <class TQ>
 struct ShowsValue : TQ, ValueShown {
 	float getValue() override {
 		return showing ? shown : TQ::getValue();
+	}
+};
+
+/** One WAV and everything that follows from it: the main sample (WaveArtifact::slots[0]) or an artifact's own.
+Bank handoff: the slot's worker publishes to pendingBank. process() moves pending -> active and the old active ->
+retired once retired is empty and what plays the slot has faded to silence; the UI thread deletes retired. So only
+the UI thread ever frees a bank, and never while process() can still read it. */
+struct SampleSlot {
+	std::atomic<wa::WavetableBank*> pendingBank{nullptr};
+	std::atomic<wa::WavetableBank*> activeBank{nullptr};
+	std::atomic<wa::WavetableBank*> retiredBank{nullptr};
+	/** An artifact's slot: its file was dropped (the UI cleared it); process() retires its bank once it is silent */
+	std::atomic<bool> clearPending{false};
+	/** Changes whenever the active bank changes (load, re-analysis, Initialize), so displays that cache something per
+	bank (the wavetable map) know when to rebuild. Never compare bank pointers: a new bank can reuse a freed one's
+	address. */
+	std::atomic<int> bankSerial{0};
+	std::atomic<bool> analyzing{false};
+	/** Bumped by Initialize and by dropping the file: an analysis started before it is discarded when it finishes */
+	std::atomic<int> analysisGeneration{0};
+
+	// UI thread
+	std::thread worker;
+	std::vector<uint8_t> wavBytes;
+	std::string fileName;
+	/** Full path of the last WAV asked for (even if it failed to load), for previous / next in its folder */
+	std::string filePath;
+	/** WAVs in filePath's folder, sorted; scanned on each load (not per frame) */
+	std::vector<std::string> folderWavs;
+	/** What the patch saved, waiting for loadSavedSample */
+	bool savedPending = false;
+	std::string savedFilePath;
+	std::string savedFileName;
+	uint32_t savedHash = 0;
+	/** Checksum of wavBytes, and of the copy last written to the patch's storage folder (and where) */
+	uint32_t wavHash = 0;
+	uint32_t storedHash = 0;
+	std::string storedPath;
+
+	// Hits (transients) for HIT, UI thread. Found again whenever the sample or the HITS slider changes, while the
+	// engine switch is on GRAIN or SAMPLE.
+	/** Frames of the slot's sample, sorted */
+	std::vector<long> transients;
+	/** Frames of the sample they were found in (to turn them into 0..1) */
+	long transientFrames = 0;
+	int transientsSerial = -1;
+	float transientsSens = -1.f;
+	double transientsTime = 0.0;
+	/** The hit list for HIT: the UI puts a new one in `hitsPending`, process() takes it into `hitsActive` and leaves
+	the old one in `hitsRetired`, which the UI frees (the bank swap's pattern: nothing is freed on the audio thread) */
+	std::atomic<std::vector<long>*> hitsPending{nullptr};
+	std::atomic<std::vector<long>*> hitsRetired{nullptr};
+	std::vector<long>* hitsActive = nullptr;
+	/** The sample's onset strength (wa::onsetStrength, UI thread), for the tempo; the bank it was worked out for */
+	std::vector<float> onset;
+	int onsetSerial = -1;
+	/** The file's tempo found in its audio (UI thread, see WaveArtifact::fileTempoOf), and what it was worked out for */
+	wa::FoundTempo fileTempo;
+	bool fileTempoFromName = false;
+	int fileTempoSerial = -1;
+	double fileTempoPrefer = 0.0;
+
+	/** UI thread: a file is loaded (or loading) */
+	bool hasFile() const {
+		return !wavBytes.empty();
 	}
 };
 
@@ -233,24 +299,31 @@ struct WaveArtifact : Module {
 		LIGHTS_LEN
 	};
 
-	// Bank handoff. The worker publishes to pendingBank. process() moves pending -> active and
-	// the old active -> retired, but only once retired is empty. The UI thread deletes retired.
-	// So only the UI thread ever frees a bank, and never while process() can still read it.
-	std::atomic<wa::WavetableBank*> pendingBank{nullptr};
-	std::atomic<wa::WavetableBank*> activeBank{nullptr};
-	std::atomic<wa::WavetableBank*> retiredBank{nullptr};
-	/** Changes whenever the active bank changes (load, re-analysis, Initialize), so displays that
-	cache something per bank (the wavetable map) know when to rebuild. Never compare bank pointers:
-	a new bank can reuse a freed one's address. */
-	std::atomic<int> bankSerial{0};
-	std::atomic<bool> analyzing{false};
-	/** Bumped by Initialize: an analysis started before it is discarded when it finishes. */
-	std::atomic<int> analysisGeneration{0};
-	/** Held while the worker publishes a bank and while Initialize clears them. */
+	/** The samples: slot 0 is the main one, slot 1 + i artifact i's own (empty: the artifact plays the main one) */
+	static const int NUM_SLOTS = 1 + NUM_MARKERS;
+	SampleSlot slots[NUM_SLOTS];
+	/** Held while a worker publishes a bank and while Initialize clears them. */
 	std::mutex publishMutex;
+	/** Audio thread: the slot each marker plays (its own once its bank is in, else 0), as last applied */
+	int markerSlot[NUM_MARKERS] = {};
+	/** UI thread: the slot whose file artifact i plays or is loading (its own while it has a file, else 0) */
+	int slotOf(int i) const {
+		return (i >= 0 && i < NUM_MARKERS && slots[1 + i].hasFile()) ? 1 + i : 0;
+	}
+	/** UI thread: the slot the screen shows (the selected artifact's) */
+	int shownSlot() const {
+		return slotOf(selectedMarker);
+	}
+	/** The bank a marker plays, or null (UI thread: may be one being swapped out; read it only right away) */
+	const wa::WavetableBank* bankOf(int i) const {
+		const wa::WavetableBank* own = (i >= 0 && i < NUM_MARKERS) ? slots[1 + i].activeBank.load(std::memory_order_relaxed) : nullptr;
+		return own ? own : slots[0].activeBank.load(std::memory_order_relaxed);
+	}
 
 	/** Table auditioned instead of the morph, or -1. Written by the UI, read by process(). Not saved. */
 	std::atomic<int> previewTable{-1};
+	/** The slot (file) the previewed table is in: the one the screen showed when it started */
+	std::atomic<int> previewSlot{0};
 	/** POLY: the marker whose slot the mouse is holding down, which plays it, or -1. Written by the UI. */
 	std::atomic<int> pressedMarker{-1};
 
@@ -267,6 +340,8 @@ struct WaveArtifact : Module {
 	2, for MONO_SEND_SAMPLES in a row), so SEND carries L + R on one channel. Reset when either cable is unplugged. */
 	bool monoSend[NUM_MARKERS] = {};
 	int monoCount[NUM_MARKERS] = {};
+	/** Each artifact's send (L, R) of the last sample, for the stereo SEND / RETURN module along the expander chain */
+	float chainSendL[NUM_MARKERS] = {}, chainSendR[NUM_MARKERS] = {};
 	/** A poly module needs a few samples to answer with 2 channels after its input became stereo: about 5 ms */
 	static const int MONO_SEND_SAMPLES = 256;
 	/** Granular engine: where each cloud reads (0..1 of the sample), and a counter of its grain starts
@@ -360,7 +435,13 @@ struct WaveArtifact : Module {
 	int settingsCountdown = 0;
 	/** The position LFO's SMOOTH time, read with the settings */
 	float posSmoothTime = 0.f;
-	const wa::WavetableBank* settingsBank = nullptr;
+	/** The slots' bank serials summed when the settings were last read (a new bank anywhere reads them again) */
+	int settingsSerial = -1;
+	/** Audio thread, checked every SETTINGS_INTERVAL samples (a swap only starts a 5 ms fade, so a few samples later is
+	fine): which artifacts' own samples wait to be swapped or dropped, and the slots' bank serials summed */
+	bool markerSwap[NUM_MARKERS] = {};
+	int slotsSerial = 0;
+	int slotCheckCountdown = 0;
 	/** Per marker: the locks it read with, its locks were gliding then, a new step's locks arrived */
 	uint64_t settingsLockMask[NUM_MARKERS] = {};
 	bool settingsGliding[NUM_MARKERS] = {};
@@ -385,13 +466,6 @@ struct WaveArtifact : Module {
 	int displayCounter = 0;
 
 	// UI thread only
-	std::thread worker;
-	std::vector<uint8_t> wavBytes;
-	std::string fileName;
-	/** Full path of the last WAV asked for (even if it failed to load), for previous / next in its folder */
-	std::string filePath;
-	/** WAVs in filePath's folder, sorted; scanned on each load (not per frame) */
-	std::vector<std::string> folderWavs;
 	wa::TableCountMode tableCountMode = wa::TABLES_AUTO;
 	/** How soft the artifacts are (see wa::TableTone); re-analyzes when changed. */
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
@@ -425,26 +499,17 @@ struct WaveArtifact : Module {
 	void process(const ProcessArgs& args) override;
 	void onSampleRateChange(const SampleRateChangeEvent& e) override;
 	void onReset(const ResetEvent& e) override;
-	/** The loaded WAV goes into the patch (its own storage folder, so the project opens without the original file),
-	with the original path, a checksum, the table count and tone. Loaded again by the UI (loadSavedSample). */
+	/** The loaded WAVs go into the patch (its own storage folder, so the project opens without the original files),
+	with their original paths, checksums, the table count and tone. Loaded again by the UI (loadSavedSample). */
 	json_t* dataToJson() override;
 	void dataFromJson(json_t* root) override;
 	void onSave(const SaveEvent& e) override;
-	/** UI thread, once after a patch or preset is loaded: the patch's copy of its WAV when the checksum matches,
-	else the original file */
-	void loadSavedSample();
+	/** UI thread, once after a patch or preset is loaded: the patch's copy of a slot's WAV when the checksum
+	matches, else the original file */
+	void loadSavedSample(int slot);
 	/** Right-click: L + R on both outputs (saved with the patch), and how far the output has faded to it */
 	std::atomic<bool> monoOutput{false};
 	float monoMix = 0.f;
-	/** What the patch saved, waiting for loadSavedSample */
-	bool savedSamplePending = false;
-	std::string savedFilePath;
-	std::string savedFileName;
-	uint32_t savedHash = 0;
-	/** Checksum of wavBytes, and of the copy last written to the patch's storage folder (and where) */
-	uint32_t wavHash = 0;
-	uint32_t storedHash = 0;
-	std::string storedPath;
 	/** Randomize also randomizes the expanders snapped on to the right (each keeps its own
 	randomizeEnabled flags: MARKER, LFO shape, SYNC, T, D and PERC stay as they are). */
 	void onRandomize(const RandomizeEvent& e) override;
@@ -535,50 +600,81 @@ struct WaveArtifact : Module {
 	are instead of turning the change into locks on the selected step (and putting the knobs back). */
 	std::atomic<bool> lockResync{false};
 
-	/** UI thread. Reads the file and starts analysis on the worker thread. */
-	void loadFile(const std::string& path);
-	/** UI thread. Re-runs analysis on the loaded bytes, e.g. after the table count changes. */
-	void startAnalysis();
-	/** UI thread. Loads the previous (dir = -1) or next (dir = +1) WAV in filePath's folder,
-	sorted by name, wrapping around. Does nothing without a path. */
-	void loadSibling(int dir);
-	/** UI thread. True when filePath's folder holds another WAV to step to. */
-	bool hasSiblings();
-	/** UI thread. Frees a bank that process() has retired. */
+	/** UI thread. Reads the file into a slot (0 main, 1 + i artifact i's own) and starts its analysis. */
+	void loadFile(const std::string& path, int slot = 0);
+	/** UI thread. Re-runs a slot's analysis on its loaded bytes, e.g. after the table count changes. */
+	void startAnalysis(int slot);
+	/** UI thread. Every slot with a file analyzed again (the table count or tone changed) */
+	void startAnalysisAll();
+	/** UI thread. Artifact i goes back to the main sample: its own file is dropped (its bank fades out first). */
+	void clearArtifactSample(int i);
+	/** UI thread. Loads the previous (dir = -1) or next (dir = +1) WAV in a slot's folder, sorted by name, wrapping
+	around. Does nothing without a path. */
+	void loadSibling(int dir, int slot = 0);
+	/** UI thread. True when a slot's folder holds another WAV to step to. */
+	bool hasSiblings(int slot = 0);
+	/** UI thread. Frees banks that process() has retired. */
 	void uiStep();
+	/** A short name for a slot's file in the status line and menus ("Artifact 2: kick.wav") */
+	std::string slotLabel(int slot);
 
-	// SAMPLE engine hits (transients), UI thread. Found again whenever the sample or the HITS slider changes, while
-	// the engine switch is on SAMPLE.
-	/** Frames of the active sample, sorted */
-	std::vector<long> transients;
-	/** Frames of the sample they were found in (to turn them into 0..1) */
-	long transientFrames = 0;
-	int transientsSerial = -1;
-	float transientsSens = -1.f;
-	double transientsTime = 0.0;
-	/** Finds the hits again when the sample or the HITS slider changed (at most every 30 ms while it is dragged) and
-	hands the list to the audio thread */
-	void updateTransients();
-	/** Moves a marker's START to the next (dir 1) or previous (dir -1) hit. False when there is none that way. */
+	/** Finds a slot's hits again when its sample or the HITS slider changed (at most every 30 ms while it is
+	dragged) and hands the list to the audio thread */
+	void updateTransients(int slot);
+	/** Moves a marker's START to the next (dir 1) or previous (dir -1) hit of its file. False when there is none. */
 	bool stepStartToTransient(int marker, int dir);
-	/** Puts the active markers' STARTs on hits spread over the sample */
+	/** Puts the active markers' STARTs on hits spread over their files (the markers on one file share its hits) */
 	bool spreadMarkersOnTransients();
-	/** The hit list for HIT: the UI puts a new one in `hitsPending`, process() takes it into `hitsActive` and leaves
-	the old one in `hitsRetired`, which the UI frees (the bank swap's pattern: nothing is freed on the audio thread) */
-	std::atomic<std::vector<long>*> hitsPending{nullptr};
-	std::atomic<std::vector<long>*> hitsRetired{nullptr};
-	std::vector<long>* hitsActive = nullptr;
-	/** UI thread. All 5 markers on, evenly spaced left to right, wavetables spread from the start
-	to the end of the sample, per-marker settings back to default. */
-	void autoArrange();
+	/** "Lay out the loop on the row" (SAMPLE, sequencer on the left): the marker's loop and how it would be laid out */
+	struct LoopLayoutInfo {
+		/** Empty when it can be laid out, else why not (shown in the menu) */
+		std::string why;
+		/** The loop: the marker's slice (START up to its LENGTH or the next marker), frames of its sample */
+		long from = 0, frames = 0;
+		/** The whole sample: frames and seconds; the loop's seconds */
+		long sampleFrames = 0;
+		double sampleSeconds = 0.0, seconds = 0.0;
+		/** Hits inside the loop (at the HITS setting) */
+		int hits = 0;
+		/** The tempo in the file name, or 0; the loop's beats and tempo, and where they came from (shown in the menu):
+		found in the audio, the file name, or (no clear beat) the module's tempo */
+		double nameBpm = 0.0;
+		int beats = 1;
+		double bpm = 0.0;
+		std::string tempoFrom;
+	};
+	LoopLayoutInfo loopLayoutInfo(int marker);
+	/** A slot's file tempo found in its audio (for Shift + drag on the map): worked out again when the sample or the
+	module's tempo (which octave) changes. With a tempo in the file name that agrees up to octaves, its exact value. */
+	wa::FoundTempo fileTempoOf(int slot, bool* fromName = nullptr);
+	/** A slot's onset strength curve (one value per wa::ONSET_HOP frames), worked out once per sample */
+	const std::vector<float>& onsetOf(int slot);
+	/** Replaces the marker's sequencer row with its loop laid out over `beats` (on the hits, or `grid`: every step),
+	and sets the marker to play each slice up to the next trig. False when it cannot (see LoopLayoutInfo::why). */
+	bool layoutLoopOnRow(int marker, int beats, bool grid);
+	/** layoutLoopOnRow with one undo entry for both modules; `beats` <= 0: the guessed length */
+	bool layoutLoopWithUndo(int marker, int beats, bool grid);
+	/** The layout's menu entries (the slice, on the hits / every step, other lengths), and them as a submenu */
+	void appendLoopLayoutItems(ui::Menu* menu, int marker);
+	void appendLoopLayoutMenu(ui::Menu* menu, int marker);
+	/** RND on a row: each lit trig (only the `marked` steps, when given) gets a random slice of the marker's loop with
+	probability `amount`: START on one of the slices LAY makes, LENGTH up to the row's next trig. Step 1 stays. The
+	rhythm, velocities and conditions stay. False when nothing changed. */
+	bool randomizeSlices(int marker, const bool* marked, float amount);
+	/** Audio thread: each marker's hit list for HIT (its file's), or null */
+	const std::vector<long>* markerHits(int i) const {
+		int k = markerSlot[i];
+		return slots[k].hitsActive;
+	}
 
-	std::string getStatus();
-	void setStatus(const std::string& s);
+	/** The file line of a slot (its last message: analyzing, the artifact count, an error) */
+	std::string getStatus(int slot = 0);
+	void setStatus(const std::string& s, int slot = 0);
 
 private:
 	std::mutex statusMutex;
-	std::string status;
+	std::string status[NUM_SLOTS];
 };
 
 /** UI thread. File dialog, then loadFile(). */
-void openLoadDialog(WaveArtifact* module);
+void openLoadDialog(WaveArtifact* module, int slot = 0);

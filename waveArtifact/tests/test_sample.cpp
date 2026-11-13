@@ -850,7 +850,8 @@ static void testHitSnap() {
 		rig.in.markers[0].start = 0.2f; // 0.4 s of 2 s
 		rig.in.markers[0].hitSnap = on == 1;
 		std::vector<long> hits = wa::findTransients(rig.bank->sample, wa::TRANSIENT_DEFAULT_SENSITIVITY);
-		rig.in.hits = &hits;
+		for (auto& h : rig.in.hits)
+			h = &hits;
 		rig.in.markers[0].loopMode = wa::PLAYER_ONE;
 		rig.run(0.05);
 		rig.note();
@@ -1271,7 +1272,8 @@ static void testGrainHitSnap() {
 			rig.in.markers[0].scan = scan == 1 ? 0.3f : 0.f;
 			rig.in.markers[0].scanLength = scan == 1 ? 0.05f : -1.f; // a 0.1 s loop
 			std::vector<long> hits = wa::findTransients(rig.bank->sample, wa::TRANSIENT_DEFAULT_SENSITIVITY);
-			rig.in.hits = &hits;
+			for (auto& h : rig.in.hits)
+				h = &hits;
 			rig.note();
 			std::vector<float> out;
 			rig.run(0.3, &out);
@@ -1294,7 +1296,219 @@ static void testGrainHitSnap() {
 		CHECK(level[1] > 10.0 * level[0], "HIT does not bring the grains onto the hit: RMS %.3f vs %.3f", level[1], level[0]);
 	}
 }
+#include "LoopLayout.hpp"
+
+// "Lay out the loop on the row": the tempo in a file name, the loop's beats, the row it takes, and the trigs (each on
+// a hit, playing up to the next one, together covering the whole loop).
+static void testLoopLayout() {
+	std::printf("loop layout\n");
+	{
+		double a = wa::bpmFromName("RainShake-70bpm.wav"), b = wa::bpmFromName("Loop 128 BPM.wav"), c = wa::bpmFromName("bpm_90 kit.wav");
+		double d = wa::bpmFromName("15 AT Tone Control Pad - Dreamy 130 Cm.wav"), e = wa::bpmFromName("kick 2.wav"), f = wa::bpmFromName("break 120.5bpm.wav");
+		double g = wa::bpmFromName("take 5 bpm.wav");
+		std::printf("  bpm from names: %g %g %g | none: %g %g | %g | out of range: %g\n", a, b, c, d, e, f, g);
+		CHECK(a == 70.0 && b == 128.0 && c == 90.0 && d == 0.0 && e == 0.0 && f == 120.5 && g == 0.0, "bpm from file names");
+	}
+	{
+		double sec = 4.0 * 60.0 / 70.0; // 4 beats at 70 bpm
+		int named = wa::guessLoopBeats(sec, 70.0, 120.0), at120 = wa::guessLoopBeats(sec, 0.0, 120.0), at80 = wa::guessLoopBeats(sec, 0.0, 80.0);
+		int pad = wa::guessLoopBeats(8.0 * 60.0 / 130.0, 0.0, 120.0);
+		std::printf("  beats of a 4-beat 70 bpm loop: named %d, at 120 %d, at 80 %d; 8 beats at 130 (at 120): %d\n", named, at120, at80, pad);
+		CHECK(named == 4 && at120 == 8 && at80 == 4 && pad == 8, "loop beats");
+	}
+	{
+		struct Case {
+			int beats, clock, steps;
+		};
+		const Case cases[] = {{8, 1, 16}, {4, 3, 16}, {2, 4, 16}, {1, 4, 8}, {16, 0, 16}, {128, -4, 16}, {3, 3, 12}, {6, 1, 12}};
+		for (const Case& k : cases) {
+			int ci = 99, st = 0;
+			bool ok = wa::layoutRow(k.beats, 16, &ci, &st);
+			CHECK(ok && ci == k.clock && st == k.steps, "%d beats: clock %d steps %d (want %d, %d)", k.beats, ci, st, k.clock, k.steps);
+		}
+		int ci, st;
+		CHECK(!wa::layoutRow(256, 16, &ci, &st), "256 beats does not fit a row");
+		std::printf("  rows: 8 beats -> 16 x2, 4 -> 16 x4, 1 -> 8 x8, 128 -> 16 /8, 3 -> 12 x4\n");
+	}
+	{
+		// The loop: 16 steps of 1000 frames from frame 1000. A hit 2.4 steps in shares step 2 (the nearest wins); one at
+		// 15.99 steps belongs to the next pass; one before the loop is not in it.
+		std::vector<long> hits = {500, 1000, 3020, 3400, 8990, 16990};
+		std::vector<wa::LayoutTrig> t = wa::layoutTrigs(hits, 1000, 16000, 16, false);
+		long sum = 0;
+		for (const wa::LayoutTrig& x : t)
+			sum += x.length;
+		std::printf("  on the hits: %d trigs, steps", (int) t.size());
+		for (const wa::LayoutTrig& x : t)
+			std::printf(" %d@%ld+%ld", x.step, x.start, x.length);
+		std::printf(", lengths sum %ld of 16000\n", sum);
+		CHECK(t.size() == 3 && t[0].step == 0 && t[0].start == 1000 && t[0].length == 2020 && t[1].step == 2 && t[1].start == 3020 &&
+				t[1].length == 5970 && t[2].step == 8 && t[2].start == 8990 && t[2].length == 8010,
+			"trigs on the hits");
+		CHECK(sum == 16000, "the slices cover the loop: %ld", sum);
+		// A soft hit 0.4 steps before the beat and the beat's own hit: the step takes the beat's
+		std::vector<wa::LayoutTrig> v = wa::layoutTrigs({0, 1600, 2010}, 0, 16000, 16, false);
+		CHECK(v.size() == 2 && v[1].step == 2 && v[1].start == 2010 && v[0].length == 2010, "the hit nearest the step (%ld)",
+			v.size() > 1 ? v[1].start : -1L);
+		// No hit at the start: step 1 still plays from the loop's start
+		std::vector<wa::LayoutTrig> u = wa::layoutTrigs({5000}, 0, 16000, 16, false);
+		CHECK(u.size() == 2 && u[0].step == 0 && u[0].start == 0 && u[0].length == 5000 && u[1].step == 5 && u[1].length == 11000,
+			"step 1 from the loop's start (%d trigs)", (int) u.size());
+		// Every step
+		std::vector<wa::LayoutTrig> g = wa::layoutTrigs({}, 0, 1000, 4, true);
+		CHECK(g.size() == 4 && g[1].start == 250 && g[3].start == 750 && g[3].length == 250, "grid trigs");
+	}
+}
+// Shift + drag on the map: the part for LAY snaps its press to a hit and its length to whole beats at the file's tempo
+static void testLaySelection() {
+	std::printf("LAY selection (Shift + drag on the map)\n");
+	const double sr = 48000.0, bpm = 120.0; // a beat: 24000 frames
+	const long total = 48000 * 45;           // 45 s
+	std::vector<long> hits = {100000, 500000, 900000};
+	// Press 3000 frames after a hit (within the snap), drag about 7.6 beats right: 8 beats (2 bars) from the hit
+	wa::LaySelection a = wa::laySelection(hits, total, sr, bpm, 503000, 503000 + 182000, 20000);
+	std::printf("  right: from %ld, %ld frames, %d beats\n", a.from, a.frames, a.beats);
+	CHECK(a.from == 500000 && a.frames == 8 * 24000 && a.beats == 8, "snapped to the hit and 8 beats");
+	// Drag left from the press: the part ends at the (snapped) press; 5.2 beats -> 4
+	wa::LaySelection b = wa::laySelection(hits, total, sr, bpm, 899000, 899000 - 125000, 20000);
+	CHECK(b.from == 900000 - 4 * 24000 && b.frames == 4 * 24000 && b.beats == 4, "left: 4 beats ending at the hit (%ld, %ld, %d)", b.from,
+		b.frames, b.beats);
+	// Far from any hit: the press stays; near the end the beats halve until they fit
+	long press = total - 3 * 24000;
+	wa::LaySelection c = wa::laySelection(hits, total, sr, bpm, press, total, 20000);
+	CHECK(c.from == press && c.beats == 2 && c.frames == 2 * 24000, "fits before the end: %d beats", c.beats);
+	// No tempo: the drag as it is
+	wa::LaySelection d = wa::laySelection(hits, total, sr, 0.0, 200000, 250000, 20000);
+	CHECK(d.from == 200000 && d.frames == 50000 && d.beats == 0, "no tempo: the drag (%ld, %ld)", d.from, d.frames);
+	// A click without a drag, with a tempo: one beat
+	wa::LaySelection e = wa::laySelection(hits, total, sr, bpm, 100000, 100000, 20000);
+	CHECK(e.from == 100000 && e.beats == 1 && e.frames == 24000, "a click: one beat");
+	std::printf("  left: from %ld (%d beats); near the end: %d beats; no tempo: %ld frames; a click: %d beat\n", b.from, b.beats, c.beats,
+		d.frames, e.beats);
+}
+// The tempo found in the audio (no file name needed): loops (a whole number of beats) and long files
+static long tempoJitter(uint32_t* rng, long amount) {
+	*rng = *rng * 1664525u + 1013904223u;
+	return (long) ((double) (*rng >> 8) / 16777216.0 * 2.0 * amount) - amount;
+}
+
+/** An onset strength curve (one value per wa::ONSET_HOP frames) of a drum pattern: a strong kick / snare on each beat,
+a softer hat on each 8th (swung: at `swing` of the beat), a soft ghost before every 4th beat, from `offset` frames,
++-`jitter` frames, over `frames` frames; plus a little noise everywhere */
+static std::vector<float> tempoCurve(double bpm, double sr, int beats, double offset, double swing, long jitter, long frames, uint32_t seed) {
+	long n = frames / wa::ONSET_HOP;
+	std::vector<float> e((size_t) n, 0.f);
+	uint32_t rng = seed;
+	auto bump = [&](double frame, float amp) {
+		double c = frame / wa::ONSET_HOP;
+		for (long h = std::max(0L, (long) c - 8); h < std::min(n, (long) c + 9); h++)
+			e[(size_t) h] += amp * (float) std::exp(-0.5 * (h - c) * (h - c) / 4.0);
+	};
+	double beat = 60.0 * sr / bpm;
+	for (int b = 0; b < beats; b++) {
+		double t0 = offset + b * beat;
+		bump(t0 + tempoJitter(&rng, jitter), 1.f);
+		bump(t0 + swing * beat + tempoJitter(&rng, jitter), 0.45f);
+		if (b % 4 == 3)
+			bump(t0 + 0.75 * beat + tempoJitter(&rng, jitter), 0.2f);
+	}
+	for (long h = 0; h < n; h++)
+		e[(size_t) h] += 0.02f * (float) ((tempoJitter(&rng, 1000) + 1000) / 2000.0);
+	return e;
+}
+
+static void testTempoFound() {
+	std::printf("tempo found in the audio\n");
+	const double sr = 44100.0;
+	const int hop = wa::ONSET_HOP;
+	{
+		// 4 beats at 70 bpm, +-8 ms
+		long frames = std::lround(4 * 60.0 / 70.0 * sr);
+		std::vector<float> e = tempoCurve(70.0, sr, 4, 0.0, 0.5, 350, frames, 1);
+		wa::FoundTempo a = wa::loopTempo(e, hop, 0, frames, sr, 120.0), b = wa::loopTempo(e, hop, 0, frames, sr, 80.0);
+		std::printf("  loop 4 beats @ 70 (+-8 ms): at 120 -> %d beats %.1f bpm (score %.2f); at 80 -> %d beats %.1f bpm\n", a.beats, a.bpm,
+			a.score, b.beats, b.bpm);
+		CHECK(a.found && a.beats == 8 && b.found && b.beats == 4, "70 bpm loop: 8 beats near 120, 4 near 80");
+	}
+	{
+		// 2 bars at 96 bpm, swung 8ths (2/3 of the beat)
+		long frames = std::lround(8 * 60.0 / 96.0 * sr);
+		std::vector<float> e = tempoCurve(96.0, sr, 8, 0.0, 2.0 / 3.0, 200, frames, 2);
+		wa::FoundTempo a = wa::loopTempo(e, hop, 0, frames, sr, 100.0);
+		std::printf("  swung loop 8 beats @ 96: %d beats %.1f bpm (score %.2f)\n", a.beats, a.bpm, a.score);
+		CHECK(a.found && a.beats == 8, "swung 96 bpm loop: 8 beats (%d)", a.beats);
+	}
+	{
+		// Noise only: no clear beat
+		long frames = (long) (8.0 * sr);
+		std::vector<float> e((size_t) (frames / hop));
+		uint32_t rng = 9;
+		for (float& v : e)
+			v = (float) ((tempoJitter(&rng, 1000) + 1000) / 2000.0);
+		wa::FoundTempo a = wa::loopTempo(e, hop, 0, frames, sr, 120.0), f = wa::fileTempo(e, hop, sr, 120.0);
+		std::printf("  noise: loop %s (score %.2f), file %s (score %.2f)\n", a.found ? "FOUND" : "none", a.score, f.found ? "FOUND" : "none", f.score);
+		CHECK(!a.found && !f.found, "noise has no tempo");
+	}
+	{
+		// A 45 s song at 123 bpm starting 0.37 s in, +-5 ms
+		long frames = (long) (45.0 * sr);
+		std::vector<float> e = tempoCurve(123.0, sr, 90, 0.37 * sr, 0.5, 220, frames, 4);
+		wa::FoundTempo f = wa::fileTempo(e, hop, sr, 120.0), g = wa::fileTempo(e, hop, sr, 70.0);
+		std::printf("  song 45 s @ 123 from 0.37 s: %.2f bpm (score %.2f); near 70: %.2f\n", f.bpm, f.score, g.bpm);
+		CHECK(f.found && std::fabs(f.bpm - 123.0) < 0.25, "song tempo %.2f", f.bpm);
+		CHECK(g.found && std::fabs(g.bpm - 61.5) < 0.15, "the octave nearest 70: %.2f", g.bpm);
+		// Swung, at 96
+		std::vector<float> sw = tempoCurve(96.0, sr, 70, 0.2 * sr, 2.0 / 3.0, 220, frames, 5);
+		wa::FoundTempo s = wa::fileTempo(sw, hop, sr, 100.0);
+		std::printf("  swung song 45 s @ 96: %.2f bpm (score %.2f)\n", s.bpm, s.score);
+		CHECK(s.found && std::fabs(s.bpm - 96.0) < 0.25, "swung song tempo %.2f", s.bpm);
+	}
+	{
+		// Real audio through onsetStrength: a 2-bar loop at 100 bpm of decaying noise bursts (kick-like loud on the
+		// beats, quiet hats on the 8ths) over a steady quiet hum
+		double beat = 60.0 / 100.0;
+		std::vector<float> src((size_t) (8 * beat * SRC_SR));
+		uint32_t rng = 11;
+		for (size_t i = 0; i < src.size(); i++) {
+			double t = (double) i / SRC_SR;
+			double inBeat = std::fmod(t, beat), in8 = std::fmod(t, beat / 2.0);
+			float noise = (float) tempoJitter(&rng, 1000) / 1000.f;
+			float kick = 0.8f * (float) std::exp(-inBeat / 0.06) * (float) std::sin(2 * PI * 60.0 * inBeat);
+			float hat = 0.15f * (float) std::exp(-in8 / 0.02) * noise;
+			src[i] = kick + hat + 0.05f * (float) std::sin(2 * PI * 110.0 * t);
+		}
+		auto bank = makeBank(src);
+		std::vector<float> e = wa::onsetStrength(bank->sample);
+		wa::FoundTempo a = wa::loopTempo(e, hop, 0, (long) bank->sample.frames, SRC_SR, 120.0);
+		std::printf("  synthesized 2-bar loop @ 100: %d beats %.1f bpm (score %.2f)\n", a.beats, a.bpm, a.score);
+		CHECK(a.found && a.beats == 8, "synthesized loop: 8 beats (%d)", a.beats);
+	}
+	CHECK(wa::sameTempo(70.0, 140.0) && wa::sameTempo(123.0, 61.6) && !wa::sameTempo(70.0, 105.0) && !wa::sameTempo(0.0, 70.0), "same tempo up to octaves");
+}
+// LAY's velocities: a hit's peak in the sample against the loop's loudest, gently in dB
+static void testLayVelocity() {
+	std::printf("LAY velocities from the hits\n");
+	float v0 = wa::layVelocity(0.0), v12 = wa::layVelocity(12.0), v30 = wa::layVelocity(30.0), v60 = wa::layVelocity(60.0), vneg = wa::layVelocity(-3.0);
+	std::printf("  0 dB under: %.2f, 12 dB: %.2f, 30 dB: %.2f, 60 dB: %.2f\n", v0, v12, v30, v60);
+	CHECK(v0 == 1.f && std::fabs(v12 - 0.72f) < 0.005f && std::fabs(v30 - wa::LAY_VELOCITY_MIN) < 1e-6f && v60 == v30 && vneg == 1.f, "velocity mapping");
+	// Peaks of a loud and a soft burst (a quarter of the level: 12 dB under)
+	std::vector<float> src((size_t) SRC_SR, 0.f);
+	for (int i = 0; i < 2000; i++) {
+		src[(size_t) (1000 + i)] = 0.8f * (float) std::sin(2 * PI * 200.0 * i / SRC_SR);
+		src[(size_t) (20000 + i)] = 0.2f * (float) std::sin(2 * PI * 200.0 * i / SRC_SR);
+	}
+	auto bank = makeBank(src);
+	long w = (long) (wa::LAY_PEAK_SECONDS * SRC_SR);
+	double loud = wa::hitPeakDb(bank->sample, 1000, w), soft = wa::hitPeakDb(bank->sample, 20000, w);
+	std::printf("  bursts: loud %.1f dB, soft %.1f dB -> velocity %.2f\n", loud, soft, wa::layVelocity(loud - soft));
+	CHECK(std::fabs((loud - soft) - 12.04) < 0.3, "the soft burst is 12 dB under (%.2f)", loud - soft);
+	CHECK(wa::hitPeakDb(bank->sample, 40000, w) <= -199.0, "silence has no peak");
+}
 int main() {
+	testLayVelocity();
+	testTempoFound();
+	testLaySelection();
+	testLoopLayout();
 	testGrainHitSnap();
 	testRetriggerDecayed();
 	testHitStarts();

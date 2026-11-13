@@ -610,8 +610,18 @@ static void testModEnvelope() {
 		s.put(wa::MOD_DEST_GAIN, -2.f);
 		s.put(99, 1.f); // out of range: ignored
 		std::printf("  depth x source: PITCH 0.5 -> %+.1f st, PAN -1 -> %+.1f, GAIN -2 -> x%.1f\n", s.add[wa::MOD_DEST_PITCH],
-			s.add[wa::MOD_DEST_PAN], s.gainMul());
-		CHECK(s.add[wa::MOD_DEST_PITCH] == 12.f && s.add[wa::MOD_DEST_PAN] == -2.f && s.gainMul() == 0.f, "destination scaling");
+			s.add[wa::MOD_DEST_PAN], s.gainLevel(1.f));
+		CHECK(s.add[wa::MOD_DEST_PITCH] == 12.f && s.add[wa::MOD_DEST_PAN] == -2.f && s.gainLevel(1.f) == 0.f, "destination scaling");
+	}
+	// GAIN adds to the knob: heard with the GAIN knob all the way down (it used to multiply it, so nothing moved)
+	{
+		wa::ModSum up, down;
+		up.put(wa::MOD_DEST_GAIN, 1.f);
+		down.put(wa::MOD_DEST_GAIN, -0.5f);
+		std::printf("  GAIN knob 0: +1 -> x%.2f, -0.5 -> x%.2f; knob 1: +1 -> x%.2f; knob 4: +1 -> x%.2f\n", up.gainLevel(0.f),
+			down.gainLevel(0.f), up.gainLevel(1.f), up.gainLevel(4.f));
+		CHECK(up.gainLevel(0.f) == 1.f && down.gainLevel(0.f) == 0.f && up.gainLevel(1.f) == 2.f && up.gainLevel(4.f) == 4.f,
+			"GAIN added to the knob");
 	}
 }
 int main() {

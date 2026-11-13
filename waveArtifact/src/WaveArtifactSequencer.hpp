@@ -90,6 +90,19 @@ struct WaveArtifactSequencer : Module {
 		laneSetting = k;
 		laneCondition = false;
 	}
+	/** Steps marked with Ctrl + Shift + click / drag, for the row's RND (random slices). UI thread, not saved. */
+	bool marked[ROWS][STEPS] = {};
+	bool anyMarked(int r) const {
+		for (int s = 0; s < STEPS; s++)
+			if (marked[r][s])
+				return true;
+		return false;
+	}
+	void clearMarks() {
+		for (int r = 0; r < ROWS; r++)
+			for (int s = 0; s < STEPS; s++)
+				marked[r][s] = false;
+	}
 
 	WaveArtifactSequencer();
 	~WaveArtifactSequencer();

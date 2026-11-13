@@ -98,3 +98,6 @@ struct WaveArtifactExpander : Module {
 
 /** True if `m` is waveArtifact's expander (checks the model, as Rack requires before using its messages). */
 bool isWaveArtifactExpander(Module* m);
+/** True if `m` is the stereo SEND / RETURN module (the end of the expander chain: it takes the expanders' message
+and answers with a ToMainMessage of its own) */
+bool isWaveArtifactSendReturn(Module* m);

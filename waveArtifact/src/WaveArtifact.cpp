@@ -1,6 +1,7 @@
 #include <osdialog.h>
 
 #include "Layout.hpp"
+#include "LoopLayout.hpp"
 #include "WaveArtifact.hpp"
 #include "WaveArtifactExpander.hpp"
 #include "WaveArtifactSequencer.hpp"
@@ -94,7 +95,8 @@ struct WaveQuantity : ParamQuantity {
 	}
 	std::string getDisplayValueString() override {
 		WaveArtifact* m = dynamic_cast<WaveArtifact*>(module);
-		const wa::WavetableBank* bank = m ? m->activeBank.load() : nullptr;
+		// The marker's own file, or the main one
+		const wa::WavetableBank* bank = m ? m->bankOf(paramId - WaveArtifact::MARKER_WAVE_PARAM) : nullptr;
 		if (!bank)
 			return string::f("%.0f%%", getValue() * 100.f);
 		if (grain())
@@ -127,8 +129,9 @@ WaveArtifact::WaveArtifact() {
 	configParam(POS_ATTEN_PARAM, 0.f, 1.f, 0.f, "Position CV amount", "%", 0.f, 100.f);
 	configParam(FREQ_PARAM, -4.f, 4.f, 0.f, "Frequency", " Hz", 2.f, dsp::FREQ_C4);
 	configButton(LOAD_PARAM, "Load WAV");
-	// No panel button any more (right-click menu: Auto arrange); the param stays for patch compatibility.
-	configButton(ARRANGE_PARAM, "Auto arrange");
+	// Unused (was Auto arrange, removed): the param stays so later IDs and patches stay valid.
+	configButton(ARRANGE_PARAM, "Unused");
+	paramQuantities[ARRANGE_PARAM]->randomizeEnabled = false;
 
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		std::string name = "Marker " + std::to_string(i + 1);
@@ -362,8 +365,10 @@ void WaveArtifact::onRandomize(const RandomizeEvent& e) {
 
 static std::vector<std::string> listWavs(const std::string& dir);
 
-/** The loaded WAV's copy in the patch's storage folder */
-static const char* const PATCH_SAMPLE_NAME = "sample.wav";
+/** A slot's copy in the patch's storage folder: the main sample, then each artifact's own */
+static std::string patchSampleName(int slot) {
+	return slot == 0 ? std::string("sample.wav") : string::f("artifact%d.wav", slot);
+}
 
 /** FNV-1a of a file's bytes: tells the WAV a patch saved from another one (a preset loaded into a module whose
 storage folder still holds its own earlier sample) */
@@ -376,13 +381,45 @@ static uint32_t wavHashOf(const std::vector<uint8_t>& bytes) {
 	return h;
 }
 
+static void slotFileToJson(const SampleSlot& s, json_t* obj) {
+	json_object_set_new(obj, "filePath", json_string(s.filePath.c_str()));
+	json_object_set_new(obj, "fileName", json_string(s.fileName.c_str()));
+	json_object_set_new(obj, "sampleHash", json_integer(s.wavHash));
+}
+
+/** What a patch saved for a slot, for loadSavedSample. An object without a file (or none at all): no file. */
+static void slotFileFromJson(SampleSlot& s, json_t* obj) {
+	json_t* f = obj ? json_object_get(obj, "filePath") : nullptr;
+	json_t* n = obj ? json_object_get(obj, "fileName") : nullptr;
+	json_t* h = obj ? json_object_get(obj, "sampleHash") : nullptr;
+	s.savedFilePath = (f && json_is_string(f)) ? json_string_value(f) : "";
+	s.savedFileName = (n && json_is_string(n)) ? json_string_value(n) : "";
+	s.savedHash = h ? (uint32_t) json_integer_value(h) : 0u;
+	s.savedPending = true;
+}
+
 json_t* WaveArtifact::dataToJson() {
 	json_t* root = json_object();
-	if (!wavBytes.empty()) {
-		json_object_set_new(root, "filePath", json_string(filePath.c_str()));
-		json_object_set_new(root, "fileName", json_string(fileName.c_str()));
-		json_object_set_new(root, "sampleHash", json_integer(wavHash));
+	if (slots[0].hasFile())
+		slotFileToJson(slots[0], root);
+	// Each artifact's own sample (null: it plays the main one)
+	json_t* arts = json_array();
+	bool any = false;
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		const SampleSlot& s = slots[1 + i];
+		if (!s.hasFile()) {
+			json_array_append_new(arts, json_null());
+			continue;
+		}
+		json_t* a = json_object();
+		slotFileToJson(s, a);
+		json_array_append_new(arts, a);
+		any = true;
 	}
+	if (any)
+		json_object_set_new(root, "artifactSamples", arts);
+	else
+		json_decref(arts);
 	json_object_set_new(root, "tableCountMode", json_integer((int) tableCountMode));
 	json_object_set_new(root, "tableTone", json_integer((int) tableTone));
 	json_object_set_new(root, "monoOutput", json_boolean(monoOutput.load()));
@@ -396,69 +433,87 @@ void WaveArtifact::dataFromJson(json_t* root) {
 		monoOutput = json_is_true(j);
 	if (json_t* j = json_object_get(root, "tableTone"))
 		tableTone = (wa::TableTone) clamp((int) json_integer_value(j), 0, (int) wa::TABLE_TONES_LEN - 1);
-	json_t* f = json_object_get(root, "filePath");
-	json_t* n = json_object_get(root, "fileName");
-	json_t* h = json_object_get(root, "sampleHash");
-	if (f || n) {
-		savedFilePath = (f && json_is_string(f)) ? json_string_value(f) : "";
-		savedFileName = (n && json_is_string(n)) ? json_string_value(n) : "";
-		savedHash = h ? (uint32_t) json_integer_value(h) : 0u;
-		savedSamplePending = true;
+	// The main sample: only when the patch has one (a patch without keeps what is loaded, as before)
+	if (json_object_get(root, "filePath") || json_object_get(root, "fileName"))
+		slotFileFromJson(slots[0], root);
+	// The artifacts' own: what the patch has, and none for the others (they go back to the main sample)
+	json_t* arts = json_object_get(root, "artifactSamples");
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		json_t* a = (arts && json_is_array(arts)) ? json_array_get(arts, i) : nullptr;
+		if (a && !json_is_object(a))
+			a = nullptr;
+		if (a || slots[1 + i].hasFile())
+			slotFileFromJson(slots[1 + i], a);
 	}
 }
 
 void WaveArtifact::onSave(const SaveEvent& e) {
 	Module::onSave(e);
-	// Keep a copy of the loaded WAV in the patch, so the project opens without the original file. Written once per
+	// Keep a copy of each loaded WAV in the patch, so the project opens without the original files. Written once per
 	// sample (Rack saves every few seconds into its autosave folder, and archives that folder with the patch).
-	if (wavBytes.empty())
-		return;
-	std::string dir = createPatchStorageDirectory();
-	if (dir.empty())
-		return;
-	std::string path = system::join(dir, PATCH_SAMPLE_NAME);
-	if (path == storedPath && wavHash == storedHash && system::exists(path))
-		return;
-	FILE* fp = std::fopen(path.c_str(), "wb");
-	if (!fp)
-		return;
-	size_t written = std::fwrite(wavBytes.data(), 1, wavBytes.size(), fp);
-	std::fclose(fp);
-	if (written == wavBytes.size()) {
-		storedPath = path;
-		storedHash = wavHash;
+	std::string dir;
+	for (int k = 0; k < NUM_SLOTS; k++) {
+		SampleSlot& s = slots[k];
+		if (!s.hasFile())
+			continue;
+		if (dir.empty())
+			dir = createPatchStorageDirectory();
+		if (dir.empty())
+			return;
+		std::string path = system::join(dir, patchSampleName(k));
+		if (path == s.storedPath && s.wavHash == s.storedHash && system::exists(path))
+			continue;
+		FILE* fp = std::fopen(path.c_str(), "wb");
+		if (!fp)
+			continue;
+		size_t written = std::fwrite(s.wavBytes.data(), 1, s.wavBytes.size(), fp);
+		std::fclose(fp);
+		if (written == s.wavBytes.size()) {
+			s.storedPath = path;
+			s.storedHash = s.wavHash;
+		}
 	}
 }
 
-void WaveArtifact::loadSavedSample() {
-	savedSamplePending = false;
-	if (analyzing)
+void WaveArtifact::loadSavedSample(int slot) {
+	SampleSlot& s = slots[slot];
+	s.savedPending = false;
+	// An artifact the patch saved without its own file plays the main sample
+	if (slot > 0 && s.savedFilePath.empty() && s.savedFileName.empty()) {
+		if (s.hasFile())
+			clearArtifactSample(slot - 1);
 		return;
+	}
+	if (s.analyzing) {
+		// Try again next frame, once the analysis running now has finished
+		s.savedPending = true;
+		return;
+	}
 	// The patch's own copy when it is the WAV the patch saved, else the original file where it was
 	std::vector<uint8_t> bytes;
-	std::string stored = system::join(getPatchStorageDirectory(), PATCH_SAMPLE_NAME);
+	std::string stored = system::join(getPatchStorageDirectory(), patchSampleName(slot));
 	if (system::exists(stored)) {
 		bytes = system::readFile(stored);
-		if (savedHash != 0u && wavHashOf(bytes) != savedHash)
+		if (s.savedHash != 0u && wavHashOf(bytes) != s.savedHash)
 			bytes.clear();
 		else if (!bytes.empty()) {
-			storedPath = stored;
-			storedHash = wavHashOf(bytes);
+			s.storedPath = stored;
+			s.storedHash = wavHashOf(bytes);
 		}
 	}
-	if (bytes.empty() && !savedFilePath.empty() && system::exists(savedFilePath) && system::getFileSize(savedFilePath) <= wa::MAX_FILE_BYTES)
-		bytes = system::readFile(savedFilePath);
-	filePath = savedFilePath;
-	folderWavs = filePath.empty() ? std::vector<std::string>() : listWavs(system::getDirectory(filePath));
-	std::string name = savedFileName.empty() ? system::getFilename(savedFilePath) : savedFileName;
+	if (bytes.empty() && !s.savedFilePath.empty() && system::exists(s.savedFilePath) && system::getFileSize(s.savedFilePath) <= wa::MAX_FILE_BYTES)
+		bytes = system::readFile(s.savedFilePath);
+	s.filePath = s.savedFilePath;
+	s.folderWavs = s.filePath.empty() ? std::vector<std::string>() : listWavs(system::getDirectory(s.filePath));
+	std::string name = s.savedFileName.empty() ? system::getFilename(s.savedFilePath) : s.savedFileName;
 	if (bytes.empty()) {
-		setStatus("Sample not found: " + name);
+		setStatus((slot > 0 ? string::f("Artifact %d: ", slot) : std::string()) + "Sample not found: " + name, slot);
 		return;
 	}
-	wavBytes = std::move(bytes);
-	wavHash = wavHashOf(wavBytes);
-	fileName = name;
-	startAnalysis();
+	s.wavBytes = std::move(bytes);
+	s.wavHash = wavHashOf(s.wavBytes);
+	s.fileName = name;
+	startAnalysis(slot);
 }
 
 void WaveArtifact::onReset(const ResetEvent& e) {
@@ -467,42 +522,52 @@ void WaveArtifact::onReset(const ResetEvent& e) {
 	lockResync = true;
 	selectedMarker = 0;
 	previewTable = -1;
-	// Initialize = a fresh module: no sample. Rack calls onReset with the engine locked
+	// Initialize = a fresh module: no samples. Rack calls onReset with the engine locked
 	// (Engine::resetModule takes the engine mutex exclusively), so process() is not running and the
 	// banks can be freed here. An analysis still running is discarded when it finishes (generation).
 	{
 		std::lock_guard<std::mutex> lock(publishMutex);
-		analysisGeneration++;
-		delete pendingBank.exchange(nullptr);
-		delete activeBank.exchange(nullptr);
-		delete retiredBank.exchange(nullptr);
-		bankSerial++;
+		for (SampleSlot& s : slots) {
+			s.analysisGeneration++;
+			delete s.pendingBank.exchange(nullptr);
+			delete s.activeBank.exchange(nullptr);
+			delete s.retiredBank.exchange(nullptr);
+			s.clearPending = false;
+			s.bankSerial++;
+		}
 	}
-	wavBytes.clear();
-	wavHash = 0;
+	for (int i = 0; i < NUM_MARKERS; i++)
+		markerSlot[i] = 0;
+	for (SampleSlot& s : slots) {
+		s.wavBytes.clear();
+		s.wavHash = 0;
+		s.savedPending = false;
+		s.fileName.clear();
+		s.filePath.clear();
+		s.folderWavs.clear();
+	}
 	monoOutput = false;
-	savedSamplePending = false;
-	fileName.clear();
-	filePath.clear();
-	folderWavs.clear();
+	for (int k = 1; k < NUM_SLOTS; k++)
+		setStatus("", k);
 	setStatus("Load a WAV (max 10 MB)");
 }
 
 WaveArtifact::~WaveArtifact() {
-	if (worker.joinable())
-		worker.join();
-	delete pendingBank.exchange(nullptr);
-	delete hitsPending.exchange(nullptr);
-	delete hitsRetired.exchange(nullptr);
-	delete hitsActive;
-	delete activeBank.exchange(nullptr);
-	delete retiredBank.exchange(nullptr);
+	for (SampleSlot& s : slots) {
+		if (s.worker.joinable())
+			s.worker.join();
+		delete s.pendingBank.exchange(nullptr);
+		delete s.hitsPending.exchange(nullptr);
+		delete s.hitsRetired.exchange(nullptr);
+		delete s.hitsActive;
+		delete s.activeBank.exchange(nullptr);
+		delete s.retiredBank.exchange(nullptr);
+	}
 	delete (wa::ToMainMessage*) rightExpander.producerMessage;
 	delete (wa::ToMainMessage*) rightExpander.consumerMessage;
 	delete (wa::FromSequencerMessage*) leftExpander.producerMessage;
 	delete (wa::FromSequencerMessage*) leftExpander.consumerMessage;
 }
-
 void WaveArtifact::refreshSettings(int i) {
 	MarkerSettings& s = settings[i];
 	// The expanders' CVs on this marker's knobs that have no audio-rate path (mv adds them)
@@ -579,7 +644,8 @@ void WaveArtifact::refreshSettings(int i) {
 	s.keepSpeed = mv(MARKER_GRAIN_KEEP_SPEED_PARAM, i) > 0.5f;
 	s.scanPing = mv(MARKER_GRAIN_SCAN_MODE_PARAM, i) > 0.5f;
 	s.scanFade = mv(MARKER_GRAIN_SCAN_FADE_PARAM, i);
-	const wa::WavetableBank* bank = activeBank.load(std::memory_order_relaxed);
+	// The marker's own sample, or the main one (audio thread: as applied)
+	const wa::WavetableBank* bank = slots[markerSlot[i]].activeBank.load(std::memory_order_relaxed);
 	s.scanLength = (bank && bank->sample.valid()) ? wa::grainScanLengthFraction(lengthKnob, (double) bank->sample.frames / bank->sample.sampleRate) : -1.f;
 }
 
@@ -591,7 +657,32 @@ void WaveArtifact::process(const ProcessArgs& args) {
 
 	// A new bank waits until the engine has faded to silence. Swap only once the UI has freed
 	// the previous retired bank, so nothing is ever deleted on the audio thread.
-	bool swapWanted = pendingBank.load(std::memory_order_relaxed) && !retiredBank.load();
+	bool swapWanted = slots[0].pendingBank.load(std::memory_order_relaxed) && !slots[0].retiredBank.load();
+	// An artifact's own sample (a new one, or dropped): only that artifact fades out first, then it swaps
+	// Checked at the settings rate, not every sample: the slots' states, and their new hit lists
+	if (--slotCheckCountdown <= 0) {
+		slotCheckCountdown = SETTINGS_INTERVAL;
+		slotsSerial = 0;
+		for (SampleSlot& s : slots) {
+			slotsSerial += s.bankSerial.load(std::memory_order_relaxed);
+			// HIT: take the slot's new hit list from the UI (the old one goes back to be freed there)
+			if (s.hitsPending.load(std::memory_order_acquire) && !s.hitsRetired.load(std::memory_order_acquire)) {
+				std::vector<long>* fresh = s.hitsPending.exchange(nullptr);
+				if (fresh) {
+					s.hitsRetired.store(s.hitsActive);
+					s.hitsActive = fresh;
+				}
+			}
+		}
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			SampleSlot& s = slots[1 + i];
+			bool clear = s.clearPending.load(std::memory_order_relaxed);
+			bool has = s.activeBank.load(std::memory_order_relaxed) || s.pendingBank.load(std::memory_order_relaxed);
+			if (clear && !has)
+				s.clearPending = false; // nothing left to drop
+			markerSwap[i] = !s.retiredBank.load() && (clear ? has : s.pendingBank.load(std::memory_order_relaxed) != nullptr);
+		}
+	}
 	// Engine switch: the engine in use fades out (5 ms), then the other one takes over.
 	int wantEngine = clamp((int) std::round(params[ENGINE_MODE_PARAM].getValue()), 0, 2);
 	bool switching = wantEngine != engineApplied;
@@ -631,7 +722,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	static const wa::ToMainMessage noMod;
 	const wa::ToMainMessage* mod = &noMod;
 	Module* right = rightExpander.module;
-	if (isWaveArtifactExpander(right)) {
+	// The stereo SEND / RETURN module may sit right here too (no expanders), or at the end of the expanders.
+	if (isWaveArtifactExpander(right) || isWaveArtifactSendReturn(right)) {
 		mod = (const wa::ToMainMessage*) rightExpander.consumerMessage;
 		wa::ToExpanderMessage* out = (wa::ToExpanderMessage*) right->leftExpander.producerMessage;
 		out->clock = clock;
@@ -641,8 +733,11 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		out->granular = engineApplied == 1;
 		out->sample = engineApplied == 2; // the expanders show this engine's four inputs
 		out->poly = params[PLAY_MODE_PARAM].getValue() > 0.5f;
-		for (int i = 0; i < NUM_MARKERS; i++)
+		for (int i = 0; i < NUM_MARKERS; i++) {
 			out->modLfo[i] = modLfoOut[i];
+			out->sendL[i] = chainSendL[i];
+			out->sendR[i] = chainSendR[i];
+		}
 		right->leftExpander.requestMessageFlip();
 	}
 	// The CVs on the other knobs: read with the settings (next refreshSettings)
@@ -715,11 +810,10 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	// The markers' settings (MarkerSettings): every SETTINGS_INTERVAL samples, and at once for a marker whose locks
 	// just changed or glide, or when the bank changes.
 	{
-		const wa::WavetableBank* bankNow = activeBank.load(std::memory_order_relaxed);
-		bool all = --settingsCountdown <= 0 || bankNow != settingsBank;
+		bool all = --settingsCountdown <= 0 || slotsSerial != settingsSerial;
 		if (all) {
 			settingsCountdown = SETTINGS_INTERVAL;
-			settingsBank = bankNow;
+			settingsSerial = slotsSerial;
 			posSmoothTime = wa::MIN_WAVE_SMOOTH * std::exp(params[POS_LFO_SMOOTH_PARAM].getValue() * LN_100);
 		}
 		for (int i = 0; i < NUM_MARKERS; i++) {
@@ -762,7 +856,10 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			bool gateHigh = gatePatched && mod->gateHigh[i];
 			bool gateEdge = gateHigh && !modGateWas[i];
 			modGateWas[i] = gateHigh;
-			float ad = modAds[i].process(modAdNote[i] || gateEdge, gateEdge, gateHigh, s.adPerc, s.adAttack, s.adDecay, args.sampleTime);
+			// In POLY / SEQ the GATE also starts a note, whose AD start comes a sample after the gate's own: while the
+			// gate is high it is still the gate's, so the AD keeps holding (PERC off) instead of decaying as a note.
+			bool fromGate = gateEdge || (modAdNote[i] && gateHigh);
+			float ad = modAds[i].process(modAdNote[i] || gateEdge, fromGate, gateHigh, s.adPerc, s.adAttack, s.adDecay, args.sampleTime);
 			modAdNote[i] = false;
 			ms.put(s.modLfoDest, s.modLfoDepth * modLfoOut[i]);
 			ms.put(s.adDest, s.adDepth * ad);
@@ -796,7 +893,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		// the sample's ends by the engine, like the LFO. The filter is always on; CUTOFF CV sweeps it
 		// across its whole range (20 Hz .. 20 kHz).
 		m.wave += modOf(i, wa::MOD_WAVE) + ms.add[wa::MOD_DEST_WAVE];
-		m.gain = clamp(m.gain * mod->gainMul[i] * ms.gainMul() * gateLevel, 0.f, 4.f); // expander VCA, modulation, GATE
+		// The LFO / AD add to the GAIN knob (heard with it at 0 too); then the expander VCA and GATE
+		m.gain = clamp(ms.gainLevel(m.gain) * mod->gainMul[i] * gateLevel, 0.f, 4.f);
 		// Muted: no level at all, through the engines' 5 ms gain smoothing, so it fades instead of clicking.
 		if (s.muted)
 			m.gain = 0.f;
@@ -894,14 +992,20 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			modAdNote[i] = true;
 	}
 	in.voct = params[FREQ_PARAM].getValue() + inputs[VOCT_INPUT].getVoltage();
-	in.bank = activeBank.load(std::memory_order_relaxed);
+	in.bank = slots[0].activeBank.load(std::memory_order_relaxed);
+	// Each artifact's own sample once its bank is in (markerSlot), and a hold while it is about to be swapped
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		in.markerBank[i] = markerSlot[i] ? slots[markerSlot[i]].activeBank.load(std::memory_order_relaxed) : nullptr;
+		in.markerHold[i] = markerSwap[i];
+	}
+	in.previewBank = slots[clamp(previewSlot.load(std::memory_order_relaxed), 0, NUM_SLOTS - 1)].activeBank.load(std::memory_order_relaxed);
 	// STOP uses the same click-free fade as a bank swap (main, artifact outputs and preview).
 	in.holdSilent = swapWanted || switching || params[STOP_PARAM].getValue() > 0.5f;
 	in.previewTable = previewTable.load(std::memory_order_relaxed);
 	// SEND / RETURN per artifact: a patched RETURN replaces the artifact's filter (the engine crossfades 20 ms). It
 	// reads the send of one sample before (Rack's cable delay). 2 channels are L and R, 1 feeds both sides. Volts
 	// are clamped to +-12 V, NaN is silence.
-	in.wantSend = false;
+	in.wantSend = mod->stereoSendWanted;
 	for (int i = 0; i < NUM_MARKERS; i++) {
 		Input& ret = inputs[RETURN_INPUT + i];
 		Output& send = outputs[SEND_OUTPUT + i];
@@ -913,6 +1017,12 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		};
 		in.retL[i] = ch > 0 ? volts(ret.getVoltage(0)) : 0.f;
 		in.retR[i] = ch > 1 ? volts(ret.getVoltage(1)) : in.retL[i];
+		// The stereo SEND / RETURN module's RET L / R (separate jacks) win over this panel's RETURN
+		if (mod->stereoReturn[i]) {
+			in.insert[i] = true;
+			in.retL[i] = volts(mod->stereoRetL[i]);
+			in.retR[i] = volts(mod->stereoRetR[i]);
+		}
 		// A mono module on the loop (1 channel back while SEND sends 2) gets L + R from now on
 		if (ch == 0 || !send.isConnected()) {
 			monoSend[i] = false;
@@ -997,6 +1107,10 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		gin.position = in.position;
 		gin.voct = in.voct;
 		gin.bank = in.bank;
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			gin.markerBank[i] = in.markerBank[i];
+			gin.markerHold[i] = in.markerHold[i];
+		}
 		gin.clock = &clock;
 		gin.reset = reset;
 		gin.seeded = params[GRAIN_SEEDED_PARAM].getValue() > 0.5f;
@@ -1004,15 +1118,9 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		gin.player = engineApplied == 2;
 		gin.zeroSnap = params[SAMPLE_ZERO_SNAP_PARAM].getValue() > 0.5f;
 		gin.noteFade = (float) wa::SAMPLE_FADE_IN_SECONDS[(int) clamp(std::round(params[SAMPLE_FADE_IN_PARAM].getValue()), 0.f, 3.f)];
-		// HIT: take a new hit list from the UI (the old one goes back to be freed there)
-		if (hitsPending.load(std::memory_order_acquire) && !hitsRetired.load(std::memory_order_acquire)) {
-			std::vector<long>* fresh = hitsPending.exchange(nullptr);
-			if (fresh) {
-				hitsRetired.store(hitsActive);
-				hitsActive = fresh;
-			}
-		}
-		gin.hits = hitsActive;
+		// HIT: each cloud's file's hit list (taken from the UI at the settings rate, above)
+		for (int i = 0; i < NUM_MARKERS; i++)
+			gin.hits[i] = markerHits(i);
 		gin.holdSilent = in.holdSilent;
 		gin.poly = in.poly;
 		for (int i = 0; i < NUM_MARKERS; i++) {
@@ -1065,6 +1173,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			grainEngine.getSend(i, &sl, &sr);
 		else
 			engine.getSend(i, &sl, &sr);
+		chainSendL[i] = sl;
+		chainSendR[i] = sr;
 		Output& send = outputs[SEND_OUTPUT + i];
 		if (monoSend[i]) {
 			send.setChannels(1);
@@ -1081,9 +1191,9 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	if (++displayCounter >= 64) {
 		displayCounter = 0;
 		if (engineApplied >= 1) {
-			const wa::WavetableBank* bank = in.bank;
-			float tables = bank ? (float) std::max(bank->numTables - 1, 0) : 0.f;
 			for (int i = 0; i < NUM_MARKERS; i++) {
+				const wa::WavetableBank* bank = in.markerBank[i] ? in.markerBank[i] : in.bank;
+				float tables = bank ? (float) std::max(bank->numTables - 1, 0) : 0.f;
 				// The old displays think in tables: the table under the place each cloud reads
 				shownIndex[i].store(grainEngine.getReadPosition(i) * tables, std::memory_order_relaxed);
 				shownHeard[i].store(grainEngine.getHeard(i), std::memory_order_relaxed);
@@ -1126,10 +1236,34 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	}
 
 	if (swapWanted && activeSilent) {
-		wa::WavetableBank* fresh = pendingBank.exchange(nullptr);
+		wa::WavetableBank* fresh = slots[0].pendingBank.exchange(nullptr);
 		if (fresh) {
-			retiredBank.store(activeBank.exchange(fresh));
-			bankSerial++;
+			slots[0].retiredBank.store(slots[0].activeBank.exchange(fresh));
+			slots[0].bankSerial++;
+			slotsSerial++; // the settings are read again on the next sample
+		}
+	}
+	// An artifact's own sample swaps (or goes) once that artifact is silent
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		if (!markerSwap[i])
+			continue;
+		SampleSlot& s = slots[1 + i];
+		bool silent = activeSilent || ((engineApplied >= 1) ? grainEngine.isMarkerSilent(i) : engine.isMarkerSilent(i));
+		if (silent && !s.retiredBank.load()) {
+			if (s.clearPending.load(std::memory_order_relaxed)) {
+				// Dropped: what it had goes to be freed; the artifact plays the main sample
+				wa::WavetableBank* old = s.activeBank.exchange(nullptr);
+				if (!old)
+					old = s.pendingBank.exchange(nullptr);
+				s.retiredBank.store(old);
+			}
+			else if (wa::WavetableBank* fresh = s.pendingBank.exchange(nullptr)) {
+				s.retiredBank.store(s.activeBank.exchange(fresh));
+			}
+			s.bankSerial++;
+			slotsSerial++;
+			markerSwap[i] = false;
+			markerSlot[i] = s.activeBank.load(std::memory_order_relaxed) ? 1 + i : 0;
 		}
 	}
 }
@@ -1157,22 +1291,28 @@ static std::vector<std::string> listWavs(const std::string& dir) {
 	return wavs;
 }
 
-bool WaveArtifact::hasSiblings() {
-	return folderWavs.size() > 1;
+bool WaveArtifact::hasSiblings(int slot) {
+	return slots[slot].folderWavs.size() > 1;
 }
 
-void WaveArtifact::loadSibling(int dir) {
-	if (filePath.empty())
+std::string WaveArtifact::slotLabel(int slot) {
+	std::string name = shortName(slots[slot].fileName);
+	return slot == 0 ? name : string::f("Artifact %d: ", slot) + name;
+}
+
+void WaveArtifact::loadSibling(int dir, int slot) {
+	SampleSlot& s = slots[slot];
+	if (s.filePath.empty())
 		return;
-	if (analyzing) {
-		setStatus("Busy, still analyzing");
+	if (s.analyzing) {
+		setStatus("Busy, still analyzing", slot);
 		return;
 	}
 	// Re-scan: files may have been added or removed since the last load.
-	std::vector<std::string> wavs = listWavs(system::getDirectory(filePath));
+	std::vector<std::string> wavs = listWavs(system::getDirectory(s.filePath));
 	if (wavs.empty())
 		return;
-	std::string current = system::getFilename(filePath);
+	std::string current = system::getFilename(s.filePath);
 	int n = (int) wavs.size();
 	int at = -1;
 	for (int i = 0; i < n; i++) {
@@ -1201,85 +1341,118 @@ void WaveArtifact::loadSibling(int dir) {
 	// Only this file left: nothing to step to (compare indices, not paths: separators may differ).
 	if (n == 1 && at >= 0)
 		return;
-	loadFile(wavs[next]);
+	loadFile(wavs[next], slot);
 }
 
-void WaveArtifact::loadFile(const std::string& path) {
-	if (analyzing) {
-		setStatus("Busy, still analyzing");
+void WaveArtifact::loadFile(const std::string& path, int slot) {
+	SampleSlot& s = slots[slot];
+	if (s.analyzing) {
+		setStatus("Busy, still analyzing", slot);
 		return;
 	}
+	std::string who = slot > 0 ? string::f("Artifact %d: ", slot) : std::string();
 	// Remember the path even if this file fails, so the arrows can step past it.
-	filePath = path;
-	folderWavs = listWavs(system::getDirectory(path));
+	s.filePath = path;
+	s.folderWavs = listWavs(system::getDirectory(path));
 	uint64_t size = system::getFileSize(path);
 	if (size == 0) {
-		setStatus("Cannot read file");
+		setStatus(who + "Cannot read file", s.hasFile() ? slot : 0);
 		return;
 	}
 	if (size > wa::MAX_FILE_BYTES) {
-		setStatus("File larger than " + std::to_string(wa::MAX_FILE_MB) + " MB");
+		setStatus(who + "File larger than " + std::to_string(wa::MAX_FILE_MB) + " MB", s.hasFile() ? slot : 0);
 		return;
 	}
 	std::vector<uint8_t> bytes = system::readFile(path);
 	if (bytes.empty()) {
-		setStatus("Cannot read file");
+		setStatus(who + "Cannot read file", s.hasFile() ? slot : 0);
 		return;
 	}
-	wavBytes = std::move(bytes);
-	wavHash = wavHashOf(wavBytes);
-	fileName = system::getFilename(path);
-	startAnalysis();
+	s.wavBytes = std::move(bytes);
+	s.wavHash = wavHashOf(s.wavBytes);
+	s.fileName = system::getFilename(path);
+	// A file loaded over a drop still being faded out: it is the artifact's again
+	s.clearPending = false;
+	startAnalysis(slot);
 }
 
-void WaveArtifact::startAnalysis() {
-	if (wavBytes.empty())
+void WaveArtifact::clearArtifactSample(int i) {
+	if (i < 0 || i >= NUM_MARKERS)
 		return;
-	if (analyzing) {
-		setStatus("Busy, still analyzing");
+	SampleSlot& s = slots[1 + i];
+	// An analysis running now is dropped when it finishes; the bank in use fades out, then goes (process)
+	s.analysisGeneration++;
+	s.clearPending = true;
+	s.wavBytes.clear();
+	s.wavHash = 0;
+	s.fileName.clear();
+	s.filePath.clear();
+	s.folderWavs.clear();
+	s.savedPending = false;
+	s.storedPath.clear();
+	s.storedHash = 0;
+	setStatus("", 1 + i);
+}
+
+void WaveArtifact::startAnalysisAll() {
+	for (int k = 0; k < NUM_SLOTS; k++)
+		if (slots[k].hasFile())
+			startAnalysis(k);
+}
+
+void WaveArtifact::startAnalysis(int slot) {
+	SampleSlot& s = slots[slot];
+	if (s.wavBytes.empty())
+		return;
+	if (s.analyzing) {
+		setStatus("Busy, still analyzing", slot);
 		return;
 	}
-	if (worker.joinable())
-		worker.join();
+	if (s.worker.joinable())
+		s.worker.join();
 
-	analyzing = true;
-	std::string name = shortName(fileName);
-	setStatus("Analyzing " + name);
+	s.analyzing = true;
+	std::string name = slotLabel(slot);
+	setStatus("Analyzing " + name, slot);
 
 	// The worker gets its own copy, so the UI may replace wavBytes at any time.
-	std::vector<uint8_t> bytes = wavBytes;
+	std::vector<uint8_t> bytes = s.wavBytes;
 	wa::TableCountMode mode = tableCountMode;
 	wa::TableTone tone = tableTone;
-	int generation = analysisGeneration;
-	worker = std::thread([this, bytes, mode, tone, name, generation]() {
+	int generation = s.analysisGeneration;
+	SampleSlot* sp = &s;
+	s.worker = std::thread([this, sp, slot, bytes, mode, tone, name, generation]() {
 		std::string error;
 		wa::WavetableBank* bank = wa::analyzeWav(bytes.data(), bytes.size(), mode, &error, tone);
 		{
 			std::lock_guard<std::mutex> lock(publishMutex);
-			if (generation != analysisGeneration) {
-				// The module was initialized meanwhile: drop the result.
+			if (generation != sp->analysisGeneration) {
+				// The module was initialized or the file dropped meanwhile: drop the result.
 				delete bank;
 			}
 			else if (bank) {
 				// If process() has not taken the previous result yet, it never saw it, so it is
 				// safe to delete here.
-				delete pendingBank.exchange(bank);
-				setStatus(name + "  " + std::to_string(bank->numTables) + " artifacts");
+				delete sp->pendingBank.exchange(bank);
+				setStatus(name + "  " + std::to_string(bank->numTables) + " artifacts", slot);
 			}
 			else {
-				setStatus(error);
+				setStatus(error, slot);
 			}
 		}
-		analyzing = false;
+		sp->analyzing = false;
 	});
 }
 
 void WaveArtifact::uiStep() {
-	// A patch or preset just loaded: its WAV
-	if (savedSamplePending)
-		loadSavedSample();
-	updateTransients();
-	delete retiredBank.exchange(nullptr);
+	for (int k = 0; k < NUM_SLOTS; k++) {
+		SampleSlot& s = slots[k];
+		// A patch or preset just loaded: its WAVs
+		if (s.savedPending)
+			loadSavedSample(k);
+		updateTransients(k);
+		delete s.retiredBank.exchange(nullptr);
+	}
 	// The edit area always shows an active marker.
 	if (!isMarkerActive(selectedMarker)) {
 		for (int i = 0; i < NUM_MARKERS; i++) {
@@ -1298,10 +1471,12 @@ void WaveArtifact::uiStep() {
 		if (!free && pitch.getValue() != std::round(pitch.getValue()))
 			pitch.setValue(std::round(pitch.getValue()));
 	}
-	// A bank with fewer tables (re-analysis) cannot play a preview beyond its end.
-	const wa::WavetableBank* bank = activeBank.load();
+	// A preview plays a table of the file the screen shows: another file, or a bank with fewer tables (re-analysis),
+	// cannot play it.
+	int shown = shownSlot();
+	const wa::WavetableBank* bank = slots[shown].activeBank.load();
 	int p = previewTable.load();
-	if (p >= 0 && (!bank || p >= bank->numTables))
+	if (p >= 0 && (!bank || p >= bank->numTables || previewSlot.load() != shown))
 		previewTable = -1;
 }
 
@@ -1317,85 +1492,425 @@ static void resetMarkerSettings(WaveArtifact* m, int i) {
 		m->params[id + i].setValue(m->getParamQuantity(id + i)->getDefaultValue());
 }
 
-void WaveArtifact::updateTransients() {
-	delete hitsRetired.exchange(nullptr);
+void WaveArtifact::updateTransients(int slot) {
+	SampleSlot& s = slots[slot];
+	delete s.hitsRetired.exchange(nullptr);
 	// SAMPLE and GRAIN use them (HIT); switching to either finds them.
 	if ((int) std::round(params[ENGINE_MODE_PARAM].getValue()) < 1)
 		return;
 	float sens = clamp(params[SAMPLE_HIT_SENSITIVITY_PARAM].getValue(), 0.f, 1.f);
-	int serial = bankSerial.load();
-	if (serial == transientsSerial && sens == transientsSens)
+	int serial = s.bankSerial.load();
+	if (serial == s.transientsSerial && sens == s.transientsSens)
 		return;
 	// While the slider is dragged: at most every 30 ms (60 s of sample takes about 5 ms)
 	double now = system::getTime();
-	if (serial == transientsSerial && now - transientsTime < 0.03)
+	if (serial == s.transientsSerial && now - s.transientsTime < 0.03)
 		return;
-	transientsSerial = serial;
-	transientsSens = sens;
-	transientsTime = now;
-	transients.clear();
-	transientFrames = 0;
+	s.transientsSerial = serial;
+	s.transientsSens = sens;
+	s.transientsTime = now;
+	s.transients.clear();
+	s.transientFrames = 0;
 	// The UI frees retired banks itself (uiStep), so the active one stays valid while this runs.
-	const wa::WavetableBank* bank = activeBank.load();
+	const wa::WavetableBank* bank = s.activeBank.load();
 	if (bank && bank->sample.valid()) {
-		transients = wa::findTransients(bank->sample, sens);
-		transientFrames = (long) bank->sample.frames;
+		s.transients = wa::findTransients(bank->sample, sens);
+		s.transientFrames = (long) bank->sample.frames;
 	}
-	delete hitsPending.exchange(new std::vector<long>(transients));
+	delete s.hitsPending.exchange(new std::vector<long>(s.transients));
 }
 
 bool WaveArtifact::stepStartToTransient(int marker, int dir) {
 	if (marker < 0 || marker >= NUM_MARKERS)
 		return false;
-	updateTransients();
-	if (transients.empty() || transientFrames <= 0)
+	SampleSlot& s = slots[slotOf(marker)];
+	updateTransients(slotOf(marker));
+	if (s.transients.empty() || s.transientFrames <= 0)
 		return false;
-	double at = (double) wa::fold01(params[MARKER_WAVE_PARAM + marker].getValue()) * (double) transientFrames;
+	// A step selected on the sequencer: from the START that step plays (its lock, else the knob's), and the hit goes
+	// into the step's lock exactly (the knob stays). Moving the knob instead would shift the lock by as much as the
+	// knob moved, from wherever the lock was, so it would land between hits.
+	int id = MARKER_WAVE_PARAM + marker;
+	float from;
+	bool locked;
+	bool onStep = stepValueFor(id, &from, &locked);
+	if (!onStep)
+		from = params[id].getValue();
+	double at = (double) wa::fold01(from) * (double) s.transientFrames;
 	long to = -1;
 	if (dir > 0) {
 		// The first one clearly after START (more than a frame: START sits on one after a step)
-		auto it = std::upper_bound(transients.begin(), transients.end(), (long) std::floor(at + 1.5));
-		if (it != transients.end())
+		auto it = std::upper_bound(s.transients.begin(), s.transients.end(), (long) std::floor(at + 1.5));
+		if (it != s.transients.end())
 			to = *it;
 	}
 	else {
-		auto it = std::lower_bound(transients.begin(), transients.end(), (long) std::ceil(at - 1.5));
-		if (it != transients.begin())
+		auto it = std::lower_bound(s.transients.begin(), s.transients.end(), (long) std::ceil(at - 1.5));
+		if (it != s.transients.begin())
 			to = *(it - 1);
 	}
 	if (to < 0)
 		return false;
-	params[MARKER_WAVE_PARAM + marker].setValue((float) ((double) to / (double) transientFrames));
+	float v = (float) ((double) to / (double) s.transientFrames);
+	if (onStep)
+		return setStepLock(id, v);
+	params[id].setValue(v);
 	return true;
 }
 
 bool WaveArtifact::spreadMarkersOnTransients() {
-	updateTransients();
-	int active[NUM_MARKERS], k = 0;
-	for (int i = 0; i < NUM_MARKERS; i++)
-		if (isMarkerActive(i))
-			active[k++] = i;
-	if (transients.empty() || transientFrames <= 0 || k == 0)
-		return false;
-	// Marker j of k takes the hit j / k of the way through the list: the first one always, then evenly.
-	size_t n = transients.size();
-	for (int j = 0; j < k; j++) {
-		size_t t = std::min((size_t) ((double) j * (double) n / (double) k), n - 1);
-		params[MARKER_WAVE_PARAM + active[j]].setValue((float) ((double) transients[t] / (double) transientFrames));
+	// The markers on each file share its hits: marker j of the k on a file takes the hit j / k of the way through its
+	// list (the first one always, then evenly).
+	bool moved = false;
+	for (int k = 0; k < NUM_SLOTS; k++) {
+		int on[NUM_MARKERS], n = 0;
+		for (int i = 0; i < NUM_MARKERS; i++)
+			if (isMarkerActive(i) && slotOf(i) == k)
+				on[n++] = i;
+		if (n == 0)
+			continue;
+		updateTransients(k);
+		const SampleSlot& s = slots[k];
+		if (s.transients.empty() || s.transientFrames <= 0)
+			continue;
+		size_t count = s.transients.size();
+		for (int j = 0; j < n; j++) {
+			size_t t = std::min((size_t) ((double) j * (double) count / (double) n), count - 1);
+			params[MARKER_WAVE_PARAM + on[j]].setValue((float) ((double) s.transients[t] / (double) s.transientFrames));
+		}
+		moved = true;
 	}
+	return moved;
+}
+
+WaveArtifact::LoopLayoutInfo WaveArtifact::loopLayoutInfo(int marker) {
+	LoopLayoutInfo info;
+	if (marker < 0 || marker >= NUM_MARKERS) {
+		info.why = "No marker";
+		return info;
+	}
+	if ((int) std::round(params[ENGINE_MODE_PARAM].getValue()) < 1) {
+		info.why = "On the SAMPLE and GRAIN engines only";
+		return info;
+	}
+	if (!sequencerOnLeft()) {
+		info.why = "Needs the sequencer on the left";
+		return info;
+	}
+	if (!isMarkerActive(marker)) {
+		info.why = "The marker is off";
+		return info;
+	}
+	int slot = slotOf(marker);
+	const wa::WavetableBank* bank = slots[slot].activeBank.load();
+	if (!bank || !bank->sample.valid() || bank->sample.frames < 2) {
+		info.why = "No sample loaded";
+		return info;
+	}
+	const wa::SampleBuffer& S = bank->sample;
+	info.sampleFrames = (long) S.frames;
+	info.sampleSeconds = (double) S.frames / std::max((double) S.sampleRate, 1.0);
+	// The marker's slice, as the engine plays it: from START up to LENGTH, or (LENGTH at the top, and in BEAT / FIT,
+	// where LENGTH is a note value) up to the next active marker on the same file, or the sample's end
+	float start = clamp(params[MARKER_WAVE_PARAM + marker].getValue(), 0.f, 1.f);
+	float end = 1.f;
+	bool freeLength = (int) std::round(params[MARKER_SAMPLE_BEAT_PARAM + marker].getValue()) == wa::SAMPLE_BEAT_OFF;
+	float len = freeLength ? wa::grainScanLengthFraction(params[MARKER_GRAIN_SCAN_LENGTH_PARAM + marker].getValue(), info.sampleSeconds) : -1.f;
+	if (len > 0.f) {
+		end = std::min(start + len, 1.f);
+	}
+	else {
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			if (i == marker || !isMarkerActive(i) || slotOf(i) != slot)
+				continue;
+			float s = clamp(params[MARKER_WAVE_PARAM + i].getValue(), 0.f, 1.f);
+			if (s > start + 1e-4f && s < end)
+				end = s;
+		}
+	}
+	info.from = std::lround((double) start * (double) info.sampleFrames);
+	info.frames = std::max(std::lround((double) end * (double) info.sampleFrames) - info.from, 1L);
+	info.seconds = (double) info.frames / std::max((double) S.sampleRate, 1.0);
+	if (info.seconds < 0.05) {
+		info.why = "The marker's slice is too short to lay out";
+		return info;
+	}
+	updateTransients(slot);
+	for (long h : slots[slot].transients)
+		if (h >= info.from && h < info.from + info.frames)
+			info.hits++;
+	// The loop's length in beats: found in its audio (a loop is a whole number of beats; of the tempo and its octaves
+	// the one nearest the module's). The file name only confirms it; it is used alone when the audio shows no clear
+	// beat and its tempo makes the loop whole beats. Else the module's tempo guesses it.
+	info.nameBpm = wa::bpmFromName(slots[slot].fileName);
+	double tempo = 60.0 / std::max(clock.beatPeriod(), 1e-3);
+	wa::FoundTempo found = wa::loopTempo(onsetOf(slot), wa::ONSET_HOP, info.from, info.frames, (double) S.sampleRate, tempo);
+	double nameBeats = info.seconds * info.nameBpm / 60.0;
+	bool nameFits = info.nameBpm > 0.0 && nameBeats >= 0.5 && std::fabs(nameBeats - std::round(nameBeats)) < 0.05;
+	if (found.found) {
+		info.beats = found.beats;
+		info.tempoFrom = wa::sameTempo(found.bpm, info.nameBpm) ? "found in the audio, as its name says" : "found in the audio";
+	}
+	else if (nameFits) {
+		info.beats = std::min(std::max((int) std::lround(nameBeats), 1), wa::LAYOUT_MAX_BEATS);
+		info.tempoFrom = "from its file name (no clear beat in the audio)";
+	}
+	else {
+		info.beats = wa::guessLoopBeats(info.seconds, 0.0, tempo);
+		info.tempoFrom = "no clear beat: guessed from the module's tempo";
+	}
+	info.bpm = 60.0 * info.beats / info.seconds;
+	return info;
+}
+
+const std::vector<float>& WaveArtifact::onsetOf(int slot) {
+	slot = clamp(slot, 0, NUM_SLOTS - 1);
+	SampleSlot& s = slots[slot];
+	int serial = s.bankSerial.load();
+	if (s.onsetSerial != serial) {
+		s.onsetSerial = serial;
+		// The UI frees retired banks itself, so the active one stays valid while this runs
+		const wa::WavetableBank* bank = s.activeBank.load();
+		s.onset = (bank && bank->sample.valid()) ? wa::onsetStrength(bank->sample) : std::vector<float>();
+	}
+	return s.onset;
+}
+
+wa::FoundTempo WaveArtifact::fileTempoOf(int slot, bool* fromName) {
+	slot = clamp(slot, 0, NUM_SLOTS - 1);
+	SampleSlot& s = slots[slot];
+	const std::vector<float>& env = onsetOf(slot);
+	double tempo = 60.0 / std::max(clock.beatPeriod(), 1e-3);
+	// The octave picked depends on the module's tempo: work it out again when that moves by more than a few %
+	bool fresh = s.fileTempoSerial == s.onsetSerial && std::fabs(std::log(tempo / std::max(s.fileTempoPrefer, 1.0))) < 0.03;
+	if (!fresh) {
+		s.fileTempoSerial = s.onsetSerial;
+		s.fileTempoPrefer = tempo;
+		s.fileTempo = wa::FoundTempo();
+		s.fileTempoFromName = false;
+		const wa::WavetableBank* bank = s.activeBank.load();
+		if (bank && bank->sample.valid()) {
+			s.fileTempo = wa::fileTempo(env, wa::ONSET_HOP, (double) bank->sample.sampleRate, tempo);
+			// A tempo in the name that agrees (up to octaves): its exact value, at the octave found
+			double named = wa::bpmFromName(s.fileName);
+			if (s.fileTempo.found && wa::sameTempo(named, s.fileTempo.bpm)) {
+				s.fileTempo.bpm = named * std::pow(2.0, std::round(std::log2(s.fileTempo.bpm / named)));
+				s.fileTempoFromName = true;
+			}
+		}
+	}
+	if (fromName)
+		*fromName = s.fileTempoFromName;
+	return s.fileTempo;
+}
+
+/** A laid-out trig's slice: LENGTH (below its top, which means "up to the next marker"). GRAIN has no "once": the
+cloud would loop back to START at the slice's end, so there the slice ends by the note instead: HOLD locked to the
+slice's time (with a short RELEASE on the marker), and LENGTH a quarter longer, so the scan never wraps first. */
+static void setSliceLocks(wa::StepData& d, bool grain, int kLength, int kHold, double frames, double total, double sampleSeconds,
+	double sampleRate) {
+	double len = grain ? frames * 1.25 : frames;
+	d.setLock(kLength, std::min(wa::grainScanLengthKnob(std::min(len, total) / total, sampleSeconds), wa::SCAN_LENGTH_TOP - 1e-4f));
+	if (grain && kHold >= 0) {
+		double seconds = frames / std::max(sampleRate, 1.0);
+		float k = (float) (std::log(std::max(seconds, (double) wa::ADSR_HOLD_MIN) / wa::ADSR_HOLD_MIN) / std::log(wa::ADSR_HOLD_RATIO));
+		d.setLock(kHold, std::min(std::max(k, 0.f), wa::ADSR_HOLD_TOP - 1e-4f));
+	}
+}
+
+bool WaveArtifact::layoutLoopOnRow(int marker, int beats, bool grid) {
+	LoopLayoutInfo info = loopLayoutInfo(marker);
+	if (!info.why.empty())
+		return false;
+	int clockIndex, steps;
+	if (!wa::layoutRow(beats, WaveArtifactSequencer::STEPS, &clockIndex, &steps))
+		return false;
+	const SampleSlot& slot = slots[slotOf(marker)];
+	std::vector<wa::LayoutTrig> trigs = wa::layoutTrigs(slot.transients, info.from, info.frames, steps, grid);
+	int kStart = settingIndexOf(MARKER_WAVE_PARAM + marker, marker);
+	int kLength = settingIndexOf(MARKER_GRAIN_SCAN_LENGTH_PARAM + marker, marker);
+	if (trigs.empty() || kStart < 0 || kLength < 0)
+		return false;
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	// No step selected: the knob changes below are the marker's own, not locks on a step
+	seq->select(-1, -1);
+	lockResync = true;
+	seq->clearRow(marker);
+	seq->length[marker] = steps;
+	seq->params[WaveArtifactSequencer::CLOCK_MULT_PARAM + marker].setValue((float) clockIndex);
+	double total = (double) info.sampleFrames;
+	// Each trig's velocity from its hit's loudness in the sample (its peak just after it), against the loop's loudest
+	std::vector<double> peakDb(trigs.size(), -200.0);
+	double loudestDb = -200.0;
+	if (const wa::WavetableBank* bank = slot.activeBank.load()) {
+		long window = std::max(1L, (long) std::lround(wa::LAY_PEAK_SECONDS * bank->sample.sampleRate));
+		for (size_t i = 0; i < trigs.size(); i++) {
+			peakDb[i] = wa::hitPeakDb(bank->sample, trigs[i].start, std::min(window, trigs[i].length));
+			loudestDb = std::max(loudestDb, peakDb[i]);
+		}
+	}
+	bool grainEngine = (int) std::round(params[ENGINE_MODE_PARAM].getValue()) == 1;
+	int kHold = settingIndexOf(MARKER_HOLD_PARAM + marker, marker);
+	double sampleRate = (double) info.sampleFrames / std::max(info.sampleSeconds, 1e-9);
+	for (size_t i = 0; i < trigs.size(); i++) {
+		const wa::LayoutTrig& t = trigs[i];
+		seq->velocity[marker][t.step] = loudestDb > -200.0 ? wa::layVelocity(loudestDb - peakDb[i]) : 1.f;
+		wa::StepData& d = seq->stepData[marker][t.step];
+		d.setLock(kStart, (float) ((double) t.start / total));
+		setSliceLocks(d, grainEngine, kLength, kHold, (double) t.length, total, info.sampleSeconds, sampleRate);
+	}
+	// Each slice plays as it is, up to the next trig: FREE lengths, once, from the exact START (the locks are on the
+	// hits already), no attack, full level, the note on until the next trig. The row plays in SEQ.
+	params[MARKER_SAMPLE_BEAT_PARAM + marker].setValue((float) wa::SAMPLE_BEAT_OFF);
+	params[MARKER_SAMPLE_LOOP_PARAM + marker].setValue((float) wa::PLAYER_ONE);
+	params[MARKER_SAMPLE_HIT_SNAP_PARAM + marker].setValue(0.f);
+	params[MARKER_ATTACK_PARAM + marker].setValue(0.f);
+	params[MARKER_SUSTAIN_PARAM + marker].setValue(1.f);
+	params[MARKER_HOLD_PARAM + marker].setValue(1.f);
+	params[PLAY_MODE_PARAM].setValue(4.f);
+	// GRAIN: grains that rebuild the sample as it is. The cloud reads through each slice at real time (SCAN +1 x, free),
+	// with no randomness (SPRAY, P.SPRD, SPREAD 0, forward, KEEP off), and its Tukey grains overlap by 4 / 3: each one's
+	// fade out lies exactly over the next one's fade in, so they sum flat, at the sample's own level. Each trig restarts
+	// the cloud on its slice (NOTE RESTART, the default).
+	if ((int) std::round(params[ENGINE_MODE_PARAM].getValue()) == 1) {
+		params[MARKER_GRAIN_SCAN_PARAM + marker].setValue(0.5f);
+		params[MARKER_GRAIN_SYNC_PARAM + marker].setValue(0.f);
+		params[MARKER_GRAIN_KEEP_SPEED_PARAM + marker].setValue(0.f);
+		params[MARKER_GRAIN_SCAN_MODE_PARAM + marker].setValue(0.f);
+		params[MARKER_GRAIN_SPRAY_PARAM + marker].setValue(0.f);
+		params[MARKER_GRAIN_PSCATTER_PARAM + marker].setValue(0.f);
+		params[MARKER_GRAIN_SPREAD_PARAM + marker].setValue(0.f);
+		params[MARKER_GRAIN_DIR_PARAM + marker].setValue((float) wa::GRAIN_FORWARD);
+		params[MARKER_GRAIN_WINDOW_PARAM + marker].setValue((float) wa::GRAIN_TUKEY);
+		params[MARKER_GRAIN_SIZE_PARAM + marker].setValue(wa::layGrainSizeKnob());
+		params[MARKER_GRAIN_DENSITY_PARAM + marker].setValue(wa::layGrainDensityKnob());
+		params[GRAIN_NOTE_RESTART_PARAM].setValue(1.f);
+		// No fade at the slice's ends (the sample has none); each note ends by its HOLD lock, released in 5 ms
+		params[MARKER_GRAIN_SCAN_FADE_PARAM + marker].setValue(0.f);
+		params[MARKER_RELEASE_PARAM + marker].setValue(0.f);
+	}
+	selectedMarker = marker;
+	// The lane shows the STARTs just laid out
+	seq->laneRow = marker;
+	seq->showLock(kStart);
 	return true;
 }
 
-void WaveArtifact::autoArrange() {
-	// The engine treats newly activated markers as a structural change (5 ms fade out/in) and
-	// crossfades the wavetable jumps, so arranging while playing is click-free.
-	for (int i = 0; i < NUM_MARKERS; i++) {
-		float pos = (float) i / (NUM_MARKERS - 1);
-		params[MARKER_ACTIVE_PARAM + i].setValue(1.f);
-		params[MARKER_POS_PARAM + i].setValue(pos);
-		params[MARKER_WAVE_PARAM + i].setValue(pos);
-		resetMarkerSettings(this, i);
+bool WaveArtifact::layoutLoopWithUndo(int marker, int beats, bool grid) {
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	if (!seq)
+		return false;
+	// One undo entry for both modules
+	history::ModuleChange* hs = new history::ModuleChange;
+	hs->moduleId = seq->id;
+	hs->oldModuleJ = seq->toJson();
+	history::ModuleChange* hm = new history::ModuleChange;
+	hm->moduleId = id;
+	hm->oldModuleJ = toJson();
+	if (beats <= 0)
+		beats = loopLayoutInfo(marker).beats;
+	if (!layoutLoopOnRow(marker, beats, grid)) {
+		delete hs;
+		delete hm;
+		return false;
 	}
+	hs->newModuleJ = seq->toJson();
+	hm->newModuleJ = toJson();
+	history::ComplexAction* h = new history::ComplexAction;
+	h->name = "lay out the loop on the row";
+	h->push(hs);
+	h->push(hm);
+	APP->history->push(h);
+	return true;
+}
+
+void WaveArtifact::appendLoopLayoutItems(ui::Menu* menu, int marker) {
+	WaveArtifact* m = this;
+	LoopLayoutInfo info = loopLayoutInfo(marker);
+	if (!info.why.empty()) {
+		menu->addChild(createMenuLabel(info.why));
+		return;
+	}
+	double sr = (double) info.sampleFrames / std::max(info.sampleSeconds, 1e-9);
+	menu->addChild(createMenuLabel(string::f("Marker %d's slice: %.2f s to %.2f s (%.2f s), %d hits", marker + 1, info.from / sr,
+		(info.from + info.frames) / sr, info.seconds, info.hits)));
+	menu->addChild(createMenuLabel(string::f("Tempo: %.1f bpm, %s", info.bpm, info.tempoFrom.c_str())));
+	menu->addChild(createMenuLabel("(START to LENGTH, or to the next marker: set them to lay out a part)"));
+	auto describe = [=](int beats) -> std::string {
+		int ci, steps;
+		if (!wa::layoutRow(beats, WaveArtifactSequencer::STEPS, &ci, &steps))
+			return "";
+		return string::f("%d beat%s (%.0f bpm): %d steps %s", beats, beats == 1 ? "" : "s", 60.0 * beats / info.seconds, steps,
+			WaveArtifactSequencer::multiplierText(ci).c_str());
+	};
+	std::string guessed = describe(info.beats);
+	if (guessed.empty()) {
+		menu->addChild(createMenuLabel(string::f("%d beats: too long for a row of 16 steps.", info.beats)));
+		menu->addChild(createMenuLabel("Shift + drag on the map to pick a part: 1, 2 or 4 bars"));
+		return;
+	}
+	menu->addChild(createMenuItem("On the hits: " + guessed, "", [=]() { m->layoutLoopWithUndo(marker, info.beats, false); }));
+	menu->addChild(createMenuItem("On every step: " + guessed, "", [=]() { m->layoutLoopWithUndo(marker, info.beats, true); }));
+	menu->addChild(new MenuSeparator);
+	menu->addChild(createMenuLabel("As another length, on the hits:"));
+	for (int b = 1; b <= 64; b *= 2) {
+		std::string text = describe(b);
+		if (b != info.beats && !text.empty())
+			menu->addChild(createMenuItem(text, "", [=]() { m->layoutLoopWithUndo(marker, b, false); }));
+	}
+}
+
+void WaveArtifact::appendLoopLayoutMenu(ui::Menu* menu, int marker) {
+	WaveArtifact* m = this;
+	menu->addChild(createSubmenuItem("Lay out the loop on the row", "", [=](ui::Menu* sub) { m->appendLoopLayoutItems(sub, marker); }));
+}
+
+bool WaveArtifact::randomizeSlices(int marker, const bool* marked, float amount) {
+	LoopLayoutInfo info = loopLayoutInfo(marker);
+	if (!info.why.empty())
+		return false;
+	// The slices: the ones LAY makes (a hit on each step of the loop's own row, step 1 from the loop's start)
+	int layoutClock, layoutSteps;
+	if (!wa::layoutRow(info.beats, WaveArtifactSequencer::STEPS, &layoutClock, &layoutSteps))
+		return false;
+	const SampleSlot& slot = slots[slotOf(marker)];
+	std::vector<wa::LayoutTrig> slices = wa::layoutTrigs(slot.transients, info.from, info.frames, layoutSteps, false);
+	int kStart = settingIndexOf(MARKER_WAVE_PARAM + marker, marker);
+	int kLength = settingIndexOf(MARKER_GRAIN_SCAN_LENGTH_PARAM + marker, marker);
+	if (slices.empty() || kStart < 0 || kLength < 0)
+		return false;
+	// GRAIN: each new slice ends by its HOLD lock, as LAY's do
+	bool grainEngine = (int) std::round(params[ENGINE_MODE_PARAM].getValue()) == 1;
+	int kHold = settingIndexOf(MARKER_HOLD_PARAM + marker, marker);
+	double sampleRate = (double) info.sampleFrames / std::max(info.sampleSeconds, 1e-9);
+	WaveArtifactSequencer* seq = sequencerOnLeft();
+	int len = clamp(seq->length[marker], 1, WaveArtifactSequencer::STEPS);
+	// Frames of the loop per step of the row as it is now (its clock may have changed since LAY)
+	double stepBeats = 1.0 / WaveArtifactSequencer::stepsPerBeat((int) std::round(seq->params[WaveArtifactSequencer::CLOCK_MULT_PARAM + marker].getValue()));
+	double framesPerStep = (double) info.frames / (double) info.beats * stepBeats;
+	double total = (double) info.sampleFrames;
+	bool changed = false;
+	for (int s = 1; s < len; s++) {
+		if (seq->velocity[marker][s] <= 0.f || (marked && !marked[s]))
+			continue;
+		if (random::uniform() >= amount)
+			continue;
+		// It plays up to the row's next trig (round the end of the row), so a slice never leaves a gap
+		int gap = 1;
+		while (gap < len && seq->velocity[marker][(s + gap) % len] <= 0.f)
+			gap++;
+		const wa::LayoutTrig& slice = slices[(size_t) (random::u32() % (uint32_t) slices.size())];
+		double frames = std::min((double) gap * framesPerStep, total - (double) slice.start);
+		wa::StepData& d = seq->stepData[marker][s];
+		d.setLock(kStart, (float) ((double) slice.start / total));
+		setSliceLocks(d, grainEngine, kLength, kHold, std::max(frames, 1.0), total, info.sampleSeconds, sampleRate);
+		changed = true;
+	}
+	if (changed) {
+		seq->laneRow = marker;
+		seq->showLock(kStart);
+	}
+	return changed;
 }
 
 bool WaveArtifact::isMarkerActive(int i) {
@@ -1415,7 +1930,7 @@ int WaveArtifact::addMarker(float pos) {
 			continue;
 		pos = clamp(pos, 0.f, 1.f);
 		params[MARKER_POS_PARAM + i].setValue(pos);
-		// Like ARRANGE: the bar position picks the same spot in the sample.
+		// The bar position picks the same spot in the sample.
 		params[MARKER_WAVE_PARAM + i].setValue(pos);
 		resetMarkerSettings(this, i);
 		params[MARKER_ACTIVE_PARAM + i].setValue(1.f);
@@ -1433,7 +1948,8 @@ void WaveArtifact::deleteMarker(int i) {
 }
 
 void WaveArtifact::assignTable(int i, int t) {
-	const wa::WavetableBank* bank = activeBank.load();
+	// t is a table of the file the screen shows
+	const wa::WavetableBank* bank = slots[shownSlot()].activeBank.load();
 	if (!bank || t < 0 || t >= bank->numTables)
 		return;
 	if (!isMarkerActive(i)) {
@@ -1934,33 +2450,35 @@ void WaveArtifact::pasteMarker(int i) {
 }
 
 int WaveArtifact::markerTable(int i) {
-	const wa::WavetableBank* bank = activeBank.load();
+	const wa::WavetableBank* bank = bankOf(i);
 	if (!bank)
 		return -1;
 	return (int) std::round(params[MARKER_WAVE_PARAM + i].getValue() * (bank->numTables - 1));
 }
 
-std::string WaveArtifact::getStatus() {
+std::string WaveArtifact::getStatus(int slot) {
 	std::lock_guard<std::mutex> lock(statusMutex);
-	return status;
+	return status[clamp(slot, 0, NUM_SLOTS - 1)];
 }
 
-void WaveArtifact::setStatus(const std::string& s) {
+void WaveArtifact::setStatus(const std::string& s, int slot) {
 	std::lock_guard<std::mutex> lock(statusMutex);
-	status = s;
+	status[clamp(slot, 0, NUM_SLOTS - 1)] = s;
 }
 
-void openLoadDialog(WaveArtifact* module) {
+void openLoadDialog(WaveArtifact* module, int slot) {
 	if (!module)
 		return;
+	slot = clamp(slot, 0, WaveArtifact::NUM_SLOTS - 1);
 	osdialog_filters* filters = osdialog_filters_parse("WAV:wav,WAV");
-	// Open in the folder of the last WAV, so loading the next one is quick.
-	std::string dir = module->filePath.empty() ? "" : system::getDirectory(module->filePath);
+	// Open in the folder of the slot's last WAV (else the main one's), so loading the next one is quick.
+	const std::string& last = !module->slots[slot].filePath.empty() ? module->slots[slot].filePath : module->slots[0].filePath;
+	std::string dir = last.empty() ? "" : system::getDirectory(last);
 	char* path = osdialog_file(OSDIALOG_OPEN, dir.empty() ? NULL : dir.c_str(), NULL, filters);
 	osdialog_filters_free(filters);
 	if (!path)
 		return;
-	module->loadFile(path);
+	module->loadFile(path, slot);
 	std::free(path);
 }
 
@@ -2063,7 +2581,24 @@ struct TransientArrow : widget::OpaqueWidget {
 		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && module) {
 			int m = module->selectedMarker;
 			float before = module->params[WaveArtifact::MARKER_WAVE_PARAM + m].getValue();
-			if (module->stepStartToTransient(m, dir)) {
+			// A step selected on the sequencer: the arrow moves that step's START lock; undo restores the sequencer.
+			int lockRow, lockStep;
+			WaveArtifactSequencer* seq = module->sequencerOnLeft();
+			if (seq && module->lockTarget(&lockRow, &lockStep)) {
+				json_t* oldJ = seq->toJson();
+				if (module->stepStartToTransient(m, dir)) {
+					history::ModuleChange* h = new history::ModuleChange;
+					h->name = dir > 0 ? "trig START to next transient" : "trig START to previous transient";
+					h->moduleId = seq->id;
+					h->oldModuleJ = oldJ;
+					h->newModuleJ = seq->toJson();
+					APP->history->push(h);
+				}
+				else {
+					json_decref(oldJ);
+				}
+			}
+			else if (module->stepStartToTransient(m, dir)) {
 				history::ParamChange* h = new history::ParamChange;
 				h->name = dir > 0 ? "START to next transient" : "START to previous transient";
 				h->moduleId = module->id;
@@ -2494,7 +3029,7 @@ struct WaveArtifactWidget : ModuleWidget {
 	void appendContextMenu(Menu* menu) override {
 		WaveArtifact* m = getModule<WaveArtifact>();
 		menu->addChild(new MenuSeparator);
-		menu->addChild(createMenuItem("Load WAV...", "", [=]() {
+		menu->addChild(createMenuItem("Load WAV (main sample)...", "", [=]() {
 			openLoadDialog(m);
 		}));
 		menu->addChild(createMenuItem("Previous WAV in folder", "", [=]() {
@@ -2503,6 +3038,15 @@ struct WaveArtifactWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Next WAV in folder", "", [=]() {
 			m->loadSibling(1);
 		}, !m->hasSiblings()));
+		// Each artifact can play its own WAV instead of the main one
+		menu->addChild(createSubmenuItem("Artifact samples", "", [=](Menu* sub) {
+			for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
+				const SampleSlot& own = m->slots[1 + i];
+				sub->addChild(createSubmenuItem(string::f("Artifact %d", i + 1), own.hasFile() ? own.fileName : "main sample", [=](Menu* one) {
+					addArtifactSampleItems(one, m, i);
+				}));
+			}
+		}));
 		menu->addChild(createIndexSubmenuItem("Artifact count",
 			{"Auto (50-100)", "50", "64", "100"},
 			[=]() {
@@ -2510,7 +3054,7 @@ struct WaveArtifactWidget : ModuleWidget {
 			},
 			[=](size_t mode) {
 				m->tableCountMode = (wa::TableCountMode) mode;
-				m->startAnalysis();
+				m->startAnalysisAll();
 			}
 		));
 		menu->addChild(createMenuItem("Restart LFOs", "beat grid + all LFOs", [=]() {
@@ -2619,17 +3163,9 @@ struct WaveArtifactWidget : ModuleWidget {
 			},
 			[=](size_t tone) {
 				m->tableTone = (wa::TableTone) tone;
-				m->startAnalysis();
+				m->startAnalysisAll();
 			}
 		));
-		// Overwrites every marker, so it asks first (a submenu, one more click).
-		menu->addChild(createSubmenuItem("⚠ Auto arrange artifacts", "", [=](Menu* sub) {
-			sub->addChild(createMenuLabel("⚠ Resets your current artifacts:"));
-			sub->addChild(createMenuLabel("all 5 on, evenly spaced, settings back to default"));
-			sub->addChild(createMenuItem("Auto arrange now", "", [=]() {
-				m->autoArrange();
-			}));
-		}));
 		if (m->previewTable.load() >= 0) {
 			menu->addChild(createMenuItem("Stop artifact preview", "", [=]() {
 				m->previewTable = -1;
@@ -2651,6 +3187,55 @@ struct WaveArtifactWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Add step sequencer (SEQ mode)", hasSequencer ? "added" : "", [=]() {
 			addSequencer();
 		}, hasSequencer));
+		bool hasSendReturn = isWaveArtifactSendReturn(last->rightExpander.module);
+		menu->addChild(createMenuItem("Add stereo send / return (L / R jacks)", hasSendReturn ? "added" : "", [=]() {
+			addSendReturn();
+		}, hasSendReturn));
+	}
+
+	/** Creates the stereo SEND / RETURN module at the end of the chain (right of the last expander, or of this module),
+	pushing whatever is there further right. One undo step, which also moves the pushed modules back. */
+	void addSendReturn() {
+		WaveArtifact* m = getModule<WaveArtifact>();
+		if (!m)
+			return;
+		Module* last = m;
+		while (isWaveArtifactExpander(last->rightExpander.module))
+			last = last->rightExpander.module;
+		if (isWaveArtifactSendReturn(last->rightExpander.module))
+			return;
+		ModuleWidget* lastWidget = APP->scene->rack->getModule(last->id);
+		if (!lastWidget)
+			return;
+		std::map<int64_t, Vec> oldPos;
+		for (ModuleWidget* w : APP->scene->rack->getModules())
+			oldPos[w->module ? w->module->id : -1] = w->box.pos;
+
+		Model* model = modelWaveArtifactSendReturn;
+		Module* sm = model->createModule();
+		APP->engine->addModule(sm);
+		ModuleWidget* smw = model->createModuleWidget(sm);
+		APP->scene->rack->addModule(smw);
+		APP->scene->rack->setModulePosForce(smw, Vec(lastWidget->box.getRight(), lastWidget->box.pos.y));
+
+		history::ComplexAction* complex = new history::ComplexAction;
+		complex->name = "add Wave Artifacts send / return";
+		for (ModuleWidget* w : APP->scene->rack->getModules()) {
+			if (w == smw || !w->module)
+				continue;
+			auto it = oldPos.find(w->module->id);
+			if (it == oldPos.end() || it->second.equals(w->box.pos))
+				continue;
+			history::ModuleMove* mv = new history::ModuleMove;
+			mv->moduleId = w->module->id;
+			mv->oldPos = it->second;
+			mv->newPos = w->box.pos;
+			complex->push(mv);
+		}
+		history::ModuleAdd* h = new history::ModuleAdd;
+		h->setModule(smw);
+		complex->push(h);
+		APP->history->push(complex);
 	}
 
 	/** Creates the step sequencer snapped to the LEFT of this module, pushing whatever is there further left.
