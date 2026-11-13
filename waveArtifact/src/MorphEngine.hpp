@@ -77,7 +77,14 @@ struct EngineInput {
 	float position = 0.f;
 	/** Octaves relative to C4 */
 	float voct = 0.f;
+	/** The main sample's bank: every marker without its own plays it */
 	const WavetableBank* bank = nullptr;
+	/** A marker's own sample (null: the main one). Changing it fades that marker alone out and in (5 ms). */
+	const WavetableBank* markerBank[NUM_MARKERS] = {};
+	/** Fade this marker alone out and keep it silent (its own sample is about to be swapped) */
+	bool markerHold[NUM_MARKERS] = {};
+	/** The bank the preview's table is in (the file the screen shows), or null */
+	const WavetableBank* previewBank = nullptr;
 	/** Fade out and stay silent, e.g. while a bank swap is pending. */
 	bool holdSilent = false;
 	/** Table to audition instead of the morph, or -1. Switching crossfades over 20 ms. */
@@ -148,6 +155,11 @@ public:
 		return gain <= 0.f;
 	}
 
+	/** True once a marker's own fade (markerHold, or its sample changing) has reached silence */
+	bool isMarkerSilent(int m) const {
+		return gain <= 0.f || markerGate[m] <= 0.f;
+	}
+
 	/** Smoothed playhead, for display. */
 	float getPosition() const {
 		return posS;
@@ -205,7 +217,11 @@ public:
 			sig |= 0x80000000u;
 
 		bool changed = !structureApplied || sig != appliedSig || in.bank != appliedBank;
-		bool wantSilent = in.holdSilent || changed || !in.bank;
+		// Silent without any sample at all; a marker without one stays silent on its own (markerGate)
+		bool anyBank = in.bank != nullptr;
+		for (int i = 0; i < NUM_MARKERS && !anyBank; i++)
+			anyBank = in.markerBank[i] != nullptr;
+		bool wantSilent = in.holdSilent || changed || !anyBank;
 		gain = wantSilent ? std::max(0.f, gain - fadeStep) : std::min(1.f, gain + fadeStep);
 
 		if (changed && gain <= 0.f) {
@@ -224,7 +240,8 @@ public:
 				// appliedBank is only an identity here; it may already be freed. Never read it.
 				appliedBank = in.bank;
 				for (int i = 0; i < NUM_MARKERS; i++) {
-					float t = tableIndex(in.markers[i].wave, in.bank);
+					appliedMarkerBank[i] = bankFor(in, i);
+					float t = tableIndex(in.markers[i].wave, appliedMarkerBank[i]);
 					tables[i].cur = tables[i].prev = tables[i].lastTarget = t;
 					tables[i].fade = 1.f;
 				}
@@ -232,6 +249,22 @@ public:
 				master.reset();
 			}
 			structureApplied = true;
+		}
+
+		// Each marker's own sample: a change (or markerHold) fades that marker alone out, then it starts on the new
+		// bank. While the whole engine is silent the change applies at once.
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			const WavetableBank* want = bankFor(in, i);
+			bool mChanged = want != appliedMarkerBank[i];
+			bool mSilent = in.markerHold[i] || mChanged || !want;
+			markerGate[i] = mSilent ? std::max(0.f, markerGate[i] - fadeStep) : std::min(1.f, markerGate[i] + fadeStep);
+			if (mChanged && (markerGate[i] <= 0.f || gain <= 0.f)) {
+				// appliedMarkerBank is only an identity; it may already be freed. Never read it.
+				appliedMarkerBank[i] = want;
+				float t = tableIndex(in.markers[i].wave, want);
+				tables[i].cur = tables[i].prev = tables[i].lastTarget = t;
+				tables[i].fade = 1.f;
+			}
 		}
 
 		float target = std::min(std::max(in.position, 0.f), 1.f);
@@ -262,7 +295,7 @@ public:
 				s.smoothTime = smooth;
 				s.smoothCoef = 1.f - std::exp(-1.f / (smooth * sampleRate));
 			}
-			float t = tableIndex(fold01(in.markers[i].wave + s.lfoAmountS * in.markers[i].lfo), in.bank);
+			float t = tableIndex(fold01(in.markers[i].wave + s.lfoAmountS * in.markers[i].lfo), bankFor(in, i));
 			bool atMinimum = smooth <= MIN_WAVE_SMOOTH * 1.05f;
 			bool jumped = std::fabs(t - s.lastTarget) > JUMP_TABLES;
 			s.lastTarget = t;
@@ -285,12 +318,12 @@ public:
 		}
 
 		float l = 0.f, r = 0.f;
-		bool rendered = in.bank && gain > 0.f;
+		bool rendered = anyBank && gain > 0.f;
 		if (rendered) {
 			if (polyApplied)
-				renderPoly(in, *in.bank, &l, &r);
+				renderPoly(in, &l, &r);
 			else
-				renderMorph(in, *in.bank, &l, &r);
+				renderMorph(in, &l, &r);
 		}
 		// MORPH: the artifacts' own chains (outputs, SEND, RETURN); a returned sound joins the mix here, before the
 		// master section.
@@ -300,9 +333,11 @@ public:
 		// Preview (audition) of one table: replaces the morph with a 20 ms crossfade, plays at the
 		// base pitch, centered, unfiltered. A different table while previewing crossfades too.
 		// It fades out like the morph while a bank swap is pending.
-		bool wantPreview = in.previewTable >= 0 && in.bank && in.bank == appliedBank && !in.holdSilent;
+		// The preview's file: the one given, else the main sample
+		const WavetableBank* pb = in.previewBank ? in.previewBank : in.bank;
+		bool wantPreview = in.previewTable >= 0 && pb && !in.holdSilent;
 		if (wantPreview) {
-			int t = std::min(in.previewTable, in.bank->numTables - 1);
+			int t = std::min(in.previewTable, pb->numTables - 1);
 			if (previewEnv <= 0.f) {
 				previewCur = previewPrev = t;
 				previewFade = 1.f;
@@ -315,8 +350,8 @@ public:
 		}
 		previewEnv = wantPreview ? std::min(1.f, previewEnv + tableFadeStep) : std::max(0.f, previewEnv - tableFadeStep);
 		previewFade = std::min(1.f, previewFade + tableFadeStep);
-		if (previewEnv > 0.f && in.bank && in.bank == appliedBank) {
-			const WavetableBank& bank = *in.bank;
+		if (previewEnv > 0.f && pb) {
+			const WavetableBank& bank = *pb;
 			float f = FREQ_C4 * std::exp2(in.voct);
 			f = std::min(std::max(f, 0.01f), 0.45f * sampleRate);
 			int maxT = bank.numTables - 1;
@@ -388,7 +423,7 @@ public:
 private:
 	/** The morph itself: neighboring markers' oscillators crossfaded by position, band-pass, pan.
 	Writes the stereo signal before the limiter. */
-	void renderMorph(const EngineInput& in, const WavetableBank& bank, float* outL, float* outR) {
+	void renderMorph(const EngineInput& in, float* outL, float* outR) {
 		// Neighboring markers a, b and blend weight w, using the applied (current) structure.
 		int a = order[0], b = order[0];
 		float w = 0.f;
@@ -433,12 +468,16 @@ private:
 			// The LFO is already inside s.cur (it moves the glide target), so SMOOTH shapes it too.
 			const TableState& s = tables[m];
 			playedIndex[m] = s.cur;
-			float v = readAt(bank, s.cur, phases[m], freqs[m]);
+			// Its own sample's tables (or the main one's), through its own fade
+			const WavetableBank* bk = bankFor(in, m);
+			if (!bk || markerGate[m] <= 0.f)
+				return 0.f;
+			float v = readAt(*bk, s.cur, phases[m], freqs[m]);
 			if (s.fade < 1.f) {
-				float old = readAt(bank, s.prev, phases[m], freqs[m]);
+				float old = readAt(*bk, s.prev, phases[m], freqs[m]);
 				v = old + (v - old) * s.fade;
 			}
-			return v;
+			return v * markerGate[m];
 		};
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			// (float) copy: std::min takes references, and C++11 has no inline constexpr members.
@@ -513,7 +552,7 @@ private:
 	/** POLY: every sounding marker runs its own chain (the same blocks as an artifact output): GAIN, DRIVE,
 	filter, ADSR level, PAN. The level comes after the filter, so a released note keeps the filter's sound to
 	the end. A patched artifact output takes its voice out of the main mix, as in the morph. */
-	void renderPoly(const EngineInput& in, const WavetableBank& bank, float* outL, float* outR) {
+	void renderPoly(const EngineInput& in, float* outL, float* outR) {
 		float sumL = 0.f, sumR = 0.f;
 		float power = 0.f;
 		for (int m = 0; m < NUM_MARKERS; m++) {
@@ -560,10 +599,15 @@ private:
 
 				const TableState& s = tables[m];
 				playedIndex[m] = s.cur;
-				float v = readAt(bank, s.cur, phases[m], f);
-				if (s.fade < 1.f) {
-					float old = readAt(bank, s.prev, phases[m], f);
-					v = old + (v - old) * s.fade;
+				const WavetableBank* bk = bankFor(in, m);
+				float v = 0.f;
+				if (bk && markerGate[m] > 0.f) {
+					v = readAt(*bk, s.cur, phases[m], f);
+					if (s.fade < 1.f) {
+						float old = readAt(*bk, s.prev, phases[m], f);
+						v = old + (v - old) * s.fade;
+					}
+					v *= markerGate[m];
 				}
 				// SEND: what the filter gets; RETURN (insert) takes the filter's place, faded in and out over 20 ms
 				float driven = d.drive.process(v * gainS[m], d.driveS < 1e-5f ? 0.f : d.driveS);
@@ -773,6 +817,11 @@ private:
 		float lfoAmountS = 0.f;
 	};
 
+	/** The bank a marker plays: its own sample's, else the main one (null: none) */
+	static const WavetableBank* bankFor(const EngineInput& in, int m) {
+		return in.markerBank[m] ? in.markerBank[m] : in.bank;
+	}
+
 	static float tableIndex(float wave, const WavetableBank* bank) {
 		int maxT = bank ? bank->numTables - 1 : 0;
 		return std::min(std::max(wave, 0.f), 1.f) * std::max(maxT, 0);
@@ -835,6 +884,9 @@ private:
 	float polyTrimS = 1.f;
 	uint32_t appliedSig = 0;
 	const WavetableBank* appliedBank = nullptr;
+	/** Each marker's bank as applied (identity only) and its own fade, 0..1 */
+	const WavetableBank* appliedMarkerBank[NUM_MARKERS] = {};
+	float markerGate[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	int order[NUM_MARKERS] = {0, 1, 2, 3, 4};
 	int numActive = 1;
 	TableState tables[NUM_MARKERS];

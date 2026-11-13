@@ -24,7 +24,7 @@ struct GrainScanLengthQuantity : ParamQuantity {
 				m->params[WaveArtifact::MARKER_GRAIN_DOTTED_PARAM + marker].getValue() > 0.5f);
 			return string::f("%s (%g beats)", wa::SAMPLE_DIVISIONS[d].name, std::round(wa::SAMPLE_DIVISIONS[d].beats * 1000.f) / 1000.f);
 		}
-		return scanLengthText(getValue(), m ? m->activeBank.load() : nullptr);
+		return scanLengthText(getValue(), m ? m->bankOf(marker) : nullptr);
 	}
 	std::string getUnit() override {
 		return "";

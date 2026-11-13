@@ -40,6 +40,15 @@
         "Expander",
         "Sequencer"
       ]
+    },
+    {
+      "slug": "waveArtifactSendReturn",
+      "name": "Wave Artifacts Send / Return",
+      "description": "Each artifact's send and return on separate L / R jacks, for stereo effects; place it right of the main module or its last expander",
+      "tags": [
+        "Expander",
+        "Utility"
+      ]
     }
   ]
 }

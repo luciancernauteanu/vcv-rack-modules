@@ -93,7 +93,9 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 	Module* left = leftExpander.module;
 	Module* right = rightExpander.module;
 	bool leftOk = isMain(left) || isWaveArtifactExpander(left);
-	bool rightIsExp = isWaveArtifactExpander(right);
+	// On the right: another expander, or the stereo SEND / RETURN module (the end of the chain): both take our
+	// message and send theirs back
+	bool rightIsExp = isWaveArtifactExpander(right) || isWaveArtifactSendReturn(right);
 
 	// From the left: clock and our place in the chain.
 	wa::ToExpanderMessage fromLeft;
@@ -166,6 +168,8 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->sample = fromLeft.sample;
 		out->poly = fromLeft.poly;
 		std::copy(fromLeft.modLfo, fromLeft.modLfo + wa::NUM_MARKERS, out->modLfo);
+		std::copy(fromLeft.sendL, fromLeft.sendL + wa::NUM_MARKERS, out->sendL);
+		std::copy(fromLeft.sendR, fromLeft.sendR + wa::NUM_MARKERS, out->sendR);
 		right->leftExpander.requestMessageFlip();
 	}
 

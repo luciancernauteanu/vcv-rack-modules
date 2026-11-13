@@ -1,6 +1,8 @@
 #pragma once
 #include "../Layout.hpp"
 #include "../WaveArtifact.hpp"
+#include "../WaveArtifactSequencer.hpp"
+#include "../LoopLayout.hpp"
 #include "MarkerMenu.hpp"
 #include "WaveDraw.hpp"
 
@@ -32,9 +34,19 @@ struct WavetableMap : widget::Widget {
 	/** GRAIN: the marker whose loop end is being dragged, or -1 */
 	int dragLoopEnd = -1;
 
+	/** The file the map shows: the selected artifact's own, else the main one */
+	int slot() {
+		return module ? module->shownSlot() : 0;
+	}
+
 	const wa::WavetableBank* bank() {
 		// Safe to read: only the UI thread (this thread) frees banks.
-		return module ? module->activeBank.load() : nullptr;
+		return module ? module->slots[slot()].activeBank.load() : nullptr;
+	}
+
+	/** A marker on the map: on, and playing the file the map shows */
+	bool onMap(int i) {
+		return module && module->isMarkerActive(i) && module->slotOf(i) == slot();
 	}
 
 	int tableAt(float x, int n) {
@@ -130,7 +142,7 @@ struct WavetableMap : widget::Widget {
 		float r = bulletR() + 2.f;
 		float bestD = r * r;
 		for (int i = 0; i < wa::NUM_MARKERS; i++) {
-			if (!module->isMarkerActive(i))
+			if (!onMap(i))
 				continue;
 			float dx = bulletX(i, n) - p.x;
 			float dy = box.size.y / 2.f - p.y;
@@ -174,7 +186,7 @@ struct WavetableMap : widget::Widget {
 		float bestD = LOOP_HANDLE_REACH;
 		for (int i = 0; i < wa::NUM_MARKERS; i++) {
 			float end = module->shownScanEnd[i].load();
-			if (!module->isMarkerActive(i) || end < 0.f)
+			if (!onMap(i) || end < 0.f)
 				continue;
 			float d = std::fabs(end * box.size.x - p.x);
 			if (d < bestD || (d <= bestD + 0.5f && i == module->selectedMarker)) {
@@ -196,12 +208,146 @@ struct WavetableMap : widget::Widget {
 		module->params[WaveArtifact::MARKER_GRAIN_SCAN_LENGTH_PARAM + marker].setValue(wa::grainScanLengthKnob(end - start, seconds));
 	}
 
+	// --- LAY selection (GRAIN / SAMPLE): Shift + drag picks the part of the sample LAY lays out ----------------------
+	/** The marker being given a part (the selected one), or -1; the press and the mouse, frames of the sample */
+	int layMarker = -1;
+	long layAnchor = 0, layTo = 0;
+	wa::LaySelection laySel;
+	/** The file's tempo for the snapping (0: none), and where it came from (for the label) */
+	double layBpm = 0.0;
+	std::string layTempoFrom;
+
+	/** The part as it would be now: snapped to a hit and, with a tempo (found in the audio, or in the file name), to
+	whole beats */
+	void updateLaySelection() {
+		const wa::WavetableBank* b = bank();
+		if (!b || !b->sample.valid())
+			return;
+		const SampleSlot& s = module->slots[slot()];
+		long total = (long) b->sample.frames;
+		double sr = (double) b->sample.sampleRate;
+		// A press within 3 % of the map's width of a hit starts on it
+		long snap = (long) (0.03 * (double) total);
+		laySel = wa::laySelection(s.transients, total, sr, layBpm, layAnchor, layTo, snap);
+	}
+
+	long frameAt(float x) {
+		const wa::WavetableBank* b = bank();
+		long total = b ? (long) b->sample.frames : 0;
+		return std::lround(clamp(x / box.size.x, 0.f, 1.f) * (double) total);
+	}
+
+	/** Release: the marker's START and LENGTH become the part (FREE, so LENGTH is that time), one undo entry. A trig
+	selected on the sequencer is let go first, so this moves the marker's own knobs, not a lock. */
+	void applyLaySelection() {
+		const wa::WavetableBank* b = bank();
+		int marker = layMarker;
+		if (!b || !b->sample.valid() || marker < 0 || laySel.frames <= 0)
+			return;
+		double total = (double) b->sample.frames, seconds = total / b->sample.sampleRate;
+		if (WaveArtifactSequencer* seq = module->sequencerOnLeft())
+			seq->select(-1, -1);
+		module->lockResync = true;
+		struct Set {
+			int id;
+			float value;
+		};
+		const Set sets[3] = {
+			{WaveArtifact::MARKER_WAVE_PARAM + marker, (float) ((double) laySel.from / total)},
+			{WaveArtifact::MARKER_GRAIN_SCAN_LENGTH_PARAM + marker,
+				std::min(wa::grainScanLengthKnob((double) laySel.frames / total, seconds), wa::SCAN_LENGTH_TOP - 1e-4f)},
+			{WaveArtifact::MARKER_SAMPLE_BEAT_PARAM + marker, (float) wa::SAMPLE_BEAT_OFF},
+		};
+		history::ComplexAction* h = new history::ComplexAction;
+		h->name = "select the part to lay out";
+		for (const Set& s : sets) {
+			history::ParamChange* p = new history::ParamChange;
+			p->moduleId = module->id;
+			p->paramId = s.id;
+			p->oldValue = module->params[s.id].getValue();
+			p->newValue = s.value;
+			module->params[s.id].setValue(s.value);
+			h->push(p);
+		}
+		APP->history->push(h);
+	}
+
+	/** The band while dragging, in the marker's color, with its length */
+	void drawLaySelection(NVGcontext* vg, std::shared_ptr<window::Font> font) {
+		const wa::WavetableBank* b = bank();
+		if (layMarker < 0 || !b || !b->sample.valid() || laySel.frames <= 0)
+			return;
+		double total = (double) b->sample.frames, sr = (double) b->sample.sampleRate;
+		float W = box.size.x, H = box.size.y;
+		float x0 = (float) (laySel.from / total) * W, x1 = (float) ((laySel.from + laySel.frames) / total) * W;
+		NVGcolor col = layout::MARKER_COLORS[clamp(layMarker, 0, wa::NUM_MARKERS - 1)];
+		nvgBeginPath(vg);
+		nvgRect(vg, x0, 0.f, std::max(x1 - x0, 1.f), H);
+		nvgFillColor(vg, nvgTransRGBAf(col, 0.28f));
+		nvgFill(vg);
+		nvgBeginPath(vg);
+		nvgMoveTo(vg, x0, 0.f);
+		nvgLineTo(vg, x0, H);
+		nvgMoveTo(vg, x1, 0.f);
+		nvgLineTo(vg, x1, H);
+		nvgStrokeColor(vg, col);
+		nvgStrokeWidth(vg, 1.4f);
+		nvgStroke(vg);
+		if (!font)
+			return;
+		std::string text;
+		double sec = laySel.frames / sr;
+		if (laySel.beats > 0) {
+			int bt = laySel.beats;
+			std::string bars = (bt % 4 == 0) ? string::f("%d bar%s \xc2\xb7 ", bt / 4, bt == 4 ? "" : "s") : "";
+			text = string::f("LAY: %s%d beat%s @ %.1f bpm (%s)", bars.c_str(), bt, bt == 1 ? "" : "s", layBpm, layTempoFrom.c_str());
+		}
+		else {
+			text = string::f("LAY: %.2f s (no clear beat found)", sec);
+		}
+		nvgFontFaceId(vg, font->handle);
+		nvgFontSize(vg, 10.f);
+		float bounds[4];
+		nvgTextBounds(vg, 0.f, 0.f, text.c_str(), NULL, bounds);
+		float tw = bounds[2] - bounds[0] + 6.f, th = 12.f;
+		float tx = clamp((x0 + x1) / 2.f - tw / 2.f, 1.f, std::max(W - tw - 1.f, 1.f));
+		nvgBeginPath(vg);
+		nvgRoundedRect(vg, tx, 2.f, tw, th, 2.f);
+		nvgFillColor(vg, nvgRGBA(0x16, 0x18, 0x22, 0xe0));
+		nvgFill(vg);
+		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFillColor(vg, col);
+		nvgText(vg, tx + tw / 2.f, 2.f + th / 2.f + 0.5f, text.c_str(), NULL);
+	}
+
 	void onButton(const ButtonEvent& e) override {
 		const wa::WavetableBank* b = bank();
 		if (!module || !b || e.action != GLFW_PRESS)
 			return;
 		int n = b->numTables;
 		int t = tableAt(e.pos.x, n);
+		// Shift + drag (GRAIN / SAMPLE): pick the part of the sample LAY lays out, for the selected marker
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == GLFW_MOD_SHIFT && isGrain() && b->sample.valid() &&
+			onMap(module->selectedMarker)) {
+			layMarker = module->selectedMarker;
+			module->updateTransients(slot());
+			// The file's tempo from its hits; the name's only when the audio shows no clear beat
+			bool fromName = false;
+			wa::FoundTempo ft = module->fileTempoOf(slot(), &fromName);
+			double named = wa::bpmFromName(module->slots[slot()].fileName);
+			if (ft.found) {
+				layBpm = ft.bpm;
+				layTempoFrom = fromName ? "found, as its name says" : "found";
+			}
+			else {
+				layBpm = named;
+				layTempoFrom = named > 0.0 ? "its name" : "";
+			}
+			layAnchor = layTo = frameAt(e.pos.x);
+			updateLaySelection();
+			e.consume(this);
+			return;
+		}
 		int loopEnd = loopEndAt(e.pos);
 		if (loopEnd >= 0) {
 			module->selectedMarker = loopEnd;
@@ -256,6 +402,11 @@ struct WavetableMap : widget::Widget {
 	}
 
 	void onDragMove(const DragMoveEvent& e) override {
+		if (module && layMarker >= 0 && e.button == GLFW_MOUSE_BUTTON_LEFT) {
+			layTo = frameAt(mouseLocal().x);
+			updateLaySelection();
+			return;
+		}
 		if (module && dragLoopEnd >= 0 && e.button == GLFW_MOUSE_BUTTON_LEFT)
 			setLoopEnd(dragLoopEnd, mouseLocal().x);
 		else if (module && dragMarker >= 0 && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -263,6 +414,9 @@ struct WavetableMap : widget::Widget {
 	}
 
 	void onDragEnd(const DragEndEvent& e) override {
+		if (module && layMarker >= 0)
+			applyLaySelection();
+		layMarker = -1;
 		dragMarker = -1;
 		dragLoopEnd = -1;
 		if (module)
@@ -277,6 +431,7 @@ struct WavetableMap : widget::Widget {
 		if (module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f)
 			return;
 		int t = hovered;
+		module->previewSlot = slot();
 		module->previewTable = (module->previewTable.load() == t) ? -1 : t;
 	}
 
@@ -288,6 +443,7 @@ struct WavetableMap : widget::Widget {
 		if (marker >= 0) {
 			menu->addChild(createMenuLabel("Marker " + std::to_string(marker + 1)));
 			addMarkerCopyPasteItems(menu, m, marker);
+			m->appendLoopLayoutMenu(menu, marker);
 			menu->addChild(new MenuSeparator);
 		}
 		bool grain = m->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
@@ -301,6 +457,7 @@ struct WavetableMap : widget::Widget {
 					return m->previewTable.load() == t;
 				},
 				[=]() {
+					m->previewSlot = m->shownSlot();
 					m->previewTable = (m->previewTable.load() == t) ? -1 : t;
 				}
 			));
@@ -313,6 +470,9 @@ struct WavetableMap : widget::Widget {
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuLabel(grain ? "Set START of" : "Assign to"));
 		for (int i = 0; i < wa::NUM_MARKERS; i++) {
+			// Only the markers on this file (one with its own file has its own map)
+			if (m->slotOf(i) != m->shownSlot())
+				continue;
 			std::string right;
 			if (!m->isMarkerActive(i))
 				right = "off, turns on";
@@ -408,7 +568,8 @@ struct WavetableMap : widget::Widget {
 		int n = 0;
 		if (b) {
 			n = b->numTables;
-			int serial = module->bankSerial.load();
+			// Another file shown, or a new bank in it
+			int serial = module->slots[slot()].bankSerial.load() * WaveArtifact::NUM_SLOTS + slot();
 			if (curveSerial != serial || (int) curve.size() != n * PTS) {
 				buildCurve(*b);
 				curveSerial = serial;
@@ -444,7 +605,7 @@ struct WavetableMap : widget::Widget {
 		// Marker halos: a soft colour glow behind the artifact each marker plays.
 		if (module) {
 			for (int i = 0; i < wa::NUM_MARKERS; i++) {
-				if (!module->isMarkerActive(i))
+				if (!onMap(i))
 					continue;
 				float x = markerX(i, n);
 				float hw = std::max(W / n, mm2px(3.f));
@@ -530,7 +691,7 @@ struct WavetableMap : widget::Widget {
 				else {
 					flash[i] = std::max(0.f, flash[i] - dt * 5.f);
 				}
-				if (flash[i] <= 0.f || !module->isMarkerActive(i))
+				if (flash[i] <= 0.f || !onMap(i))
 					continue;
 				// The piece of the sample the grain reads, as a thin strip along the bottom: the full-height shading
 				// is the scan loop, so the two never look alike.
@@ -558,7 +719,7 @@ struct WavetableMap : widget::Widget {
 			int selected = module->selectedMarker;
 			for (int k = 0; k <= wa::NUM_MARKERS; k++) {
 				int i = (k < wa::NUM_MARKERS) ? k : selected;
-				if ((k < wa::NUM_MARKERS && i == selected) || !module->isMarkerActive(i))
+				if ((k < wa::NUM_MARKERS && i == selected) || !onMap(i))
 					continue;
 				float end = module->shownScanEnd[i].load();
 				if (end < 0.f)
@@ -614,11 +775,12 @@ struct WavetableMap : widget::Widget {
 		}
 
 		// SAMPLE and GRAIN: the hits found (the HITS slider), short ticks along the bottom
-		if ((int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) >= 1 && module->transientFrames > 0) {
-			module->updateTransients();
+		if ((int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) >= 1 && module->slots[slot()].transientFrames > 0) {
+			const SampleSlot& s = module->slots[slot()];
+			module->updateTransients(slot());
 			nvgBeginPath(vg);
-			for (long t : module->transients) {
-				float x = (float) ((double) t / (double) module->transientFrames) * W;
+			for (long t : s.transients) {
+				float x = (float) ((double) t / (double) s.transientFrames) * W;
 				nvgMoveTo(vg, x, H);
 				nvgLineTo(vg, x, H * 0.72f);
 			}
@@ -633,7 +795,7 @@ struct WavetableMap : widget::Widget {
 		{
 			float sx;
 			bool locked = false;
-			if (module->isMarkerActive(sel) && stepX(sel, n, &sx, &locked)) {
+			if (onMap(sel) && stepX(sel, n, &sx, &locked)) {
 				NVGcolor c = layout::MARKER_COLORS[sel];
 				nvgBeginPath(vg);
 				nvgMoveTo(vg, sx, 0);
@@ -658,7 +820,7 @@ struct WavetableMap : widget::Widget {
 		float br = bulletR();
 		for (int k = 0; k <= wa::NUM_MARKERS; k++) {
 			int i = (k < wa::NUM_MARKERS) ? k : sel;
-			if ((k < wa::NUM_MARKERS && i == sel) || !module->isMarkerActive(i))
+			if ((k < wa::NUM_MARKERS && i == sel) || !onMap(i))
 				continue;
 			float x = bulletX(i, n);
 			// A dark shadow ring lifts the bullet off the waveform.
@@ -680,5 +842,7 @@ struct WavetableMap : widget::Widget {
 			if (font)
 				wadraw::drawCenteredNumber(vg, font->handle, x, mid, br * 1.4f, std::to_string(i + 1), nvgRGB(0x16, 0x18, 0x22));
 		}
+		// Shift + drag: the part LAY will lay out
+		drawLaySelection(vg, font);
 	}
 };

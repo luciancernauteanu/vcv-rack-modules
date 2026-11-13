@@ -32,7 +32,7 @@ static const Section TOP_SECTIONS[] = {
 	{84.5f, 96.5f},   // GAIN, PAN
 	{98.5f, 134.5f},  // FILTER: cutoff, drive, res, type
 	{136.5f, 154.5f}, // PITCH, FINE, FREE
-	{156.5f, 176.88f}, // tempo: BPM, CLK OUT, CLOCK, RESET (Auto arrange is in the right-click menu)
+	{156.5f, 176.88f}, // tempo: BPM, CLK OUT, CLOCK, RESET
 };
 static const Vec MARKER_BADGE = Vec(11.f, ROW1_Y);
 static const Vec WAVE_KNOB = Vec(27.f, ROW1_Y);

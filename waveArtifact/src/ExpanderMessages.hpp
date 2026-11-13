@@ -165,6 +165,9 @@ struct ToExpanderMessage {
 	/** Each marker's expander LFO (-1..1, run by the main module: its settings are marker settings, lockable), for
 	the expanders' LFO jacks */
 	float modLfo[NUM_MARKERS] = {};
+	/** Each artifact's SEND (what its filter gets, L and R, +-1 = 5 V), for the stereo SEND / RETURN module at the
+	end of the chain */
+	float sendL[NUM_MARKERS] = {}, sendR[NUM_MARKERS] = {};
 };
 
 /** Main -> sequencer (the sequencer sits on the LEFT of the main module). The beat position is a level and the
@@ -212,6 +215,12 @@ struct ToMainMessage {
 	/** The CVs on the other knobs (CvDestInfo::fast = -1), from every linked expander */
 	CvKnobMod knobMods[MAX_CV_KNOB_MODS] = {};
 	int numKnobMods = 0;
+	/** The stereo SEND / RETURN module (end of the chain): an artifact's RET L is patched (its return replaces the
+	artifact's filter, over the main panel's RETURN), with its volts (RET R unpatched: RET L on both sides) */
+	bool stereoReturn[NUM_MARKERS] = {};
+	float stereoRetL[NUM_MARKERS] = {}, stereoRetR[NUM_MARKERS] = {};
+	/** One of its SEND jacks is patched (the engines work out the sends only while one is) */
+	bool stereoSendWanted = false;
 };
 
 } // namespace wa

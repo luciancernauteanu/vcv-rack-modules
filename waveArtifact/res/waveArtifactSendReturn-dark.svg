@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 10 HP dark panel for wA SEND / RETURN. Same geometry as waveArtifactSendReturn.svg. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="50.8mm" height="128.5mm" viewBox="0 0 50.8 128.5" version="1.1">
+  <g id="panel">
+    <rect id="background" x="0" y="0" width="50.8" height="128.5" fill="#23262b"/>
+    <rect id="rows" x="2" y="9.4" width="46.8" height="91.6" rx="2" ry="2" fill="#2d3137"/>
+    <rect id="send-box" x="8.6" y="9.4" width="21" height="91.6" rx="1.8" ry="1.8" fill="#e6e6e6"/>
+  </g>
+</svg>
