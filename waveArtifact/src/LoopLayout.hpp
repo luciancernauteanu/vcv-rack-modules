@@ -379,11 +379,24 @@ struct LayoutTrig {
 	long length;
 };
 
+/** How far from its step (in steps, and in seconds) a hit may be for LAY to start a trig on it. A trig plays on its
+step, so a hit off it would be heard early or late by as much, and the slice before it would stop short (a gap) or be
+cut. A hit further off (a 16th between the steps of an 8th row) plays inside the slice before it, at its own time.
+12 ms: the detector places a hit a few ms into its attack (about 7 ms on a drum loop), so hits on the beat still get
+their trig. Measured on a 6 s drum loop laid on 8th steps (all 147 of its hits, at HITS 0 %): every hit plays, at
+worst 8 ms off its time (half a step, 181 ms, and 13 hits cut out before). */
+static constexpr double LAY_SNAP_STEPS = 0.2;
+static constexpr double LAY_SNAP_SECONDS = 0.012;
+inline double laySnapSteps(double stepSeconds) {
+	return stepSeconds > 0.0 ? std::min(LAY_SNAP_STEPS, LAY_SNAP_SECONDS / stepSeconds) : LAY_SNAP_STEPS;
+}
+
 /** The trigs for the loop `from` .. `from + frames` laid over `steps` steps. `grid`: every step plays its own
-share of the loop. Otherwise each hit inside the loop goes on its nearest step (of several on a step, the one nearest
-to it; the others play inside its slice; a hit that rounds to the loop's end belongs to the next pass), and step 1
-always plays from the loop's start, so what comes before the first hit is heard too. Each trig plays up to the next one's start (the last: up to the loop's end). */
-inline std::vector<LayoutTrig> layoutTrigs(const std::vector<long>& hits, long from, long frames, int steps, bool grid) {
+share of the loop. Otherwise each hit inside the loop within `maxOff` steps of a step goes on it (of several on a
+step, the one nearest to it; the others play inside its slice; a hit that rounds to the loop's end belongs to the next
+pass), and step 1 always plays from the loop's start, so what comes before the first hit is heard too. Each trig plays
+up to the next one's start (the last: up to the loop's end). */
+inline std::vector<LayoutTrig> layoutTrigs(const std::vector<long>& hits, long from, long frames, int steps, bool grid, double maxOff = 0.5) {
 	std::vector<LayoutTrig> out;
 	if (frames <= 0 || steps <= 0)
 		return out;
@@ -400,7 +413,7 @@ inline std::vector<LayoutTrig> layoutTrigs(const std::vector<long>& hits, long f
 				continue;
 			double pos = (double) (h - from) / (double) frames * steps;
 			long s = std::lround(pos);
-			if (s >= steps || std::fabs(pos - (double) s) >= off[(size_t) s])
+			if (s >= steps || std::fabs(pos - (double) s) >= off[(size_t) s] || std::fabs(pos - (double) s) > maxOff)
 				continue;
 			at[(size_t) s] = h;
 			off[(size_t) s] = std::fabs(pos - (double) s);

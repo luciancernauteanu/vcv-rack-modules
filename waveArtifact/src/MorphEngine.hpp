@@ -104,6 +104,17 @@ struct EngineInput {
 	float voiceEnv[NUM_MARKERS] = {};
 	/** The marker started a new note on this sample */
 	bool voiceStart[NUM_MARKERS] = {};
+	/** Per-artifact engines: the marker plays on another engine (the module also holds it silent here). It keeps its
+	place on the bar, so the morph's neighbors are the same in every engine; a neighbor on another engine is not
+	morphed into: this engine plays its own marker alone, at its equal-power share of the crossfade. */
+	bool otherEngine[NUM_MARKERS] = {};
+	/** Render the voices while silent (with holdSilent): the module primes the engine when it starts running again,
+	because the drive is always in the path with ~31 samples of latency, and its filters hold what was there when the
+	engine stopped. Without it the live sound would come out of the drive in one step, partway into the fade-in. */
+	bool prime = false;
+	/** Return the mix before the master section (the module sets it always): it runs the master section once on the
+	sum of the engines running. Tests use the engine's own. */
+	bool rawOut = false;
 
 	// Master section (stereo, on the whole output): drive -> filter. See MasterFilter. The *Mod values
 	// are CV, added after smoothing so they can run at audio rate.
@@ -222,6 +233,13 @@ public:
 		for (int i = 0; i < NUM_MARKERS && !anyBank; i++)
 			anyBank = in.markerBank[i] != nullptr;
 		bool wantSilent = in.holdSilent || changed || !anyBank;
+		// Raw output turned on or off (only while silent; the module sets it from its first sample): the
+		// master section and limiter start clean.
+		if (in.rawOut != rawApplied && gain <= 0.f) {
+			rawApplied = in.rawOut;
+			master.reset();
+			limiter.reset();
+		}
 		gain = wantSilent ? std::max(0.f, gain - fadeStep) : std::min(1.f, gain + fadeStep);
 
 		if (changed && gain <= 0.f) {
@@ -318,7 +336,9 @@ public:
 		}
 
 		float l = 0.f, r = 0.f;
-		bool rendered = anyBank && gain > 0.f;
+		// Primed: the voices run with the fade still at 0 (silent), so the drive's oversampling filters hold the live
+		// sound by the time the fade-in starts
+		bool rendered = anyBank && (gain > 0.f || in.prime);
 		if (rendered) {
 			if (polyApplied)
 				renderPoly(in, &l, &r);
@@ -367,6 +387,27 @@ public:
 			r += (p - r) * previewEnv;
 		}
 
+		if (rawApplied) {
+			*outL = l;
+			*outR = r;
+		}
+		else {
+			masterAndLimit(in, l, r, outL, outR);
+		}
+
+		if (polyApplied && !rendered) {
+			// Fully faded: the limiters look ahead, so they still hold the last faded samples.
+			for (int m = 0; m < NUM_MARKERS; m++) {
+				if (in.wantDirect[m])
+					direct[m].limiter.process(0.f, 0.f, LIMIT, &directL[m], &directR[m]);
+				else
+					directL[m] = directR[m] = 0.f;
+			}
+		}
+	}
+
+	/** Master section, master gain and the output protection on the engine's whole mix */
+	void masterAndLimit(const EngineInput& in, float l, float r, float* outL, float* outR) {
 		// Master filter on the whole output (preview included).
 		MasterParams mp;
 		mp.mode = in.masterMode;
@@ -387,16 +428,6 @@ public:
 		// (artifact gains, drive, resonance, feedback, master gain) can send more than 10 V out.
 		masterGainS += (std::min(std::max(in.masterGain, 0.f), (float) MAX_MASTER_GAIN) - masterGainS) * smoothCoef;
 		limiter.process(l * masterGainS, r * masterGainS, LIMIT, outL, outR);
-
-		if (polyApplied && !rendered) {
-			// Fully faded: the limiters look ahead, so they still hold the last faded samples.
-			for (int m = 0; m < NUM_MARKERS; m++) {
-				if (in.wantDirect[m])
-					direct[m].limiter.process(0.f, 0.f, LIMIT, &directL[m], &directR[m]);
-				else
-					directL[m] = directR[m] = 0.f;
-			}
-		}
 	}
 
 	/** An artifact's own output (engine units, x5 V), 0 unless `wantDirect` was set for it.
@@ -444,6 +475,23 @@ private:
 				}
 			}
 		}
+		// A neighbor on another engine: that engine plays it. This one plays its own marker alone (no morph of the
+		// tables or the filter into the other), at the equal-power share, as the two are unrelated sounds.
+		float crossLevel = 1.f;
+		float shareA = 1.f - w;
+		bool cross = b != a && (in.otherEngine[a] || in.otherEngine[b]);
+		if (cross) {
+			if (in.otherEngine[b]) {
+				crossLevel = std::sqrt(shareA);
+				b = a;
+			}
+			else {
+				crossLevel = std::sqrt(w);
+				shareA = w;
+				a = b;
+			}
+			w = 0.f;
+		}
 		const MarkerInput& A = in.markers[a];
 		const MarkerInput& B = in.markers[b];
 
@@ -461,6 +509,9 @@ private:
 			heard[m] = 0.f;
 		heard[a] += 1.f - w;
 		heard[b] += w;
+		// Across engines: its own share of the playhead (the other engine has the rest)
+		if (cross)
+			heard[a] = shareA;
 		// The position crossfade share, before patched artifact outputs take their part out of the mix.
 		std::copy(heard, heard + NUM_MARKERS, posWeight);
 
@@ -537,6 +588,8 @@ private:
 		float q;
 		float fc = markerParams.get(cutoffS, resS, &q);
 		float out = markerSvf.process(driven, fc, q, sampleRate, mixS) * gain;
+		if (cross)
+			out *= crossLevel;
 
 		if (!std::isfinite(out)) {
 			markerSvf.reset();
@@ -881,6 +934,8 @@ private:
 
 	bool structureApplied = false;
 	bool polyApplied = false;
+	/** EngineInput::rawOut as applied (changed only while silent) */
+	bool rawApplied = false;
 	float polyTrimS = 1.f;
 	uint32_t appliedSig = 0;
 	const WavetableBank* appliedBank = nullptr;

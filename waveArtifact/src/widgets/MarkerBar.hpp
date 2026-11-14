@@ -174,8 +174,9 @@ struct MarkerBar : widget::Widget {
 		// Previous / next WAV in the folder (no dialog, so it can act on press)
 		int arrow = arrowAt(e.pos);
 		if (arrow >= 0) {
+			// Into the selected artifact's own file, so the other artifacts keep theirs
 			if (left)
-				module->loadSibling(arrow == 0 ? -1 : 1, module->shownSlot());
+				module->screenStep(arrow == 0 ? -1 : 1);
 			e.consume(this);
 			return;
 		}
@@ -264,8 +265,8 @@ struct MarkerBar : widget::Widget {
 			module->pressedMarker = -1;
 		if (loadOnRelease) {
 			loadOnRelease = false;
-			// Into the file the screen shows: the selected artifact's own, else the main one
-			openLoadDialog(module, module->shownSlot());
+			// The selected artifact's own file (the main one only while nothing is loaded at all)
+			openLoadDialog(module, module->screenLoadSlot());
 		}
 	}
 
@@ -317,6 +318,14 @@ struct MarkerBar : widget::Widget {
 		if (!font)
 			return;
 		std::string text = module ? module->getStatus(module->shownSlot()) : "Load a WAV (max 10 MB)";
+		// Once some artifact has its own file, say when the selected one plays the main sample
+		if (module && module->shownSlot() == 0 && !text.empty()) {
+			bool anyOwn = false;
+			for (int i = 0; i < wa::NUM_MARKERS; i++)
+				anyOwn = anyOwn || module->slots[1 + i].hasFile();
+			if (anyOwn)
+				text = "Main: " + text;
+		}
 		float y = mm2px(layout::STATUS_Y);
 		// Fixed start, after the arrows' slot, whether or not the arrows are shown.
 		float x = mm2px(layout::BAR_X0 + layout::FILE_TEXT_INDENT);
@@ -399,7 +408,7 @@ struct MarkerBar : widget::Widget {
 			nvgStroke(args.vg);
 
 			float index = 0.f;
-			bool grain = module && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+			bool grain = module && module->params[WaveArtifact::MARKER_ENGINE_PARAM + i].getValue() > 0.5f;
 			float readAt = 0.f;
 			// While a selected trig's WAVE / START is being moved (map drag or knob held), the slot shows that trig's
 			// start, following the move; otherwise what the marker plays now (moving with its LFO, scan and trigs).
@@ -476,6 +485,15 @@ struct MarkerBar : widget::Widget {
 				info = string::f("%.2fs", readAt * bank->sourceSeconds);
 			else if (bank)
 				info = string::f("%d/%d", (int) std::round(index) + 1, bank->numTables);
+			// Artifacts on different engines: each slot says its own (W, G, S) before what it plays
+			if (module && active) {
+				bool mixed = false;
+				for (int k = 0; k < wa::NUM_MARKERS; k++)
+					mixed = mixed || (module->isMarkerActive(k) && module->engineOfMarker(k) != module->engineOfMarker(i));
+				static const char* const ENGINE_TAGS[3] = {"W ", "G ", "S "};
+				if (mixed)
+					info = ENGINE_TAGS[module->engineOfMarker(i)] + info;
+			}
 			nvgText(args.vg, r.getRight() - pad - 1.f, r.pos.y + pad, info.c_str(), NULL);
 		}
 

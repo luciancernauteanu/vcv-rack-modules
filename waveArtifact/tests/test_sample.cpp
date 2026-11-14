@@ -1504,7 +1504,105 @@ static void testLayVelocity() {
 	CHECK(std::fabs((loud - soft) - 12.04) < 0.3, "the soft burst is 12 dB under (%.2f)", loud - soft);
 	CHECK(wa::hitPeakDb(bank->sample, 40000, w) <= -199.0, "silence has no peak");
 }
+static void testMixedPlayer() {
+	std::printf("Per-artifact engines: a SAMPLE cloud and a GRAIN cloud in one engine (GrainInput::playerOf)\n");
+	// Reference: cloud 0 alone, the whole engine on SAMPLE (GrainInput::player)
+	// Cloud 0's slice has its own LENGTH (0.2 of the file), so another marker's START does not end it
+	auto src = sineSource(3.0, 220.0);
+	Rig ref(makeBank(src));
+	ref.in.markers[0].scanLength = 0.2f;
+	ref.note();
+	std::vector<float> refOut;
+	ref.run(1.0, &refOut);
+
+	// Mixed: cloud 0 SAMPLE (playerOf), cloud 1 GRAIN, both playing notes
+	Rig mix(makeBank(src));
+	mix.in.markers[0].scanLength = 0.2f;
+	mix.in.player = false;
+	mix.in.playerOf[0] = true;
+	mix.in.markers[1].active = true;
+	mix.in.markers[1].pos = 1.f;
+	mix.in.markers[1].start = 0.3f;
+	mix.in.wantDirect[1] = true;
+	mix.note();
+	mix.in.voiceEnv[1] = 1.f;
+	mix.in.voiceStart[1] = true;
+	std::vector<float> out0, out1;
+	long n = (long) (1.0 * mix.sr), half = n / 2;
+	float worstStep1 = 0.f, last1 = 0.f;
+	for (long i = 0; i < n; i++) {
+		// Half way, cloud 1 turns from GRAIN to SAMPLE while its note goes on
+		if (i == half)
+			mix.in.playerOf[1] = true;
+		float l, r;
+		mix.clock.processInternal(120.f, mix.sr);
+		mix.engine->process(mix.in, &l, &r);
+		mix.engine->getDirect(0, &l, &r);
+		out0.push_back(l);
+		mix.engine->getDirect(1, &l, &r);
+		out1.push_back(l);
+		if (i > half - 100 && i < half + 2000)
+			worstStep1 = std::max(worstStep1, std::fabs(l - last1));
+		last1 = l;
+		mix.in.voiceStart[0] = mix.in.voiceStart[1] = false;
+	}
+	double maxDiff = 0.0;
+	for (size_t i = 0; i < out0.size() && i < refOut.size(); i++)
+		maxDiff = std::max(maxDiff, (double) std::fabs(out0[i] - refOut[i]));
+	std::printf("  SAMPLE cloud next to a GRAIN cloud vs the engine all on SAMPLE: largest difference %.2e (want 0)\n", maxDiff);
+	CHECK(maxDiff == 0.0, "the SAMPLE cloud changed next to a GRAIN cloud: %.2e", maxDiff);
+	double grainRms = rms(out1, (size_t) (0.1 * mix.sr), (size_t) half);
+	double sampleRms = rms(out1, (size_t) half + (size_t) (0.05 * mix.sr), out1.size());
+	std::printf("  cloud 1 as GRAIN: rms %.3f, after turning SAMPLE: rms %.3f (both above 0.05)\n", grainRms, sampleRms);
+	CHECK(grainRms > 0.05 && sampleRms > 0.05, "cloud 1 silent: grain %.3f sample %.3f", grainRms, sampleRms);
+	// The switch fades (5 ms out, then the player's own fade in): no step bigger than a 220 Hz sine at 0.5 makes
+	// (2 pi f A / sr = 0.0144), with margin for the grains' own sum
+	float bound = (float) (2.0 * PI * 220.0 * 0.5 / mix.sr) * 3.f;
+	std::printf("  worst step around the switch: %.4f (limit %.4f)\n", worstStep1, bound);
+	CHECK(worstStep1 < bound, "the GRAIN -> SAMPLE switch clicks: step %.4f > %.4f", worstStep1, bound);
+}
+// LAY on a loop whose hits fall between the row's steps (16ths of a loop laid on 8th steps): only hits close to a step
+// start trigs, so every trig plays on time and the slice before an off-step hit plays it at its own place
+static void testLayOffGrid() {
+	std::printf("LAY: hits between the steps\n");
+	// 16 steps of 375 ms (an 8th at 80 bpm) at 44.1 kHz
+	const long step = 16537;
+	const double stepSeconds = 0.375;
+	// On steps 1, 5, 9 (a few ms late, as the detector places them), and three 0.48 steps before steps 3, 7, 11
+	std::vector<long> hits = {0, 4 * step + 300, 8 * step + 200, (long) (1.52 * step), (long) (5.52 * step), (long) (9.52 * step)};
+	std::sort(hits.begin(), hits.end());
+	double tol = wa::laySnapSteps(stepSeconds);
+	std::vector<wa::LayoutTrig> t = wa::layoutTrigs(hits, 0, 16 * step, 16, false, tol);
+	long sum = 0;
+	std::printf("  tolerance %.3f steps (%.0f ms); trigs on steps", tol, tol * stepSeconds * 1000.0);
+	for (const wa::LayoutTrig& x : t) {
+		std::printf(" %d", x.step + 1);
+		sum += x.length;
+	}
+	std::printf("; lengths sum %ld of %ld\n", sum, 16 * step);
+	CHECK(t.size() == 3 && t[0].step == 0 && t[1].step == 4 && t[2].step == 8, "only the hits on steps start trigs (%d trigs)", (int) t.size());
+	CHECK(t.size() == 3 && t[0].length == 4 * step + 300, "the first slice plays through the off-step hit at its own time (%ld)",
+		t.empty() ? -1L : t[0].length);
+	CHECK(sum == 16 * step, "the slices cover the loop: %ld", sum);
+	// Every trig is within the tolerance of its step: none is heard early or late by more than that
+	double worst = 0.0;
+	for (const wa::LayoutTrig& x : t)
+		worst = std::max(worst, std::fabs((double) x.start / step - x.step));
+	std::printf("  worst trig off its step: %.3f steps (limit %.3f)\n", worst, tol);
+	CHECK(worst <= tol, "a trig off its step by %.3f", worst);
+	// The test can fail: the old rule (half a step) puts the off-step hits on steps, half a step late
+	std::vector<wa::LayoutTrig> old = wa::layoutTrigs(hits, 0, 16 * step, 16, false, 0.5);
+	double oldWorst = 0.0;
+	for (const wa::LayoutTrig& x : old)
+		oldWorst = std::max(oldWorst, std::fabs((double) x.start / step - x.step));
+	std::printf("  the old rule: %d trigs, worst %.3f steps off (must exceed the limit)\n", (int) old.size(), oldWorst);
+	CHECK(oldWorst > tol, "the check cannot fail");
+	// Short steps (x8 rows): the tolerance in steps grows to LAY_SNAP_STEPS, never more
+	CHECK(std::fabs(wa::laySnapSteps(0.05) - wa::LAY_SNAP_STEPS) < 1e-12, "short steps: %.3f", wa::laySnapSteps(0.05));
+}
 int main() {
+	testLayOffGrid();
+	testMixedPlayer();
 	testLayVelocity();
 	testTempoFound();
 	testLaySelection();

@@ -261,6 +261,9 @@ struct WaveArtifact : Module {
 		/** SAMPLE engine: how long a note fades in, 0..3 = 1 / 3 / 10 / 30 ms (wa::SAMPLE_FADE_IN_SECONDS). Last, so
 		older patches keep their IDs. */
 		SAMPLE_FADE_IN_PARAM,
+		/** Each artifact's engine: 0 WAVE, 1 GRAIN, 2 SAMPLE (the ENGINE button sets the selected artifact's, Shift+click
+		every artifact's). A patch from before these existed copies ENGINE_MODE_PARAM into all five (dataFromJson). */
+		ENUMS(MARKER_ENGINE_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -359,8 +362,38 @@ struct WaveArtifact : Module {
 	// Audio thread only
 	wa::MorphEngine engine;
 	wa::GrainEngine grainEngine;
-	/** Engine in use (0 wavetable, 1 granular, 2 sample player: grainEngine with GrainInput::player); follows ENGINE_MODE_PARAM after a fade to silence */
-	int engineApplied = 0;
+	/** Each artifact's engine in use (0 wavetable: `engine`; 1 granular, 2 sample player: `grainEngine`). It follows
+	MARKER_ENGINE_PARAM once the artifact has faded to silence in the engine it leaves. */
+	int engineOf[NUM_MARKERS] = {};
+	/** Which engines run: bit 0 the wavetable engine, bit 1 the granular / sample one (from the active artifacts'
+	engines). Each returns its mix before the master section (rawOut), which runs once on the sum (mixMaster). A
+	change fades the whole module (5 ms), like the old engine switch. */
+	int layoutApplied = 1;
+	/** As set (MARKER_ENGINE_PARAM, and the layout the active artifacts need), read at the settings rate; an artifact
+	whose engine differs from engineOf keeps engineChangePending on until it has moved */
+	int wantEngine[NUM_MARKERS] = {};
+	int wantLayout = 1;
+	bool engineChangePending = false;
+	static int engineBit(int e) {
+		return e == 0 ? 1 : 2;
+	}
+	/** The master section and output protection, once on the running engines' sum (the engines' own are not used, so
+	an engine joining or leaving never cuts what the master filter and the limiter's look-ahead hold) */
+	wa::MasterFilter mixMaster;
+	wa::SafetyLimiter mixLimiter;
+	float mixMasterGainS = 1.f;
+	/** The engines' 5 ms smoothing at the rate mixMaster was set up for */
+	float mixSmoothCoef = 0.f;
+	float mixSampleRate = 0.f;
+	/** As in the engines: master gain up to 200%, output ceiling 2 engine units (x5 V = 10 V) */
+	static constexpr float MIX_MAX_MASTER_GAIN = 2.f;
+	static constexpr float MIX_LIMIT = 2.f;
+	/** The wavetable engine starting to run again: samples left of its silent priming (MorphEngine EngineInput::prime),
+	4 ms, longer than its drive's latency */
+	int wavePrime = 0;
+	/** The engines have sent the master section something other than silence since the module was created */
+	bool mixSounded = false;
+	static constexpr float WAVE_PRIME_SECONDS = 0.004f;
 	uint32_t grainEventsSeen = 0;
 	wa::PolyVoices voices;
 	wa::MarkerStepper stepper;
@@ -471,7 +504,22 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 53;
+	static const int NUM_MARKER_SETTINGS = 54;
+	/** UI thread: artifact i's engine as set (0 WAVE, 1 GRAIN, 2 SAMPLE) */
+	int engineOfMarker(int i) {
+		return clamp((int) std::round(params[MARKER_ENGINE_PARAM + clamp(i, 0, NUM_MARKERS - 1)].getValue()), 0, 2);
+	}
+	/** UI thread: the selected artifact's engine (what the panel's knobs mean now) */
+	int shownEngine() {
+		return engineOfMarker(selectedMarker);
+	}
+	/** UI thread: an artifact that plays this slot's file is on GRAIN or SAMPLE (they use its hits) */
+	bool slotHeardAsSample(int slot) {
+		for (int i = 0; i < NUM_MARKERS; i++)
+			if (slotOf(i) == slot && engineOfMarker(i) >= 1)
+				return true;
+		return false;
+	}
 	static const int MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS];
 	/** The settings copied last (not saved with the patch), and the marker they came from, or -1 */
 	float markerClipboard[NUM_MARKER_SETTINGS] = {};
@@ -611,6 +659,13 @@ struct WaveArtifact : Module {
 	/** UI thread. Loads the previous (dir = -1) or next (dir = +1) WAV in a slot's folder, sorted by name, wrapping
 	around. Does nothing without a path. */
 	void loadSibling(int dir, int slot = 0);
+	/** UI thread. Where a load from the screen (its file line) goes: the selected artifact's own file, so the other
+	artifacts keep theirs. Only while no sample is loaded at all, the main one (every artifact then plays it). The
+	main sample itself loads from the module's menu. */
+	int screenLoadSlot();
+	/** UI thread. The screen's previous / next arrows: the next WAV in the folder of what the selected artifact plays,
+	as its own file (stepping from the main sample gives this artifact its own; the others keep the main one) */
+	void screenStep(int dir);
 	/** UI thread. True when a slot's folder holds another WAV to step to. */
 	bool hasSiblings(int slot = 0);
 	/** UI thread. Frees banks that process() has retired. */

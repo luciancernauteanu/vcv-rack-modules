@@ -391,6 +391,12 @@ struct GrainInput {
 	/** SAMPLE engine: each cloud is one read head playing the sample as it is (SamplePlayer.hpp) instead of grains.
 	The rest of the cloud (filter, gain, pan, POLY level, own output) and the master section are the same. */
 	bool player = false;
+	/** Per-artifact engines: this cloud alone is a SAMPLE player (the others grains). A change fades that cloud out,
+	clears it and starts it the other way, like its own sample changing. `player` makes every cloud one. */
+	bool playerOf[NUM_MARKERS] = {};
+	/** Return the mix before the master section (the module sets it always): it runs the master section once on the
+	sum of the engines running (process() skips `master` and `limiter`; tests use them) */
+	bool rawOut = false;
 	/** SAMPLE engine SNAP: START, the slice end and the loop point move to the nearest zero crossing */
 	bool zeroSnap = false;
 	/** SAMPLE engine: seconds a note fades in over (PLAYER_ATTACK_SECONDS by default) */
@@ -556,6 +562,13 @@ public:
 			anySample = anySample || cs[m];
 		}
 
+		// Raw output turned on or off (only while silent; the module sets it from its first sample): the
+		// master section and limiter start clean instead of letting out what they held from before.
+		if (in.rawOut != rawApplied && gain <= 0.f) {
+			rawApplied = in.rawOut;
+			master.reset();
+			limiter.reset();
+		}
 		// Main bank swap: fade out, clear while silent, apply.
 		bool changed = !bankApplied || in.bank != appliedBank || in.poly != polyApplied || in.player != playerApplied;
 		bool wantSilent = in.holdSilent || changed || !anySample;
@@ -569,18 +582,20 @@ public:
 			for (int m = 0; m < NUM_MARKERS; m++) {
 				resetCloud(m);
 				appliedCloudBank[m] = bankFor(in, m);
+				cloudPlayer[m] = in.playerOf[m];
 			}
 		}
-		// A cloud's own sample changing (or markerHold): that cloud alone fades out, is cleared, and starts on the new
-		// one. While the whole engine is silent the change applies at once.
+		// A cloud's own sample changing, or it turning SAMPLE / GRAIN (or markerHold): that cloud alone fades out, is
+		// cleared, and starts on the new one. While the whole engine is silent the change applies at once.
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			const WavetableBank* want = bankFor(in, m);
-			bool mChanged = want != appliedCloudBank[m];
+			bool mChanged = want != appliedCloudBank[m] || in.playerOf[m] != cloudPlayer[m];
 			bool mSilent = in.markerHold[m] || mChanged || !cs[m];
 			cloudGate[m] = mSilent ? std::max(0.f, cloudGate[m] - fadeStep) : std::min(1.f, cloudGate[m] + fadeStep);
 			if (mChanged && (cloudGate[m] <= 0.f || gain <= 0.f)) {
 				// appliedCloudBank is only an identity; it may already be freed. Never read it.
 				appliedCloudBank[m] = want;
+				cloudPlayer[m] = in.playerOf[m];
 				clearCloudGrains(m);
 				resetCloud(m);
 			}
@@ -698,7 +713,7 @@ public:
 						updateShownSlice(m, in, *S);
 					continue;
 				}
-				if (playerApplied)
+				if (isPlayer(m))
 					play(m, in, *S, &bufL[m], &bufR[m]);
 				else
 					schedule(m, in, *S, canSync);
@@ -775,7 +790,7 @@ public:
 			// even for a cloud idle long enough to skip the block below.
 			float panT = std::min(std::max(M.pan, -1.f), 1.f);
 			// SAMPLE: an LP fully open with no RES is no filter at all, so the sample passes untouched.
-			bool filterOn = !(playerApplied && M.filterMode == MODE_LP && M.cutoff >= 0.999f && M.res <= 0.001f);
+			bool filterOn = !(isPlayer(m) && M.filterMode == MODE_LP && M.cutoff >= 0.999f && M.res <= 0.001f);
 			if (c.w < 1e-4f) {
 				c.panS = panT;
 				// The filter too (a step's cutoff lock, a knob turned while it was silent): every note from silence
@@ -810,9 +825,9 @@ public:
 					xl *= c.scanLevel;
 					xr *= c.scanLevel;
 				}
-				if (playerApplied)
+				if (isPlayer(m))
 					sampleDrive(c, M, &xl, &xr);
-				float wetT = (!playerApplied && M.window == GRAIN_SMEAR) ? 1.f : 0.f;
+				float wetT = (!isPlayer(m) && M.window == GRAIN_SMEAR) ? 1.f : 0.f;
 				if (wetT > 0.f || c.smearWet > 0.f) {
 					c.smearWet += (wetT - c.smearWet) * smoothCoef;
 					if (wetT == 0.f && c.smearWet < 1e-4f) {
@@ -844,7 +859,7 @@ public:
 					yr += (in.retR[m] - yr) * k;
 				}
 				// SAMPLE: the sound comes out of the drive's delay, so its envelope does too
-				float w = playerApplied ? c.wDelayed : c.w;
+				float w = isPlayer(m) ? c.wDelayed : c.w;
 				yl *= c.gainS * w;
 				yr *= c.gainS * w;
 				c.panS += (panT - c.panS) * smoothCoef;
@@ -874,6 +889,12 @@ public:
 		}
 		l *= gain;
 		r *= gain;
+		if (rawApplied) {
+			// The module adds the wavetable engine's mix and runs the master section on the sum
+			*outL = l;
+			*outR = r;
+			return;
+		}
 
 		MasterParams mp;
 		mp.mode = in.masterMode;
@@ -1710,7 +1731,7 @@ private:
 		Cloud& c = clouds[m];
 		float start = std::min(std::max(in.markers[m].start, 0.f), 1.f);
 		c.shownSliceStart = start;
-		bool loop = playerApplied || grainScanActive(in.markers[m].scan);
+		bool loop = isPlayer(m) || grainScanActive(in.markers[m].scan);
 		c.shownSliceEnd = loop ? (float) std::min(start + sliceFrames(in, m, S) / (double) S.frames, 1.0) : -1.f;
 	}
 
@@ -1804,6 +1825,14 @@ private:
 	bool polyApplied = false;
 	/** SAMPLE engine in use (GrainInput::player, applied while silent like a bank swap) */
 	bool playerApplied = false;
+	/** Each cloud's own SAMPLE switch as applied (GrainInput::playerOf) */
+	bool cloudPlayer[NUM_MARKERS] = {};
+	/** GrainInput::rawOut as applied (changed only while silent) */
+	bool rawApplied = false;
+	/** The cloud plays the sample (SAMPLE engine) instead of grains */
+	bool isPlayer(int m) const {
+		return playerApplied || cloudPlayer[m];
+	}
 	float heard[NUM_MARKERS] = {1.f, 0.f, 0.f, 0.f, 0.f};
 	float mainShare[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	float directL[NUM_MARKERS] = {};

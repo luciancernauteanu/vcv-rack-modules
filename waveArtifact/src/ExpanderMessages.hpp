@@ -156,10 +156,13 @@ struct ToExpanderMessage {
 	bool linked = false;
 	/** RESET arrived this sample: restart the LFOs */
 	bool reset = false;
-	/** The main module runs the granular engine: the CV inputs are labelled START / P.SPRD / DENSITY */
+	/** Artifact 1 runs the granular engine (kept for the message layout; the expanders read `engines`) */
 	bool granular = false;
-	/** The main module runs the sample player: WAVE reads START and FINE is LENGTH */
+	/** Artifact 1 runs the sample player (kept; see `engines`) */
 	bool sample = false;
+	/** Each artifact's engine (0 WAVE, 1 GRAIN: the CV inputs are labelled START / P.SPRD / DENSITY, 2 SAMPLE: WAVE
+	reads START and FINE is LENGTH) */
+	uint8_t engines[NUM_MARKERS] = {};
 	/** The main module is in POLY: GATE plays the marker's own ADSR instead of scaling its level */
 	bool poly = false;
 	/** Each marker's expander LFO (-1..1, run by the main module: its settings are marker settings, lockable), for

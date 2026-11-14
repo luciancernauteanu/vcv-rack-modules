@@ -11,7 +11,7 @@
 
 namespace wa {
 
-static const int NUM_LOCKABLE = 53;
+static const int NUM_LOCKABLE = 54;
 
 /** Saved in the patch (JSON keys): never rename one. Same order as WaveArtifact::MARKER_SETTING_PARAMS. */
 static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
@@ -27,6 +27,7 @@ static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
 	"sampleLoop", "sampleLoopPoint", "sampleBeat", "sampleHitSnap",
 	"modLfoRate", "modLfoShape", "modLfoSync", "modLfoTriplet", "modLfoDotted", "modLfoDest", "modLfoDepth",
 	"modAdAttack", "modAdDecay", "modAdPerc", "modAdDest", "modAdDepth",
+	"engine",
 };
 
 /** Shown in the lane's setting menu and on the panel */
@@ -43,6 +44,7 @@ static const char* const LOCK_LABELS[NUM_LOCKABLE] = {
 	"ONE / LOOP / PING", "LOOP POINT", "BEAT", "HIT",
 	"EXP LFO RATE", "EXP LFO SHAPE", "EXP LFO SYNC", "EXP LFO T", "EXP LFO D", "EXP LFO DEST", "EXP LFO DEPTH",
 	"EXP AD ATTACK", "EXP AD DECAY", "EXP AD PERC", "EXP AD DEST", "EXP AD DEPTH",
+	"ENGINE",
 };
 
 /** Settings a step cannot lock: switches that only change how another control is read (SYNC / T / D, PITCH FREE)
@@ -55,7 +57,8 @@ static const uint64_t NOT_LOCKABLE =
 	(1ull << 33) | (1ull << 34) |                // KEEP, LOOP / PING
 	(1ull << 37) | (1ull << 39) | (1ull << 40) | // SAMPLE ONE / LOOP / PING, BEAT, HIT
 	(1ull << 43) | (1ull << 44) | (1ull << 45) | // EXP LFO SYNC, T, D
-	(1ull << 50);                                // EXP AD PERC
+	(1ull << 50) |                               // EXP AD PERC
+	(1ull << 53);                                // ENGINE (per artifact, never per step)
 
 inline bool isLockable(int k) {
 	return k >= 0 && k < NUM_LOCKABLE && !((NOT_LOCKABLE >> k) & 1u);

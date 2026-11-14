@@ -29,7 +29,7 @@ const float LN_100 = 4.605170186f;
 
 /** SAMPLE BEAT mode of a marker (wa::SampleBeatMode); OFF unless the engine switch is on SAMPLE */
 static int sampleBeatMode(Module* module, int marker) {
-	if (!module || (int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) != 2)
+	if (!module || (int) std::round(module->params[WaveArtifact::MARKER_ENGINE_PARAM + marker].getValue()) != 2)
 		return wa::SAMPLE_BEAT_OFF;
 	return clamp((int) std::round(module->params[WaveArtifact::MARKER_SAMPLE_BEAT_PARAM + marker].getValue()), 0, wa::NUM_SAMPLE_BEAT_MODES - 1);
 }
@@ -88,7 +88,7 @@ struct WaveQuantity : ParamQuantity {
 	/** Name in the granular engine, where the same value is the grain START (a place in the sample) */
 	std::string grainName;
 	bool grain() {
-		return module && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+		return module && module->params[WaveArtifact::MARKER_ENGINE_PARAM + (paramId - WaveArtifact::MARKER_WAVE_PARAM)].getValue() > 0.5f;
 	}
 	std::string getLabel() override {
 		return grain() ? grainName : ParamQuantity::getLabel();
@@ -248,8 +248,15 @@ WaveArtifact::WaveArtifact() {
 		"Step (each POS LFO cycle plays the next marker, left to right)", "All (each POS LFO cycle plays every marker together)",
 		"Seq (the step sequencer on the left plays the markers: a grid with velocity per step)"});
 	getParamQuantity(PLAY_MODE_PARAM)->randomizeEnabled = false;
+	// The engine of patches from before each artifact had its own (copied into MARKER_ENGINE_PARAM on load); kept
+	// equal to the selected artifact's engine
 	configSwitch(ENGINE_MODE_PARAM, 0.f, 2.f, 0.f, "Engine", {"Wavetable (WAVE)", "Granular (GRAIN)", "Sample player (SAMPLE)"});
 	getParamQuantity(ENGINE_MODE_PARAM)->randomizeEnabled = false;
+	for (int i = 0; i < NUM_MARKERS; i++) {
+		configSwitch(MARKER_ENGINE_PARAM + i, 0.f, 2.f, 0.f, string::f("Artifact %d engine (Shift+click: every artifact)", i + 1),
+			{"Wavetable (WAVE)", "Granular (GRAIN)", "Sample player (SAMPLE)"});
+		getParamQuantity(MARKER_ENGINE_PARAM + i)->randomizeEnabled = false;
+	}
 	configSwitch(GRAIN_SEEDED_PARAM, 0.f, 1.f, 1.f, "Grain scatter repeats every loop cycle while synced", {"Off (continuous random)", "On (seeded)"});
 	getParamQuantity(GRAIN_SEEDED_PARAM)->randomizeEnabled = false;
 	configSwitch(GRAIN_NOTE_RESTART_PARAM, 0.f, 1.f, 1.f, "Grain notes restart from the same point", {"Off (grains follow the beat)", "On (every note the same)"});
@@ -423,10 +430,19 @@ json_t* WaveArtifact::dataToJson() {
 	json_object_set_new(root, "tableCountMode", json_integer((int) tableCountMode));
 	json_object_set_new(root, "tableTone", json_integer((int) tableTone));
 	json_object_set_new(root, "monoOutput", json_boolean(monoOutput.load()));
+	// Marks a patch where each artifact has its own engine (MARKER_ENGINE_PARAM)
+	json_object_set_new(root, "artifactEngines", json_integer(1));
 	return root;
 }
 
 void WaveArtifact::dataFromJson(json_t* root) {
+	// A patch from before each artifact had its own engine: every artifact takes the one ENGINE it had. (Rack loads
+	// the params first, then this.)
+	if (!json_object_get(root, "artifactEngines")) {
+		float e = params[ENGINE_MODE_PARAM].getValue();
+		for (int i = 0; i < NUM_MARKERS; i++)
+			params[MARKER_ENGINE_PARAM + i].setValue(e);
+	}
 	if (json_t* j = json_object_get(root, "tableCountMode"))
 		tableCountMode = (wa::TableCountMode) clamp((int) json_integer_value(j), 0, (int) wa::TABLE_MODES_LEN - 1);
 	if (json_t* j = json_object_get(root, "monoOutput"))
@@ -654,6 +670,12 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		engine.setSampleRate(args.sampleRate);
 	if (args.sampleRate != grainEngine.getSampleRate())
 		grainEngine.setSampleRate(args.sampleRate);
+	if (args.sampleRate != mixSampleRate) {
+		mixSampleRate = args.sampleRate;
+		mixMaster.setSampleRate(args.sampleRate);
+		mixLimiter.setSampleRate(args.sampleRate);
+		mixSmoothCoef = 1.f - std::exp(-1.f / (0.005f * args.sampleRate));
+	}
 
 	// A new bank waits until the engine has faded to silence. Swap only once the UI has freed
 	// the previous retired bank, so nothing is ever deleted on the audio thread.
@@ -682,10 +704,39 @@ void WaveArtifact::process(const ProcessArgs& args) {
 				s.clearPending = false; // nothing left to drop
 			markerSwap[i] = !s.retiredBank.load() && (clear ? has : s.pendingBank.load(std::memory_order_relaxed) != nullptr);
 		}
+		// The engines the artifacts are set to, and which engines the active ones need
+		wantLayout = 0;
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			wantEngine[i] = clamp((int) std::round(params[MARKER_ENGINE_PARAM + i].getValue()), 0, 2);
+			if (params[MARKER_ACTIVE_PARAM + i].getValue() > 0.5f)
+				wantLayout |= engineBit(wantEngine[i]);
+			if (wantEngine[i] != engineOf[i])
+				engineChangePending = true;
+		}
+		if (wantLayout == 0)
+			wantLayout = layoutApplied;
 	}
-	// Engine switch: the engine in use fades out (5 ms), then the other one takes over.
-	int wantEngine = clamp((int) std::round(params[ENGINE_MODE_PARAM].getValue()), 0, 2);
-	bool switching = wantEngine != engineApplied;
+	// Engines per artifact. Which engines run follows the active artifacts' engines; a change there fades the whole
+	// module (5 ms), then every artifact takes its engine at once (`switching`, applied below once all is silent).
+	// Otherwise an artifact changing engine fades out alone in the engine it leaves (`handover`), then moves.
+	// (wantEngine / wantLayout: read with the slots above, at the settings rate)
+	bool switching = wantLayout != layoutApplied;
+	bool runWave = (layoutApplied & 1) != 0, runGrain = (layoutApplied & 2) != 0;
+	bool handover[NUM_MARKERS] = {};
+	if (!switching && engineChangePending) {
+		engineChangePending = false;
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			if (wantEngine[i] == engineOf[i])
+				continue;
+			engineChangePending = true;
+			bool running = (layoutApplied & engineBit(engineOf[i])) != 0;
+			bool silent = !running || (engineOf[i] == 0 ? engine.isMarkerSilent(i) : grainEngine.isMarkerSilent(i));
+			if (silent)
+				engineOf[i] = wantEngine[i];
+			else
+				handover[i] = true;
+		}
+	}
 
 	// RESET first, so a reset and a clock pulse arriving together make that pulse beat 0.
 	// Restart sources: RESET gate, the RESTART button (on press), the menu.
@@ -730,8 +781,11 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		out->index = 0;
 		out->linked = true;
 		out->reset = reset;
-		out->granular = engineApplied == 1;
-		out->sample = engineApplied == 2; // the expanders show this engine's four inputs
+		out->granular = engineOf[0] == 1;
+		out->sample = engineOf[0] == 2;
+		// Each expander shows the four inputs of its artifact's engine
+		for (int i = 0; i < NUM_MARKERS; i++)
+			out->engines[i] = (uint8_t) engineOf[i];
 		out->poly = params[PLAY_MODE_PARAM].getValue() > 0.5f;
 		for (int i = 0; i < NUM_MARKERS; i++) {
 			out->modLfo[i] = modLfoOut[i];
@@ -872,7 +926,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		m.wave = s.wave;
 		// The engine adds the LFO after WAVE's glide (so SMOOTH does not dull it) and folds it back at the ends of the
 		// sample. Only the wavetable engine uses it, and only while its amount is up.
-		if (s.active && engineApplied == 0 && s.lfoAmount > 0.f)
+		if (s.active && engineOf[i] == 0 && s.lfoAmount > 0.f)
 			waveLfoLive[i] = lfoGrace;
 		if (waveLfoLive[i] > 0) {
 			waveLfoLive[i]--;
@@ -1060,8 +1114,10 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	in.masterSpreadMod = masterCv(MASTER_SPREAD_INPUT, MASTER_SPREAD_AMT_PARAM);
 	in.masterFdbkMod = masterCv(MASTER_FDBK_INPUT, MASTER_FDBK_AMT_PARAM);
 
-	float l, r;
-	if (engineApplied >= 1) {
+	float l = 0.f, r = 0.f;
+	// Each engine plays only its own artifacts. Another engine's are held silent there (no level, no note, no
+	// return); in MORPH they keep their place, so both engines see the same neighbors (MorphEngine: otherEngine).
+	if (runGrain) {
 		// Granular: the same markers, sections and master, with the knobs reinterpreted (see GrainEngine.hpp).
 		wa::GrainInput gin;
 		for (int i = 0; i < NUM_MARKERS; i++) {
@@ -1101,7 +1157,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 			g.filterMode = wm.filterMode;
 			g.res = wm.res;
 			g.gain = wm.gain;
-			g.pitch = wm.pitch + (engineApplied == 2 ? wm.fine : 0.f);
+			g.pitch = wm.pitch + (engineOf[i] == 2 ? wm.fine : 0.f);
 			g.voct = wm.voct;
 		}
 		gin.position = in.position;
@@ -1115,7 +1171,10 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		gin.reset = reset;
 		gin.seeded = params[GRAIN_SEEDED_PARAM].getValue() > 0.5f;
 		gin.noteRestart = params[GRAIN_NOTE_RESTART_PARAM].getValue() > 0.5f;
-		gin.player = engineApplied == 2;
+		// SAMPLE or GRAIN per cloud
+		gin.player = false;
+		for (int i = 0; i < NUM_MARKERS; i++)
+			gin.playerOf[i] = engineOf[i] == 2;
 		gin.zeroSnap = params[SAMPLE_ZERO_SNAP_PARAM].getValue() > 0.5f;
 		gin.noteFade = (float) wa::SAMPLE_FADE_IN_SECONDS[(int) clamp(std::round(params[SAMPLE_FADE_IN_PARAM].getValue()), 0.f, 3.f)];
 		// HIT: each cloud's file's hit list (taken from the UI at the settings rate, above)
@@ -1142,14 +1201,91 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		gin.masterSpreadMod = in.masterSpreadMod;
 		gin.masterFdbkMod = in.masterFdbkMod;
 		gin.masterDriveMod = in.masterDriveMod;
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			if (engineOf[i] == 0) {
+				// The wavetable engine's: silent here, and costs nothing (a cloud without level schedules no grains)
+				gin.markers[i].gain = 0.f;
+				gin.markerHold[i] = true;
+				gin.voiceEnv[i] = 0.f;
+				gin.voiceStart[i] = false;
+				gin.insert[i] = false;
+			}
+			else if (handover[i]) {
+				gin.markerHold[i] = true;
+			}
+		}
+		gin.rawOut = true;
 		grainEngine.process(gin, &l, &r);
 	}
-	else {
-		engine.process(in, &l, &r);
+	if (runWave) {
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			if (engineOf[i] != 0) {
+				in.otherEngine[i] = true;
+				in.markers[i].gain = 0.f;
+				in.markerHold[i] = true;
+				in.voiceEnv[i] = 0.f;
+				in.voiceStart[i] = false;
+				in.insert[i] = false;
+			}
+			else if (handover[i]) {
+				in.markerHold[i] = true;
+			}
+		}
+		in.rawOut = true;
+		// Just started running again: a few ms silent and primed (EngineInput::prime), then its fade-in
+		if (wavePrime > 0) {
+			wavePrime--;
+			in.prime = true;
+			in.holdSilent = true;
+		}
+		float wl, wr;
+		engine.process(in, &wl, &wr);
+		if (runGrain) {
+			l += wl;
+			r += wr;
+		}
+		else {
+			l = wl;
+			r = wr;
+		}
 	}
-	bool activeSilent = (engineApplied >= 1) ? grainEngine.isSilent() : engine.isSilent();
-	if (switching && activeSilent)
-		engineApplied = wantEngine;
+	if (!mixSounded && (l != 0.f || r != 0.f))
+		mixSounded = true;
+	{
+		// One master section and output protection for whichever engines run (each returns its mix before its own), so
+		// an engine joining or leaving never drops what the master filter and the limiter's look-ahead still hold
+		wa::MasterParams mp;
+		mp.mode = in.masterMode;
+		mp.cutoff = in.masterCutoff;
+		mp.res = in.masterRes;
+		mp.spread = in.masterSpread;
+		mp.fdbk = in.masterFdbk;
+		mp.drive = in.masterDrive;
+		mp.cutoffMod = in.masterCutoffMod;
+		mp.resMod = in.masterResMod;
+		mp.spreadMod = in.masterSpreadMod;
+		mp.fdbkMod = in.masterFdbkMod;
+		mp.driveMod = in.masterDriveMod;
+		mixMaster.process(&l, &r, mp, mixSmoothCoef, args.sampleRate);
+		mixMasterGainS += (clamp(in.masterGain, 0.f, MIX_MAX_MASTER_GAIN) - mixMasterGainS) * mixSmoothCoef;
+		mixLimiter.process(l * mixMasterGainS, r * mixMasterGainS, MIX_LIMIT, &l, &r);
+	}
+	bool activeSilent = (!runWave || engine.isSilent()) && (!runGrain || grainEngine.isSilent());
+	if (switching && activeSilent) {
+		if (!runWave && (wantLayout & 1))
+			wavePrime = (int) (WAVE_PRIME_SECONDS * args.sampleRate);
+		// Nothing has sounded yet (a patch just loaded): the master section starts fresh with the engines it gets, as
+		// each engine's own did before they shared one
+		if (!mixSounded) {
+			mixMaster = wa::MasterFilter();
+			mixMaster.setSampleRate(args.sampleRate);
+			mixLimiter.reset();
+			mixMasterGainS = 1.f;
+		}
+		layoutApplied = wantLayout;
+		for (int i = 0; i < NUM_MARKERS; i++)
+			engineOf[i] = wantEngine[i];
+	}
 	// Mono output (right-click): L + R on both sides, after the master section, so every widening (grain SPREAD, the
 	// Smear window's diffuser, master SPREAD) folds to the center. Switching crossfades over 10 ms.
 	{
@@ -1168,11 +1304,14 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	outputs[RIGHT_OUTPUT].setVoltage(5.f * r);
 	// SEND: 2 channels (L, R), or L + R on one for a mono module on the return
 	for (int i = 0; i < NUM_MARKERS; i++) {
-		float sl, sr;
-		if (engineApplied >= 1)
-			grainEngine.getSend(i, &sl, &sr);
-		else
-			engine.getSend(i, &sl, &sr);
+		float sl = 0.f, sr = 0.f;
+		bool grainOwn = engineOf[i] >= 1;
+		if (grainOwn ? runGrain : runWave) {
+			if (grainOwn)
+				grainEngine.getSend(i, &sl, &sr);
+			else
+				engine.getSend(i, &sl, &sr);
+		}
 		chainSendL[i] = sl;
 		chainSendR[i] = sr;
 		Output& send = outputs[SEND_OUTPUT + i];
@@ -1190,8 +1329,9 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	// Display values, a few hundred times a second is plenty for a 60 Hz screen.
 	if (++displayCounter >= 64) {
 		displayCounter = 0;
-		if (engineApplied >= 1) {
-			for (int i = 0; i < NUM_MARKERS; i++) {
+		// Each artifact as its own engine plays it
+		for (int i = 0; i < NUM_MARKERS; i++) {
+			if (engineOf[i] >= 1) {
 				const wa::WavetableBank* bank = in.markerBank[i] ? in.markerBank[i] : in.bank;
 				float tables = bank ? (float) std::max(bank->numTables - 1, 0) : 0.f;
 				// The old displays think in tables: the table under the place each cloud reads
@@ -1204,25 +1344,21 @@ void WaveArtifact::process(const ProcessArgs& args) {
 				shownScanEnd[i].store(sliceEnd, std::memory_order_relaxed);
 				shownBeats[i].store((float) grainEngine.getBeats(i), std::memory_order_relaxed);
 			}
-			shownPosition.store(grainEngine.getPosition(), std::memory_order_relaxed);
-			shownPreview.store(0.f, std::memory_order_relaxed);
-		}
-		else {
-			for (int i = 0; i < NUM_MARKERS; i++) {
+			else {
 				shownScanEnd[i].store(-1.f, std::memory_order_relaxed);
 				shownBeats[i].store(0.f, std::memory_order_relaxed);
 				shownIndex[i].store(engine.getTableIndex(i), std::memory_order_relaxed);
 				shownHeard[i].store(engine.getHeard(i), std::memory_order_relaxed);
 			}
-			shownPosition.store(engine.getPosition(), std::memory_order_relaxed);
-			shownPreview.store(engine.getPreviewLevel(), std::memory_order_relaxed);
 		}
+		shownPosition.store(runGrain ? grainEngine.getPosition() : engine.getPosition(), std::memory_order_relaxed);
+		shownPreview.store(runWave ? engine.getPreviewLevel() : 0.f, std::memory_order_relaxed);
 		for (int i = 0; i < NUM_MARKERS; i++) {
 			shownCv[i].store(mod->modulated[i], std::memory_order_relaxed);
 			shownReturn[i].store(in.insert[i], std::memory_order_relaxed);
 		}
 	}
-	if (engineApplied >= 1) {
+	if (runGrain) {
 		// Latest grain starts of each cloud (a ring of 32 in the engine), for the display's flashes.
 		uint32_t count = grainEngine.eventCount();
 		uint32_t from = (count - grainEventsSeen > (uint32_t) wa::GrainEngine::NUM_EVENTS) ? count - wa::GrainEngine::NUM_EVENTS : grainEventsSeen;
@@ -1248,7 +1384,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 		if (!markerSwap[i])
 			continue;
 		SampleSlot& s = slots[1 + i];
-		bool silent = activeSilent || ((engineApplied >= 1) ? grainEngine.isMarkerSilent(i) : engine.isMarkerSilent(i));
+		bool ownRuns = engineOf[i] >= 1 ? runGrain : runWave;
+		bool silent = activeSilent || !ownRuns || (engineOf[i] >= 1 ? grainEngine.isMarkerSilent(i) : engine.isMarkerSilent(i));
 		if (silent && !s.retiredBank.load()) {
 			if (s.clearPending.load(std::memory_order_relaxed)) {
 				// Dropped: what it had goes to be freed; the artifact plays the main sample
@@ -1342,6 +1479,25 @@ void WaveArtifact::loadSibling(int dir, int slot) {
 	if (n == 1 && at >= 0)
 		return;
 	loadFile(wavs[next], slot);
+}
+
+int WaveArtifact::screenLoadSlot() {
+	int own = 1 + clamp(selectedMarker, 0, NUM_MARKERS - 1);
+	if (slots[own].hasFile())
+		return own;
+	return slots[0].hasFile() ? own : 0;
+}
+
+void WaveArtifact::screenStep(int dir) {
+	int target = screenLoadSlot();
+	SampleSlot& s = slots[target];
+	if (target > 0 && !s.hasFile()) {
+		// It plays the main sample: step from that file, into its own slot
+		if (s.analyzing)
+			return;
+		s.filePath = slots[0].filePath;
+	}
+	loadSibling(dir, target);
 }
 
 void WaveArtifact::loadFile(const std::string& path, int slot) {
@@ -1496,7 +1652,7 @@ void WaveArtifact::updateTransients(int slot) {
 	SampleSlot& s = slots[slot];
 	delete s.hitsRetired.exchange(nullptr);
 	// SAMPLE and GRAIN use them (HIT); switching to either finds them.
-	if ((int) std::round(params[ENGINE_MODE_PARAM].getValue()) < 1)
+	if (!slotHeardAsSample(slot))
 		return;
 	float sens = clamp(params[SAMPLE_HIT_SENSITIVITY_PARAM].getValue(), 0.f, 1.f);
 	int serial = s.bankSerial.load();
@@ -1589,7 +1745,7 @@ WaveArtifact::LoopLayoutInfo WaveArtifact::loopLayoutInfo(int marker) {
 		info.why = "No marker";
 		return info;
 	}
-	if ((int) std::round(params[ENGINE_MODE_PARAM].getValue()) < 1) {
+	if (engineOfMarker(marker) < 1) {
 		info.why = "On the SAMPLE and GRAIN engines only";
 		return info;
 	}
@@ -1726,7 +1882,8 @@ bool WaveArtifact::layoutLoopOnRow(int marker, int beats, bool grid) {
 	if (!wa::layoutRow(beats, WaveArtifactSequencer::STEPS, &clockIndex, &steps))
 		return false;
 	const SampleSlot& slot = slots[slotOf(marker)];
-	std::vector<wa::LayoutTrig> trigs = wa::layoutTrigs(slot.transients, info.from, info.frames, steps, grid);
+	// Trigs only on hits close to a step (a step plays on time; a hit between steps plays inside the slice before it)
+	std::vector<wa::LayoutTrig> trigs = wa::layoutTrigs(slot.transients, info.from, info.frames, steps, grid, wa::laySnapSteps(info.seconds / steps));
 	int kStart = settingIndexOf(MARKER_WAVE_PARAM + marker, marker);
 	int kLength = settingIndexOf(MARKER_GRAIN_SCAN_LENGTH_PARAM + marker, marker);
 	if (trigs.empty() || kStart < 0 || kLength < 0)
@@ -1749,7 +1906,7 @@ bool WaveArtifact::layoutLoopOnRow(int marker, int beats, bool grid) {
 			loudestDb = std::max(loudestDb, peakDb[i]);
 		}
 	}
-	bool grainEngine = (int) std::round(params[ENGINE_MODE_PARAM].getValue()) == 1;
+	bool grainEngine = engineOfMarker(marker) == 1;
 	int kHold = settingIndexOf(MARKER_HOLD_PARAM + marker, marker);
 	double sampleRate = (double) info.sampleFrames / std::max(info.sampleSeconds, 1e-9);
 	for (size_t i = 0; i < trigs.size(); i++) {
@@ -1772,7 +1929,7 @@ bool WaveArtifact::layoutLoopOnRow(int marker, int beats, bool grid) {
 	// with no randomness (SPRAY, P.SPRD, SPREAD 0, forward, KEEP off), and its Tukey grains overlap by 4 / 3: each one's
 	// fade out lies exactly over the next one's fade in, so they sum flat, at the sample's own level. Each trig restarts
 	// the cloud on its slice (NOTE RESTART, the default).
-	if ((int) std::round(params[ENGINE_MODE_PARAM].getValue()) == 1) {
+	if (engineOfMarker(marker) == 1) {
 		params[MARKER_GRAIN_SCAN_PARAM + marker].setValue(0.5f);
 		params[MARKER_GRAIN_SYNC_PARAM + marker].setValue(0.f);
 		params[MARKER_GRAIN_KEEP_SPEED_PARAM + marker].setValue(0.f);
@@ -1874,13 +2031,14 @@ bool WaveArtifact::randomizeSlices(int marker, const bool* marked, float amount)
 	if (!wa::layoutRow(info.beats, WaveArtifactSequencer::STEPS, &layoutClock, &layoutSteps))
 		return false;
 	const SampleSlot& slot = slots[slotOf(marker)];
-	std::vector<wa::LayoutTrig> slices = wa::layoutTrigs(slot.transients, info.from, info.frames, layoutSteps, false);
+	std::vector<wa::LayoutTrig> slices = wa::layoutTrigs(slot.transients, info.from, info.frames, layoutSteps, false,
+		wa::laySnapSteps(info.seconds / layoutSteps));
 	int kStart = settingIndexOf(MARKER_WAVE_PARAM + marker, marker);
 	int kLength = settingIndexOf(MARKER_GRAIN_SCAN_LENGTH_PARAM + marker, marker);
 	if (slices.empty() || kStart < 0 || kLength < 0)
 		return false;
 	// GRAIN: each new slice ends by its HOLD lock, as LAY's do
-	bool grainEngine = (int) std::round(params[ENGINE_MODE_PARAM].getValue()) == 1;
+	bool grainEngine = engineOfMarker(marker) == 1;
 	int kHold = settingIndexOf(MARKER_HOLD_PARAM + marker, marker);
 	double sampleRate = (double) info.sampleFrames / std::max(info.sampleSeconds, 1e-9);
 	WaveArtifactSequencer* seq = sequencerOnLeft();
@@ -2008,6 +2166,7 @@ const int WaveArtifact::MARKER_SETTING_PARAMS[WaveArtifact::NUM_MARKER_SETTINGS]
 	MARKER_MOD_LFO_RATE_PARAM, MARKER_MOD_LFO_SHAPE_PARAM, MARKER_MOD_LFO_SYNC_PARAM, MARKER_MOD_LFO_TRIPLET_PARAM,
 	MARKER_MOD_LFO_DOTTED_PARAM, MARKER_MOD_LFO_DEST_PARAM, MARKER_MOD_LFO_DEPTH_PARAM,
 	MARKER_MOD_AD_ATTACK_PARAM, MARKER_MOD_AD_DECAY_PARAM, MARKER_MOD_AD_PERC_PARAM, MARKER_MOD_AD_DEST_PARAM, MARKER_MOD_AD_DEPTH_PARAM,
+	MARKER_ENGINE_PARAM,
 };
 
 const int WaveArtifact::MARKER_ENVELOPE_PARAMS[WaveArtifact::NUM_ENVELOPE_PARAMS] = {
@@ -2023,7 +2182,7 @@ static bool isChoiceSetting(int id) {
 			WaveArtifact::MARKER_GRAIN_SCAN_MODE_PARAM, WaveArtifact::MARKER_SAMPLE_LOOP_PARAM, WaveArtifact::MARKER_SAMPLE_BEAT_PARAM, WaveArtifact::MARKER_SAMPLE_HIT_SNAP_PARAM,
 			WaveArtifact::MARKER_MOD_LFO_SHAPE_PARAM, WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM, WaveArtifact::MARKER_MOD_LFO_TRIPLET_PARAM,
 			WaveArtifact::MARKER_MOD_LFO_DOTTED_PARAM, WaveArtifact::MARKER_MOD_LFO_DEST_PARAM, WaveArtifact::MARKER_MOD_AD_PERC_PARAM,
-			WaveArtifact::MARKER_MOD_AD_DEST_PARAM}) {
+			WaveArtifact::MARKER_MOD_AD_DEST_PARAM, WaveArtifact::MARKER_ENGINE_PARAM}) {
 		if (id == choice)
 			return true;
 	}
@@ -2644,6 +2803,8 @@ struct WaveArtifactWidget : ModuleWidget {
 	/** Per-marker controls at the same panel spots: shared ones, the wavetable engine's and the granular engine's */
 	static const int EDIT_KNOBS = 43;
 	ParamWidget* editKnobs[WaveArtifact::NUM_MARKERS][EDIT_KNOBS] = {};
+	/** Each artifact's ENGINE button; only the selected one is shown */
+	ParamWidget* engineButtons[WaveArtifact::NUM_MARKERS] = {};
 	/** The engines a control belongs to: bit 0 wavetable, bit 1 granular, bit 2 sample (0 = every engine) */
 	int editKnobEngine[EDIT_KNOBS] = {};
 	static const int W = 1, G = 2, S = 4;
@@ -2892,14 +3053,17 @@ struct WaveArtifactWidget : ModuleWidget {
 			addChild(screen);
 			envelopeScreen = screen;
 		}
-		// Engine switch in the header: WAVE (wavetable), GRAIN (granular) or SAMPLE (player). The knobs keep their places
-		// and change meaning (labels, tooltips and values follow).
-		{
-			ModeButton* b = createModeButton(Vec(21.f, 5.8f), module, WaveArtifact::ENGINE_MODE_PARAM, {"WAVE", "GRAIN", "SAMPLE"}, SCREEN_TEXT);
+		// Engine switch in the header: the selected artifact's WAVE (wavetable), GRAIN (granular) or SAMPLE (player);
+		// Shift+click sets every artifact's (linkStep). The knobs keep their places and change meaning (labels, tooltips
+		// and values follow the selected artifact). One button per artifact, the selected one shown.
+		for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
+			ModeButton* b = createModeButton(Vec(21.f, 5.8f), module, WaveArtifact::MARKER_ENGINE_PARAM + i, {"WAVE", "GRAIN", "SAMPLE"}, SCREEN_TEXT);
 			b->box.size = mm2px(Vec(14.f, 5.4f));
 			b->box.pos = mm2px(Vec(21.f, 5.8f)).minus(b->box.size.div(2.f));
 			b->colors = {SCREEN_TEXT, nvgRGB(0xff, 0xc8, 0x6e), nvgRGB(0x8f, 0xe3, 0xb0)};
+			b->setVisible(i == 0);
 			addParam(b);
+			engineButtons[i] = b;
 		}
 
 		addInput(createInputCentered<ThemedPJ301MPort>(mm2px(CLOCK_INPUT), module, WaveArtifact::CLOCK_INPUT));
@@ -2994,7 +3158,15 @@ struct WaveArtifactWidget : ModuleWidget {
 				if (knob)
 					knob->speed = (mods == GLFW_MOD_SHIFT) ? 0.25f : 1.f;
 			}
-			int engineBit = 1 << clamp((int) std::round(m->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()), 0, 2);
+			// The selected artifact's engine: its button, and the old ENGINE param follows it, so every label and screen
+			// that reads that param shows what the selected artifact's knobs mean
+			int shown = m->shownEngine();
+			if ((int) std::round(m->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) != shown)
+				m->params[WaveArtifact::ENGINE_MODE_PARAM].setValue((float) shown);
+			for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++)
+				if (engineButtons[i])
+					engineButtons[i]->setVisible(i == m->selectedMarker);
+			int engineBit = 1 << shown;
 			bool poly = m->params[WaveArtifact::PLAY_MODE_PARAM].getValue() > 0.5f;
 			for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++) {
 				for (int k = 0; k < EDIT_KNOBS; k++) {
@@ -3060,15 +3232,30 @@ struct WaveArtifactWidget : ModuleWidget {
 		menu->addChild(createMenuItem("Restart LFOs", "beat grid + all LFOs", [=]() {
 			m->restartRequest = true;
 		}));
-		menu->addChild(createIndexSubmenuItem("Engine",
+		// Each artifact has its own engine: the selected one's here (and on the ENGINE button), or every artifact's
+		menu->addChild(createIndexSubmenuItem(string::f("Engine (artifact %d)", m->selectedMarker + 1),
 			{"Wavetable (WAVE)", "Granular (GRAIN)", "Sample player (SAMPLE)"},
 			[=]() {
-				return (size_t) clamp((int) std::round(m->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()), 0, 2);
+				return (size_t) m->shownEngine();
 			},
 			[=](size_t i) {
-				m->params[WaveArtifact::ENGINE_MODE_PARAM].setValue((float) i);
+				m->params[WaveArtifact::MARKER_ENGINE_PARAM + m->selectedMarker].setValue((float) i);
 			}
 		));
+		menu->addChild(createSubmenuItem("Engine (every artifact)", "", [=](Menu* sub) {
+			const char* names[3] = {"Wavetable (WAVE)", "Granular (GRAIN)", "Sample player (SAMPLE)"};
+			for (int e = 0; e < 3; e++) {
+				sub->addChild(createCheckMenuItem(names[e], "", [=]() {
+					for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++)
+						if (m->engineOfMarker(i) != e)
+							return false;
+					return true;
+				}, [=]() {
+					for (int i = 0; i < WaveArtifact::NUM_MARKERS; i++)
+						m->params[WaveArtifact::MARKER_ENGINE_PARAM + i].setValue((float) e);
+				}));
+			}
+		}));
 		// Granular settings that have no knob
 		menu->addChild(createIndexSubmenuItem("Direction (selected marker, GRAIN / SAMPLE)",
 			grainDirectionNames(),

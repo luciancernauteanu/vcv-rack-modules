@@ -1835,7 +1835,7 @@ struct StepRowLabels : widget::TransparentWidget {
 			nvgText(vg, seqlayout::LEN_X * mm, chipY + 0.5f, len.c_str(), NULL);
 			// LAY and RND: lit while they can act (SAMPLE or GRAIN, Wave Artifacts on the right, the marker on)
 			WaveArtifact* main = module ? mainOf(module) : nullptr;
-			bool live = main && (int) std::round(main->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) >= 1 && main->isMarkerActive(r);
+			bool live = main && main->engineOfMarker(r) >= 1 && main->isMarkerActive(r);
 			bool marks = module && module->anyMarked(r);
 			for (int b = 0; b < 2; b++) {
 				float bx = seqlayout::headButtonX(b) * mm, by = (seqlayout::rowTop(r) + seqlayout::HEAD_BTN_DY) * mm;

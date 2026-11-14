@@ -134,7 +134,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 			acc.voct[m] += inputs[VOCT_INPUT].getVoltage();
 			acc.modulated[m] = true;
 		}
-		int e = fromLeft.granular ? 1 : (fromLeft.sample ? 2 : 0);
+		int e = std::min((int) fromLeft.engines[m], 2);
 		for (int s = 0; s < wa::NUM_CV_SLOTS; s++) {
 			if (!inputs[MOD_INPUT + s].isConnected())
 				continue;
@@ -166,6 +166,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->reset = fromLeft.reset;
 		out->granular = fromLeft.granular;
 		out->sample = fromLeft.sample;
+		std::copy(fromLeft.engines, fromLeft.engines + wa::NUM_MARKERS, out->engines);
 		out->poly = fromLeft.poly;
 		std::copy(fromLeft.modLfo, fromLeft.modLfo + wa::NUM_MARKERS, out->modLfo);
 		std::copy(fromLeft.sendL, fromLeft.sendL + wa::NUM_MARKERS, out->sendL);
@@ -186,7 +187,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		lights[LFO_LIGHT + 1].setBrightnessSmooth(std::max(-lfoOut, 0.f), dt);
 		linked = active;
 		chainIndex = index;
-		engine = !fromLeft.linked ? 0 : (fromLeft.granular ? 1 : (fromLeft.sample ? 2 : 0));
+		engine = !fromLeft.linked ? 0 : std::min((int) fromLeft.engines[getMarker()], 2);
 		marker = getMarker();
 	}
 }
