@@ -1,8 +1,8 @@
 // wA SEND / RETURN: each artifact's send and return on separate L and R jacks, for stereo effects that take two mono
 // cables (most reverbs and delays). It goes at the end of the expander chain (right of the last expander, or right of
 // Wave Artifacts when there is none). What it does is the main panel's SEND / RETURN, on four jacks per artifact:
-// - SEND L / R: what the artifact's filter gets. SEND R unpatched: SEND L carries the whole voice (L + R).
-// - RET L / R: replace the artifact's filter (the same 20 ms crossfade and RET tag). RET R unpatched: RET L feeds both
+// - SEND L / R: the artifact's sound after its DRIVE and filter (type, CUTOFF, RES). SEND R unpatched: SEND L carries the whole voice (L + R).
+// - RET L / R: come back in after the artifact's filter (the same 20 ms crossfade and RET tag). RET R unpatched: RET L feeds both
 //   sides. Patched here, the return wins over the main panel's RETURN for that artifact.
 // The audio goes through the expanders' messages: a few samples late (one per module on the way, each way).
 // Each row also has the artifact's SEND level knob and its INSERT / BUS button: they are the main module's params
@@ -46,7 +46,7 @@ struct WaveArtifactSendReturn : Module {
 			std::string name = "Artifact " + std::to_string(i + 1);
 			configOutput(SEND_L_OUTPUT + i, name + " send L (what its filter gets; L + R while SEND R is unpatched)");
 			configOutput(SEND_R_OUTPUT + i, name + " send R");
-			configInput(RET_L_INPUT + i, name + " return L (replaces its filter; feeds both sides while RET R is unpatched)");
+			configInput(RET_L_INPUT + i, name + " return L (comes back after its filter; feeds both sides while RET R is unpatched)");
 			configInput(RET_R_INPUT + i, name + " return R");
 		}
 		configLight(LINK_LIGHT, "Connected to Wave Artifacts");

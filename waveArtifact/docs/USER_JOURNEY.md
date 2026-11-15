@@ -128,7 +128,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 - **SAMPLE** (`GrainEngine::play` -> `PlayerVoice`): START, slice to LENGTH or the next marker (`sliceFrames`), ONE / LOOP
   / PING with loop point, BEAT (CUT / FIT, `sampleBeatDivision`), HIT snap (`nearestHit`), zero-crossing snap, note fade
   in (`SAMPLE_FADE_IN_PARAM`), DRIVE (`sampleDrive`, latency-aligned).
-- **All:** filter per artifact (`Svf` via `FilterParams`), GAIN (`MAX_GAIN` 4), PAN, RETURN replaces the filter
+- **All:** filter per artifact (`Svf` via `FilterParams`), GAIN (`MAX_GAIN` 4), PAN, RETURN (INSERT) comes back after DRIVE and the filter
   (`insertS` 20 ms); then the master section (section 11).
 
 ## 8. Modulation, clock, transport
@@ -180,8 +180,8 @@ the row", `appendLoopLayoutMenu` / `appendLoopLayoutItems`), Shift + drag on the
 
 | Thing | Code |
 |---|---|
-| SEND per artifact | **Only on the stereo SEND / RETURN module** (the main panel's SEND / RETURN jacks are gone; `SEND_OUTPUT` / `RETURN_INPUT` IDs reserved, old cables dropped as they have no port widget). Engines' `getSend(i)` (what its filter gets, before its level) -> `chainSendL/R` -> `ToExpanderMessage::sendL/R` along the expander chain |
-| RETURN per artifact | The SEND / RETURN module's RET L/R (`ToMainMessage::stereoReturn`). `MARKER_RETURN_MODE_PARAM + i` (`settings[i].returnBus`): **INSERT** (default): replaces that artifact's filter (20 ms crossfade), after its GAIN and note level, so a shared bus returned into one artifact is gated by its notes. **BUS**: `in.busSend[i]` makes the engines' send the finished sound (after filter, level, gain, pan: GrainEngine cloud loop, MorphEngine `renderPoly` / `renderChains`), x the SEND level `MARKER_SEND_LEVEL_PARAM + i` (lockable per trig, default 0, slewed 5 ms: `sendLevelS`); the return (`busRet[i]`) is added to the mix before the master, ungated, so a delay's tail rings out after the trig that fed it (Elektron style). Slot tag BUS (`shownBus`) |
+| SEND per artifact | **Only on the stereo SEND / RETURN module** (the main panel's SEND / RETURN jacks are gone; `SEND_OUTPUT` / `RETURN_INPUT` IDs reserved, old cables dropped as they have no port widget). Engines' `getSend(i)` (its sound after DRIVE and its filter: type, CUTOFF, RES; before its level) -> `chainSendL/R` -> `ToExpanderMessage::sendL/R` along the expander chain |
+| RETURN per artifact | The SEND / RETURN module's RET L/R (`ToMainMessage::stereoReturn`). `MARKER_RETURN_MODE_PARAM + i` (`settings[i].returnBus`): **INSERT** (default): comes back in right after that artifact's DRIVE and filter, which stay in the flow (20 ms crossfade; the filter always runs, its output is the SEND), then its GAIN, note level and PAN, so a shared bus returned into one artifact is gated by its notes. **BUS**: `in.busSend[i]` makes the engines' send the finished sound (after filter, level, gain, pan: GrainEngine cloud loop, MorphEngine `renderPoly` / `renderChains`), x the SEND level `MARKER_SEND_LEVEL_PARAM + i` (lockable per trig, default 0, slewed 5 ms: `sendLevelS`); the return (`busRet[i]`) is added to the mix before the master, ungated, so a delay's tail rings out after the trig that fed it (Elektron style). Slot tag BUS (`shownBus`) |
 | SEND / RETURN module | `WaveArtifactSendReturn::process`: sits at the end of the expander chain, reads `ToExpanderMessage::sendL/R`, writes `ToMainMessage` returns. Each row's second line: a SEND `LinkedKnob<Trimpot>` (a plain knob cannot lock: with smoothed params the per-frame revert of `lockCaptureStep` fights it; LinkedKnob writes the selected trig's lock directly) and an INS / BUS `ModeButton`, bound in `WaveArtifactSendReturnWidget::step()` to the main module's params (`mainOnLeft()` walks the expander chain), so trig locks work as on the main knobs (`lockCaptureStep` with a step selected) |
 | Master | `mixMaster` (filter type, cutoff, res, spread, feedback, drive + CV), master gain (+CV VCA), `mixLimiter` (10 V), mono option (`monoOutput`, 10 ms crossfade) -> `LEFT_OUTPUT` / `RIGHT_OUTPUT` |
 
@@ -206,6 +206,11 @@ line), `WavetableMap` (tables or waveform, hits, scan loops, loop point, preview
 
 ## Change log
 
+- 2026-11-15: SEND / RETURN (INSERT) keeps the artifact's DRIVE and filter (type, CUTOFF, RES) in the flow: SEND is
+  taken after the filter (it was before it) and the RETURN comes back there, then GAIN, note level and PAN (it used to
+  replace the filter). `MorphEngine` `renderPoly` / `renderChains`, `GrainEngine` cloud loop: the filter always runs.
+  BUS unchanged. Checks: `tests/test_poly.cpp` (`checkReturn`), `build/probe_sendret2.cpp` (real modules, 3 engines x
+  5 filter settings); `build/probe_sendret.cpp` is out of date (it compares with the removed main-panel jacks) (section 11).
 - 2026-11-15: a PHASE per expander LFO (`MARKER_MOD_LFO_PHASE_PARAM`, `MARKER_MOD_LFO2_PHASE_PARAM`, 0..360 deg,
   lockable): `wa::Lfo::process(..., phaseOffset)` shifts the periodic shapes (a RESET starts there; synced it stays
   that far after the beat; a change glides ~5 ms; random shapes ignore it; 0 = bit-identical). Expander: the

@@ -844,19 +844,18 @@ public:
 						xr = dry * xr + wet * c.diffR.process(xr);
 					}
 				}
-				// SEND: what the filter gets. RETURN (insert) takes the filter's place, faded over 20 ms both ways.
-				sendL[m] = xl;
-				sendR[m] = xr;
+				// The filter, then SEND: what comes out of it. RETURN (insert) comes back in right after the filter
+				// (faded over 20 ms both ways), before the envelope, GAIN and PAN.
 				float k = c.insertS;
-				if (k < 1.f) {
-					yl = c.svfL.process(xl, fc, q, sampleRate, c.mixS);
-					yr = c.svfR.process(xr, fc, q, sampleRate, c.mixS);
-					if (!std::isfinite(yl) || !std::isfinite(yr)) {
-						c.svfL.reset();
-						c.svfR.reset();
-						yl = yr = 0.f;
-					}
+				yl = c.svfL.process(xl, fc, q, sampleRate, c.mixS);
+				yr = c.svfR.process(xr, fc, q, sampleRate, c.mixS);
+				if (!std::isfinite(yl) || !std::isfinite(yr)) {
+					c.svfL.reset();
+					c.svfR.reset();
+					yl = yr = 0.f;
 				}
+				sendL[m] = yl;
+				sendR[m] = yr;
 				if (k > 0.f) {
 					yl += (in.retL[m] - yl) * k;
 					yr += (in.retR[m] - yr) * k;

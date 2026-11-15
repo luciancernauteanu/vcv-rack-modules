@@ -545,8 +545,8 @@ private:
 			float t = in.wantDirect[m] ? 0.f : 1.f;
 			mainShare[m] = (t > mainShare[m]) ? std::min(t, mainShare[m] + tableFadeStep) : std::max(t, mainShare[m] - tableFadeStep);
 		}
-		// A marker with a RETURN leaves the morph's voice (its filter is outside): renderChains plays it, through
-		// the return, into the main mix.
+		// A marker with a RETURN leaves the morph's voice (the effect sits after its own filter): renderChains plays
+		// it, through its filter and the return, into the main mix.
 		heard[a] *= mainShare[a] * (1.f - insertS[a]);
 		if (b != a)
 			heard[b] *= mainShare[b] * (1.f - insertS[b]);
@@ -665,20 +665,18 @@ private:
 					}
 					v *= markerGate[m];
 				}
-				// SEND: what the filter gets; RETURN (insert) takes the filter's place, faded in and out over 20 ms
+				// DRIVE, then the filter; SEND is what comes out of the filter, and the RETURN (insert) comes back in
+				// right there (faded in and out over 20 ms), before the envelope, GAIN and PAN
 				float driven = d.drive.process(v * gainS[m], d.driveS < 1e-5f ? 0.f : d.driveS);
-				sendL[m] = sendR[m] = driven;
 				float k = insertS[m];
-				float y = 0.f;
-				if (k < 1.f) {
-					float q;
-					float fc = d.params.get(d.cutS, d.resS, &q);
-					y = d.svf.process(driven, fc, q, sampleRate, d.mixS);
-					if (!std::isfinite(y)) {
-						d.svf.reset();
-						y = 0.f;
-					}
+				float q;
+				float fc = d.params.get(d.cutS, d.resS, &q);
+				float y = d.svf.process(driven, fc, q, sampleRate, d.mixS);
+				if (!std::isfinite(y)) {
+					d.svf.reset();
+					y = 0.f;
 				}
+				sendL[m] = sendR[m] = y;
 				y *= env * gain;
 				float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
 				float cl = std::cos(angle) * SQRT2, cr = std::sin(angle) * SQRT2;
@@ -725,9 +723,9 @@ private:
 	interpolation with a neighbor): GAIN, DRIVE, filter, its position share (posWeight, so it follows the playhead
 	like the main mix), PAN; the output then goes through a safety limiter. It fades (5 ms) when the artifact is
 	switched off, and with the structural declick when the bank changes.
-	SEND is the marker's part of what the morph's filter gets (after DRIVE, at its position share). With a RETURN,
-	the returned sound takes the filter's place (faded over 20 ms) and goes into the main mix (`l`, `r`, before the
-	master section), as the marker has left the morph's voice. */
+	SEND is the marker's own sound after its DRIVE and filter (type, CUTOFF, RES), at its position share. With a
+	RETURN, the returned sound comes back in after the filter (faded over 20 ms), takes GAIN and PAN, and goes into
+	the main mix (`l`, `r`, before the master section), as the marker has left the morph's voice. */
 	void renderChains(const EngineInput& in, float* l, float* r) {
 		for (int m = 0; m < NUM_MARKERS; m++) {
 			DirectChain& d = direct[m];
@@ -778,18 +776,16 @@ private:
 			float x = rawValid[m] ? rawRead[m] * gainS[m] : 0.f;
 			float driven = d.drive.process(x, d.driveS < 1e-5f ? 0.f : d.driveS);
 			float share = d.env * posWeight[m];
-			sendL[m] = sendR[m] = driven * share;
 			float k = insertS[m];
-			float y = 0.f;
-			if (k < 1.f) {
-				float q;
-				float fc = d.params.get(d.cutS, d.resS, &q);
-				y = d.svf.process(driven, fc, q, sampleRate, d.mixS);
-				if (!std::isfinite(y)) {
-					d.svf.reset();
-					y = 0.f;
-				}
+			float q;
+			float fc = d.params.get(d.cutS, d.resS, &q);
+			float y = d.svf.process(driven, fc, q, sampleRate, d.mixS);
+			if (!std::isfinite(y)) {
+				d.svf.reset();
+				y = 0.f;
 			}
+			// SEND: after DRIVE and the filter, at its position share; the RETURN comes back in there
+			sendL[m] = sendR[m] = y * share;
 			y *= share * gain;
 			float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
 			float cl = std::cos(angle) * SQRT2, cr = std::sin(angle) * SQRT2;

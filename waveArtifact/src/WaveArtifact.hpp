@@ -276,7 +276,7 @@ struct WaveArtifact : Module {
 		/** Each artifact's SEND level 0..1 in BUS mode (default 0; lockable per trig, Elektron style: lock it up on the
 		trig that goes to the delay). Set on the stereo SEND / RETURN module's rows. */
 		ENUMS(MARKER_SEND_LEVEL_PARAM, NUM_MARKERS),
-		/** Each artifact's RETURN mode: 0 INSERT (the return replaces its filter, inside its note; the default, as before),
+		/** Each artifact's RETURN mode: 0 INSERT (SEND after its drive and filter, the return comes back there, inside its note; the default),
 		1 BUS (SEND = its finished sound x SEND level; the return joins the main mix ungated, so tails ring out) */
 		ENUMS(MARKER_RETURN_MODE_PARAM, NUM_MARKERS),
 		/** Each marker's second expander LFO (MarkerMod.hpp), as LFO 1: rate, shape, sync, destination, depth. Its synced
@@ -369,7 +369,7 @@ struct WaveArtifact : Module {
 	std::atomic<float> shownPreview{0.f};
 	/** An expander is modulating this artifact (shown as a CV tag on the screen) */
 	std::atomic<bool> shownCv[NUM_MARKERS];
-	/** The artifact's RETURN replaces its filter (shown as a RET tag on the screen) */
+	/** The artifact has a RETURN patched, after its filter (shown as a RET tag on the screen) */
 	std::atomic<bool> shownReturn[NUM_MARKERS];
 	/** ... in BUS mode (tagged BUS: the return joins the mix outside its notes) */
 	std::atomic<bool> shownBus[NUM_MARKERS];

@@ -305,7 +305,7 @@ WaveArtifact::WaveArtifact() {
 			string::f("Artifact %d SEND level (BUS mode; lock it per trig: only that trig goes to the effect)", i + 1), "%", 0.f, 100.f);
 		getParamQuantity(MARKER_SEND_LEVEL_PARAM + i)->randomizeEnabled = false;
 		configSwitch(MARKER_RETURN_MODE_PARAM + i, 0.f, 1.f, 0.f, string::f("Artifact %d RETURN mode", i + 1),
-			{"INSERT (the return replaces its filter, inside its notes)", "BUS (send its finished sound x SEND; the return rings out on its own)"});
+			{"INSERT (send after its drive and filter, the return comes back there, inside its notes)", "BUS (send its finished sound x SEND; the return rings out on its own)"});
 		getParamQuantity(MARKER_RETURN_MODE_PARAM + i)->randomizeEnabled = false;
 	}
 
@@ -1160,7 +1160,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 	in.holdSilent = swapWanted || switching || params[STOP_PARAM].getValue() > 0.5f;
 	in.previewTable = previewTable.load(std::memory_order_relaxed);
 	// SEND / RETURN per artifact, on the stereo SEND / RETURN module (this panel's own jacks are gone): a patched RETURN
-	// replaces the artifact's filter (INSERT, the engine crossfades 20 ms) or joins the mix (BUS). It reads the send of
+	// comes back after the artifact's DRIVE and filter (INSERT, the engine crossfades 20 ms) or joins the mix (BUS). It reads the send of
 	// a few samples before (the expander chain). Volts are clamped to +-12 V, NaN is silence.
 	in.wantSend = mod->stereoSendWanted;
 	for (int i = 0; i < NUM_MARKERS; i++) {
