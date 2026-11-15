@@ -239,8 +239,11 @@ WaveArtifact::WaveArtifact() {
 		configSwitch(MARKER_MOD_LFO2_SYNC_PARAM + i, 0.f, 1.f, 1.f, name + " expander LFO 2 sync", {"Free (Hz)", "Tempo sync (BPM / CLOCK)"});
 		configSwitch(MARKER_MOD_LFO2_DEST_PARAM + i, 0.f, wa::NUM_MOD_DESTS - 1, wa::MOD_DEST_PAN, name + " expander LFO 2 destination", dests);
 		configParam(MARKER_MOD_LFO2_DEPTH_PARAM + i, -1.f, 1.f, 0.f, name + " expander LFO 2 depth", "%", 0.f, 100.f);
+		// PHASE: where each LFO is in its cycle (0 deg = as before)
+		configParam(MARKER_MOD_LFO_PHASE_PARAM + i, 0.f, 1.f, 0.f, name + " expander LFO 1 phase", "°", 0.f, 360.f);
+		configParam(MARKER_MOD_LFO2_PHASE_PARAM + i, 0.f, 1.f, 0.f, name + " expander LFO 2 phase", "°", 0.f, 360.f);
 		for (int id : {MARKER_MOD_LFO2_RATE_PARAM, MARKER_MOD_LFO2_SHAPE_PARAM, MARKER_MOD_LFO2_SYNC_PARAM, MARKER_MOD_LFO2_DEST_PARAM,
-				MARKER_MOD_LFO2_DEPTH_PARAM})
+				MARKER_MOD_LFO2_DEPTH_PARAM, MARKER_MOD_LFO_PHASE_PARAM, MARKER_MOD_LFO2_PHASE_PARAM})
 			getParamQuantity(id + i)->randomizeEnabled = false;
 		// Its own seed (for the random shapes), without drawing from Rack's random numbers: that would shift every seed
 		// drawn after it, so older patches' random shapes would start elsewhere
@@ -694,6 +697,8 @@ void WaveArtifact::refreshSettings(int i) {
 	s.modLfo2Rate = mv(MARKER_MOD_LFO2_RATE_PARAM, i);
 	s.modLfo2Dest = (int) std::round(mv(MARKER_MOD_LFO2_DEST_PARAM, i));
 	s.modLfo2Depth = mv(MARKER_MOD_LFO2_DEPTH_PARAM, i);
+	s.modLfoPhase = mv(MARKER_MOD_LFO_PHASE_PARAM, i);
+	s.modLfo2Phase = mv(MARKER_MOD_LFO2_PHASE_PARAM, i);
 	s.modLfoShape = (int) std::round(mv(MARKER_MOD_LFO_SHAPE_PARAM, i));
 	s.modLfoRate = mv(MARKER_MOD_LFO_RATE_PARAM, i);
 	s.modLfoDest = (int) std::round(mv(MARKER_MOD_LFO_DEST_PARAM, i));
@@ -980,7 +985,8 @@ void WaveArtifact::process(const ProcessArgs& args) {
 				modLfoLive[i] = lfoGrace;
 			if (modLfoLive[i] > 0) {
 				modLfoLive[i]--;
-				modLfoOut[i] = modLfos[i].process(s.modLfoShape, s.modLfoSync, s.modLfoRate, s.modLfoTriplets, s.modLfoDotted, clock, args.sampleTime);
+				modLfoOut[i] = modLfos[i].process(s.modLfoShape, s.modLfoSync, s.modLfoRate, s.modLfoTriplets, s.modLfoDotted, clock, args.sampleTime,
+					s.modLfoPhase);
 			}
 			else {
 				modLfoOut[i] = 0.f;
@@ -990,7 +996,7 @@ void WaveArtifact::process(const ProcessArgs& args) {
 				modLfoLive2[i] = lfoGrace;
 			if (modLfoLive2[i] > 0) {
 				modLfoLive2[i]--;
-				modLfoOut2[i] = modLfos2[i].process(s.modLfo2Shape, s.modLfo2Sync, s.modLfo2Rate, true, true, clock, args.sampleTime);
+				modLfoOut2[i] = modLfos2[i].process(s.modLfo2Shape, s.modLfo2Sync, s.modLfo2Rate, true, true, clock, args.sampleTime, s.modLfo2Phase);
 			}
 			else {
 				modLfoOut2[i] = 0.f;
@@ -2336,6 +2342,7 @@ const int WaveArtifact::MARKER_SETTING_PARAMS[WaveArtifact::NUM_MARKER_SETTINGS]
 	MARKER_ENGINE_PARAM, MARKER_HIT_SENSITIVITY_PARAM, MARKER_SEND_LEVEL_PARAM, MARKER_RETURN_MODE_PARAM,
 	MARKER_MOD_LFO2_RATE_PARAM, MARKER_MOD_LFO2_SHAPE_PARAM, MARKER_MOD_LFO2_SYNC_PARAM, MARKER_MOD_LFO2_DEST_PARAM, MARKER_MOD_LFO2_DEPTH_PARAM,
 	MARKER_MOD_AD2_ATTACK_PARAM, MARKER_MOD_AD2_DECAY_PARAM, MARKER_MOD_AD2_PERC_PARAM, MARKER_MOD_AD2_DEST_PARAM, MARKER_MOD_AD2_DEPTH_PARAM,
+	MARKER_MOD_LFO_PHASE_PARAM, MARKER_MOD_LFO2_PHASE_PARAM,
 };
 
 const int WaveArtifact::MARKER_ENVELOPE_PARAMS[WaveArtifact::NUM_ENVELOPE_PARAMS] = {

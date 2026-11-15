@@ -293,6 +293,10 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_MOD_AD2_PERC_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_MOD_AD2_DEST_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_MOD_AD2_DEPTH_PARAM, NUM_MARKERS),
+		/** Each marker's expander LFO 1 / LFO 2 PHASE, 0..1 of a cycle (0..360 deg, default 0): where the periodic
+		shapes start after a RESET, and how far after the beat they run when synced (wa::Lfo, phaseOffset). Lockable. */
+		ENUMS(MARKER_MOD_LFO_PHASE_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO2_PHASE_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -487,6 +491,8 @@ struct WaveArtifact : Module {
 		bool modLfo2Sync = false;
 		int modLfo2Shape = 0, modLfo2Dest = 0;
 		float modLfo2Rate = 0.f, modLfo2Depth = 0.f;
+		// PHASE of LFO 1 / LFO 2 (0..1 of a cycle)
+		float modLfoPhase = 0.f, modLfo2Phase = 0.f;
 		// The expander's AD 2
 		bool ad2Perc = false;
 		int ad2Dest = 0;
@@ -548,7 +554,7 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 67;
+	static const int NUM_MARKER_SETTINGS = 69;
 	/** UI thread: artifact i's engine as set (0 WAVE, 1 GRAIN, 2 SAMPLE) */
 	int engineOfMarker(int i) {
 		return clamp((int) std::round(params[MARKER_ENGINE_PARAM + clamp(i, 0, NUM_MARKERS - 1)].getValue()), 0, 2);

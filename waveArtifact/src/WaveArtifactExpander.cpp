@@ -267,18 +267,20 @@ static const Vec PERC_BUTTON_SIZE = Vec(7.4f, 4.4f);
 static const float AD_DEST_X = 34.f;
 static const float AD_DEPTH_X = 43.2f;
 static const Vec DEST_BUTTON_SIZE = Vec(10.f, 4.6f);
-// The marker's two LFOs, side by side, each a column, top to bottom: title (+ light), a small shape screen and SYNC,
-// DEST + DEPTH, RATE + AMT (the jack's level), the output. Synced rates step through every note value (no T / D).
+// The marker's two LFOs, side by side, each a column (no title: LFO 1 left, LFO 2 right), top to bottom: its light, a
+// small shape screen and SYNC, DEST + DEPTH, RATE + AMT (the jack's level), the output + PHASE. Synced rates step
+// through every note value (no T / D).
 static const float LFO_COL_X[2] = {14.7f, 36.1f};
 static const float LFO_LEFT_DX = -4.6f, LFO_RIGHT_DX = 5.4f;
-static const float LFO_LABEL_Y = 83.2f;
-static const float LFO_ROW1_Y = 88.4f;
+static const float LFO_LIGHT_Y = 82.6f;
+static const float LFO_ROW1_Y = 86.4f;
 static const Vec LFO_SCREEN_SIZE = Vec(9.f, 4.4f);
 static const float LFO_SYNC_DX = 4.4f;
-static const float LFO_ROW2_LABEL_Y = 92.4f;
-static const float LFO_ROW2_Y = 96.8f;
-static const float LFO_KNOB_LABEL_Y = 101.f;
-static const float LFO_KNOB_Y = 105.f;
+static const float LFO_ROW2_LABEL_Y = 90.4f;
+static const float LFO_ROW2_Y = 94.8f;
+static const float LFO_KNOB_LABEL_Y = 99.f;
+static const float LFO_KNOB_Y = 103.f;
+static const float LFO_PHASE_LABEL_Y = 109.f;
 static const float LFO_OUT_Y = 114.8f;
 } // namespace xlayout
 
@@ -453,11 +455,11 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->add(Vec(AD_DEPTH_X, AD_NAME_Y), "DEPTH", 5.f);
 		for (int k = 0; k < 2; k++) {
 			float cx = LFO_COL_X[k];
-			labels->add(Vec(cx, LFO_LABEL_Y), k == 0 ? "LFO 1" : "LFO 2", 6.f);
 			labels->add(Vec(cx + LFO_LEFT_DX, LFO_ROW2_LABEL_Y), "DEST", 5.f);
 			labels->add(Vec(cx + LFO_RIGHT_DX, LFO_ROW2_LABEL_Y), "DEPTH", 5.f);
 			labels->add(Vec(cx + LFO_LEFT_DX, LFO_KNOB_LABEL_Y), "RATE", 5.f);
 			labels->add(Vec(cx + LFO_RIGHT_DX, LFO_KNOB_LABEL_Y), "AMT", 5.f);
+			labels->add(Vec(cx + LFO_RIGHT_DX, LFO_PHASE_LABEL_Y), "PHASE", 5.f);
 		}
 		addChild(labels);
 
@@ -521,13 +523,13 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 
 		// The two LFOs: the same controls per column, on the marker's LFO 1 / LFO 2 settings
 		struct LfoIds {
-			int shape, rate, sync, dest, depth;
+			int shape, rate, sync, dest, depth, phase;
 		};
 		const LfoIds lfoIds[2] = {
 			{WaveArtifact::MARKER_MOD_LFO_SHAPE_PARAM, WaveArtifact::MARKER_MOD_LFO_RATE_PARAM, WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM,
-				WaveArtifact::MARKER_MOD_LFO_DEST_PARAM, WaveArtifact::MARKER_MOD_LFO_DEPTH_PARAM},
+				WaveArtifact::MARKER_MOD_LFO_DEST_PARAM, WaveArtifact::MARKER_MOD_LFO_DEPTH_PARAM, WaveArtifact::MARKER_MOD_LFO_PHASE_PARAM},
 			{WaveArtifact::MARKER_MOD_LFO2_SHAPE_PARAM, WaveArtifact::MARKER_MOD_LFO2_RATE_PARAM, WaveArtifact::MARKER_MOD_LFO2_SYNC_PARAM,
-				WaveArtifact::MARKER_MOD_LFO2_DEST_PARAM, WaveArtifact::MARKER_MOD_LFO2_DEPTH_PARAM},
+				WaveArtifact::MARKER_MOD_LFO2_DEST_PARAM, WaveArtifact::MARKER_MOD_LFO2_DEPTH_PARAM, WaveArtifact::MARKER_MOD_LFO2_PHASE_PARAM},
 		};
 		for (int k = 0; k < 2; k++) {
 			float cx = LFO_COL_X[k];
@@ -543,8 +545,10 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 			addParam(bind(rateKnobs[k], ids.rate));
 			// The jack's level: this expander's own
 			addParam(createParamCentered<Trimpot>(mm2px(Vec(cx + LFO_RIGHT_DX, LFO_KNOB_Y)), module, WaveArtifactExpander::LFO_AMT_PARAM + k));
-			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(cx, LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + k));
-			addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(cx + 8.6f, LFO_LABEL_Y)), module, WaveArtifactExpander::LFO_LIGHT + 2 * k));
+			// The output under RATE, PHASE (the marker's, lockable) under AMT
+			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(cx + LFO_LEFT_DX, LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + k));
+			addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(cx + LFO_RIGHT_DX, LFO_OUT_Y)), nullptr, 0), ids.phase));
+			addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(cx + 8.6f, LFO_LIGHT_Y)), module, WaveArtifactExpander::LFO_LIGHT + 2 * k));
 		}
 
 		// Trig locks, as on the main module: a dot above each control some step of the marker's row locks (white

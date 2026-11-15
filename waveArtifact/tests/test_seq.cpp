@@ -118,11 +118,14 @@ static void testLockable() {
 	int count = 0;
 	for (int k = 0; k < wa::NUM_LOCKABLE; k++)
 		count += wa::isLockable(k) ? 1 : 0;
-	std::printf("  lockable settings: %d of %d (want 46: SAMPLE's LOOP point locks, its ONE / LOOP / PING does not; the expander LFO's\n"
+	std::printf("  lockable settings: %d of %d (want 48: SAMPLE's LOOP point locks, its ONE / LOOP / PING does not; the expander LFO's\n"
 		"  rate, shape, DEST, DEPTH and the AD's attack, decay, DEST, DEPTH lock, their SYNC / T / D and PERC do not; the BUS SEND\n"
-		"  level and the expander LFO 2 and AD 2 lock as LFO 1 and AD 1; ENGINE, HITS, RETURN mode, LFO 2 SYNC, AD 2 PERC do not)\n",
+		"  level and the expander LFO 2 and AD 2 lock as LFO 1 and AD 1; ENGINE, HITS, RETURN mode, LFO 2 SYNC, AD 2 PERC do not;\n"
+		"  both expander LFOs' PHASE lock)\n",
 		count, wa::NUM_LOCKABLE);
-	CHECK(count == 46, "lockable count %d", count);
+	CHECK(count == 48, "lockable count %d", count);
+	CHECK(wa::isLockable(67) && wa::isLockable(68) && std::string(wa::LOCK_NAMES[67]) == "modLfoPhase" &&
+		std::string(wa::LOCK_NAMES[68]) == "modLfo2Phase", "the expander LFOs' PHASE lock per trig");
 	CHECK(wa::isLockable(55) && std::string(wa::LOCK_NAMES[55]) == "sendLevel", "the SEND level locks per trig");
 	CHECK(!wa::isLockable(53) && !wa::isLockable(54) && !wa::isLockable(56), "ENGINE, HITS, RETURN mode are per artifact only");
 	// The expander modulation (StepLocks.hpp 41..52)

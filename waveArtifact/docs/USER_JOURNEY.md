@@ -91,7 +91,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 | Right-click a bullet / slot | `MarkerBar::openMarkerMenu` (`MarkerMenu.hpp`): delete (`deleteMarker`), copy / paste (`copyMarker` / `pasteMarker` over `MARKER_SETTING_PARAMS`), sample items, LAY |
 | Shift + a control | `WaveArtifactWidget::step` finds the Shift-held / hovered param -> `linkStep(paramId, dragging)`: every other active artifact moves by the same amount (choices take the same value); undo in `pushLinkedMoveUndo` |
 | Shift + double-click | `resetSettingOnAllMarkers` |
-| The per-artifact setting list | `MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS]` (54): copy / paste, links, step locks (same order as `StepLocks.hpp LOCK_NAMES`; `NOT_LOCKABLE` marks switches and ENGINE) |
+| The per-artifact setting list | `MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS]` (69): copy / paste, links, step locks (same order as `StepLocks.hpp LOCK_NAMES`; `NOT_LOCKABLE` marks switches and ENGINE) |
 
 ## 5. Engine per artifact (WAVE / GRAIN / SAMPLE)
 
@@ -140,7 +140,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 | STOP | `STOP_PARAM` -> `holdSilent` (5 ms fade; LFOs and clock keep running) |
 | WAVE LFO (per artifact) | `lfos[i]` -> `m.lfo`, only on WAVE with AMT > 0 (`waveLfoLive` grace 1 s) |
 | POS LFO | `posLfo` + `posLfoSmoother` (SMOOTH), centred sweep `lfoCentered` |
-| Expander LFO 1, LFO 2, AD 1, AD 2 | `modLfos[i]`, `modLfos2[i]`, `modAds[i]`, `modAds2[i]` (`MarkerMod.hpp`; AD 2 starts on the same notes, trigs and GATE as AD 1 and runs only while its DEPTH is not 0 or the sequencer is on), each routed by `ModSum` to its destination with its depth; live only while heard (`modLfoLive` / `modLfoLive2`: depth, its jack via `lfoJack` / `lfoJack2`, or the sequencer on). Settings are the marker's (`MARKER_MOD_LFO_*`, `MARKER_MOD_LFO2_*`: lockable rate, shape, DEST, DEPTH). Synced rates step through **every** note value (`LFO_KIND_ALWAYS` in `LfoRateQuantity` / `LfoRateKnobT`; the old T / D params are unused): an older patch's synced LFO 1 knob moves to the same note value on the full list (`wa::lfoKnobAllKinds`, `dataFromJson`, flag `lfoAllKinds`). Expander panel: two columns (small shape screen + SYNC, DEST + DEPTH, RATE + AMT, jack `LFO_OUTPUT + k`), bound to the marker in `WaveArtifactExpanderWidget::rebind` |
+| Expander LFO 1, LFO 2, AD 1, AD 2 | `modLfos[i]`, `modLfos2[i]`, `modAds[i]`, `modAds2[i]` (`MarkerMod.hpp`; AD 2 starts on the same notes, trigs and GATE as AD 1 and runs only while its DEPTH is not 0 or the sequencer is on), each routed by `ModSum` to its destination with its depth; live only while heard (`modLfoLive` / `modLfoLive2`: depth, its jack via `lfoJack` / `lfoJack2`, or the sequencer on). Settings are the marker's (`MARKER_MOD_LFO_*`, `MARKER_MOD_LFO2_*`: lockable rate, shape, DEST, DEPTH, PHASE). PHASE (`s.modLfoPhase` / `s.modLfo2Phase`) is the `phaseOffset` of `Lfo::process`: the cycle shifted 0..360 deg, gliding ~5 ms when changed, taken at once on a RESET. Synced rates step through **every** note value (`LFO_KIND_ALWAYS` in `LfoRateQuantity` / `LfoRateKnobT`; the old T / D params are unused): an older patch's synced LFO 1 knob moves to the same note value on the full list (`wa::lfoKnobAllKinds`, `dataFromJson`, flag `lfoAllKinds`). Expander panel: two columns, no titles (light, small shape screen + SYNC, DEST + DEPTH, RATE + AMT, jack `LFO_OUTPUT + k` + PHASE), bound to the marker in `WaveArtifactExpanderWidget::rebind` |
 | Expander CV | `ToMainMessage`: fast paths `mod[i][...]` (wave, cutoff, drive, fine, pan, gain VCA `gainMul`), slow ones as `knobMods` -> `cvAdd` / `cvMask` read in `refreshSettings` / `mv()` |
 | Master CV | `masterCv(...)` per master knob, gain CV as a VCA |
 
@@ -206,6 +206,11 @@ line), `WavetableMap` (tables or waveform, hits, scan loops, loop point, preview
 
 ## Change log
 
+- 2026-11-15: a PHASE per expander LFO (`MARKER_MOD_LFO_PHASE_PARAM`, `MARKER_MOD_LFO2_PHASE_PARAM`, 0..360 deg,
+  lockable): `wa::Lfo::process(..., phaseOffset)` shifts the periodic shapes (a RESET starts there; synced it stays
+  that far after the beat; a change glides ~5 ms; random shapes ignore it; 0 = bit-identical). Expander: the
+  "LFO 1 / LFO 2" titles are gone, the rows moved up 2 mm, the bottom row is OUT (under RATE) + PHASE (under AMT).
+  Settings list 69 (section 8).
 - 2026-11-15: a second expander AD per marker (attack, decay, PERC, DEST, DEPTH; a second row on the panel, the CV
   section a little shorter). Settings list 67, past 64: the lock masks are `wa::LockMask` (128 bits, `StepLocks.hpp`)
   instead of `uint64_t`; `NOT_LOCKABLE` is a list (section 8, 9).

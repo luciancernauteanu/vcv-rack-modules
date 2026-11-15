@@ -11,7 +11,7 @@
 
 namespace wa {
 
-static const int NUM_LOCKABLE = 67;
+static const int NUM_LOCKABLE = 69;
 
 /** Saved in the patch (JSON keys): never rename one. Same order as WaveArtifact::MARKER_SETTING_PARAMS. */
 static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
@@ -30,6 +30,7 @@ static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
 	"engine", "hitSensitivity", "sendLevel", "returnMode",
 	"modLfo2Rate", "modLfo2Shape", "modLfo2Sync", "modLfo2Dest", "modLfo2Depth",
 	"modAd2Attack", "modAd2Decay", "modAd2Perc", "modAd2Dest", "modAd2Depth",
+	"modLfoPhase", "modLfo2Phase",
 };
 
 /** Shown in the lane's setting menu and on the panel */
@@ -49,6 +50,7 @@ static const char* const LOCK_LABELS[NUM_LOCKABLE] = {
 	"ENGINE", "HITS", "SEND", "RET MODE",
 	"EXP LFO2 RATE", "EXP LFO2 SHAPE", "EXP LFO2 SYNC", "EXP LFO2 DEST", "EXP LFO2 DEPTH",
 	"EXP AD2 ATTACK", "EXP AD2 DECAY", "EXP AD2 PERC", "EXP AD2 DEST", "EXP AD2 DEPTH",
+	"EXP LFO PHASE", "EXP LFO2 PHASE",
 };
 
 /** Settings a step cannot lock: switches that only change how another control is read (SYNC / T / D, PITCH FREE)
