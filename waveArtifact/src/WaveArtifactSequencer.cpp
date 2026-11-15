@@ -1444,11 +1444,11 @@ struct LockLane : widget::OpaqueWidget {
 		std::vector<int> expander = range(41, 52);
 		for (int k : range(57, 68))
 			expander.push_back(k);
-		std::vector<int> level = range(8, 12);
-		level.push_back(55); // SEND level (BUS)
+		// GAIN, the two filters side by side (CUT 1, CUT 2, RES 1, RES 2, TYPE 1, TYPE 2), DRIVE, SEND
+		const std::vector<int> level = {8, 9, 70, 10, 71, 11, 69, 12, 55};
 		const Group groups[] = {
 			{"Wave", range(0, 1)},
-			{"Level / filter / drive / send", level},
+			{"Level / filters / drive / send", level},
 			{"Pitch / pan", range(13, 16)},
 			{"Envelope (A D S H R)", range(28, 32)},
 			{"LFO", range(2, 7)},

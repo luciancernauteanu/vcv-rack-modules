@@ -1560,7 +1560,82 @@ static void testResonantNotch() {
 	}
 }
 
+/** Filter 2 (wa::Filter2), in series after the artifact's filter: OFF leaves the signal untouched and never starts;
+on it filters; switching it on or off crossfades (no click); off again it stops and the signal is exactly the input. In
+the engine (MORPH and POLY): filter 1 open + filter 2 LP closed takes the tone down; HP 2 after LP 1 makes a band. */
+static void testFilter2() {
+	std::printf("filter 2: OFF untouched, series filtering, click-free on / off\n");
+	const float sr = 48000.f, coef = 1.f - std::exp(-1.f / (0.02f * sr));
+	// 1. The block alone, on a 1 kHz sine
+	{
+		wa::Filter2 f;
+		int differ = 0;
+		for (int i = 0; i < 4800; i++) {
+			float x = (float) std::sin(2 * PI * 1000.0 * i / sr);
+			f.step(-1, 0.2f, 0.f, coef);
+			differ += f.process(0, x, sr) != x;
+		}
+		std::printf("  OFF: %d samples changed (want 0), running %d (want 0)\n", differ, (int) f.active());
+		CHECK(differ == 0 && !f.active(), "OFF changed the signal or started");
+		// On (LP at 0.2 = 80 Hz): the 1 kHz sine drops; switching on and off steps no more than the sine itself does
+		double sumOff = 0, sumOn = 0;
+		float prev = 0.f, worstStep = 0.f;
+		int stoppedAt = -1;
+		for (int i = 0; i < (int) (2.0f * sr); i++) {
+			float x = (float) std::sin(2 * PI * 1000.0 * i / sr);
+			int mode = (i >= (int) (0.5f * sr) && i < (int) (1.2f * sr)) ? wa::MODE_LP : -1;
+			f.step(mode, 0.2f, 0.f, coef);
+			float y = f.process(0, x, sr);
+			if (i > 0)
+				worstStep = std::max(worstStep, std::fabs(y - prev));
+			prev = y;
+			if (i > (int) (0.2f * sr) && i < (int) (0.5f * sr))
+				sumOff += (double) y * y;
+			if (i > (int) (0.9f * sr) && i < (int) (1.2f * sr))
+				sumOn += (double) y * y;
+			if (i >= (int) (1.2f * sr) && stoppedAt < 0 && !f.active())
+				stoppedAt = i;
+		}
+		double dB = 10.0 * std::log10(std::max(sumOn, 1e-20) / sumOff);
+		float sineStep = (float) (2 * PI * 1000.0 / sr);
+		double stopMs = stoppedAt < 0 ? -1.0 : (stoppedAt - 1.2 * sr) * 1000.0 / sr;
+		std::printf("  LP 80 Hz on a 1 kHz sine: %+.1f dB (want < -30); largest step %.4f (the sine's own %.4f, want <= x1.05);"
+			" stops %.0f ms after OFF\n", dB, worstStep, sineStep, stopMs);
+		CHECK(dB < -30.0, "filter 2 LP does not filter: %+.1f dB", dB);
+		CHECK(worstStep <= 1.05f * sineStep, "switching filter 2 clicks: step %f", worstStep);
+		CHECK(stoppedAt > 0 && stopMs < 500.0, "filter 2 does not stop after OFF");
+	}
+	// 2. In the engine: a 261.6 Hz sine marker, filter 1 open
+	auto level = [&](bool poly, int mode2, float cut2, int mode1 = wa::MODE_LP, float cut1 = 1.f) {
+		SineRig rig;
+		rig.in.poly = poly;
+		rig.in.markers[0].cutoff = cut1;
+		rig.in.markers[0].filterMode = mode1;
+		rig.in.markers[0].filter2Mode = mode2;
+		rig.in.markers[0].cutoff2 = cut2;
+		if (poly)
+			rig.in.voiceEnv[0] = 1.f;
+		std::vector<float> tail;
+		rig.peakOver(1.f, &tail);
+		return tone(tail, 261.6256, rig.sr);
+	};
+	for (bool poly : {false, true}) {
+		double off = level(poly, -1, 0.5f), lp = level(poly, wa::MODE_LP, 0.1f), open = level(poly, wa::MODE_LP, 1.f);
+		// LP 1 at 2 kHz then HP 2 at 2 kHz: the 261 Hz tone is under the HP: a band, not the tone
+		double band = level(poly, wa::MODE_HP, 0.6f, wa::MODE_LP, 0.6f);
+		double dbLp = 20.0 * std::log10(std::max(lp, 1e-12) / off), dbOpen = 20.0 * std::log10(open / off);
+		double dbBand = 20.0 * std::log10(std::max(band, 1e-12) / off);
+		std::printf("  %-5s: tone %.4f with filter 2 OFF; LP 2 at 40 Hz %+.1f dB (want < -20), LP 2 open %+.2f dB (want ~0),"
+			" LP 1 + HP 2 at 2 kHz %+.1f dB (want < -20)\n", poly ? "POLY" : "MORPH", off, dbLp, dbOpen, dbBand);
+		CHECK(off > 0.05, "no tone to measure");
+		CHECK(dbLp < -20.0, "filter 2 LP is not in the chain (%s)", poly ? "POLY" : "MORPH");
+		CHECK(std::fabs(dbOpen) < 0.5, "an open filter 2 changes the level (%s)", poly ? "POLY" : "MORPH");
+		CHECK(dbBand < -20.0, "filter 2 is not in series (%s)", poly ? "POLY" : "MORPH");
+	}
+}
+
 int main() {
+	testFilter2();
 	testResonantNotch();
 	testPositionLfoEdge();
 	testFeedbackCharacter();

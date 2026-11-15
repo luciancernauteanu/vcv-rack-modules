@@ -129,6 +129,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
   / PING with loop point, BEAT (CUT / FIT, `sampleBeatDivision`), HIT snap (`nearestHit`), zero-crossing snap, note fade
   in (`SAMPLE_FADE_IN_PARAM`), DRIVE (`sampleDrive`, latency-aligned).
 - **All:** filter per artifact (`Svf` via `FilterParams`), GAIN (`MAX_GAIN` 4), PAN, RETURN (INSERT) comes back after DRIVE and the filter
+- **Filter 2 (all engines):** `wa::Filter2` in series after the filter (`MARKER_FILTER2_MODE_PARAM` 0 OFF / LP / BP / HP / NOTCH, `MARKER_CUTOFF2_PARAM`, `MARKER_RES2_PARAM`; `s.filter2Mode` -1 = OFF). MorphEngine: the morph voice (`markerF2`, blended between the two markers, OFF = dry), `renderPoly` / `renderChains` (`DirectChain::f2`); GrainEngine: each cloud's `f2` (stereo). Skipped while OFF (`needed()`, its work out of line: inlined it changed the engines' rounding); on / off fades from / to dry (~20 ms). Panel: the filter page selector, "1" over "2" in the filter section's left strip between the knob rows (`FILTER_PAGE_PARAM`, `FilterPageSelector`; the page shown filled in the artifact's color, a dot on "2" while its filter 2 is on) shows filter 2's CUT / RES / TYPE at filter 1's spots (`editKnobPage`); their labels follow the page (`PanelLabels::addPaged`, `pageParam`: CUT 1 / CUT 2, RES 1 / RES 2, TYPE 1 / TYPE 2). Naming everywhere: CUT 1, CUT 2, RES 1, RES 2, TYPE 1, TYPE 2, DRIVE (one drive, before filter 1); lists offer them in that order without changing saved numbers (`MOD_DEST_ORDER` via `ModeButton::order`, `CV_DEST_ORDER`, the lane menu's group)
   (`insertS` 20 ms); then the master section (section 11).
 
 ## 8. Modulation, clock, transport
@@ -151,7 +152,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 | Rows and steps | `WaveArtifactSequencer`: one row per artifact, 16 steps (`STEPS`), `velocity[r][s]` (0 = no trig), `length[r]`, row clock `CLOCK_MULT_PARAM + r` (-4..4: /8 /4 /3 /2 x1 x2 x3 x4 x8 steps per beat, `stepsPerBeat`) |
 | Playing | `process()` -> `tickRow(r)` on each new step index (`beatPos` from the main module's `ToSequencerMessage`): trig conditions (`conditionPasses`), ties (long gates), lock conditions; sends `FromSequencerMessage` (`fireCount`, velocity, lock values / mask, slide, `stepBeats`, `legato`, `holdOpen`); GATE / MOD outputs per row |
 | Editing steps | `StepGrid` widget: click / drag velocity, ties (`toggleTie`), shift (`shiftRow`), copy / paste (`SeqClipboard`, `pasteRow`), delete (`deleteStep`), select a step (`select(r, s)`) |
-| Locks on a step | With a step selected, the main module's knobs edit its locks: `lockTarget`, `lockCaptureStep` (switches / wheel), `LinkedKnob` drags -> `setStepLock` / `clearStepLock`; tooltips `lockTooltip`, `stepValueFor`; map line `stepWaveShown` |
+| Locks on a step | With a step selected, the main module's knobs edit its locks: `lockTarget`, `lockCaptureStep` (switches / wheel), `LinkedKnob` drags -> `setStepLock` / `clearStepLock`; tooltips `lockTooltip`, `stepValueFor`; map line `stepWaveShown`. Lock dots + value bars: `StepValueBars` (main panel: the selected marker; an expander: its own marker, `stepBars->marker` in `rebind`; the SEND / RETURN module: each row's SEND knob is its own artifact's, `controlMarkers`; off the main panel `stripVertical` = false, bars always under the control), counted by `stepsLockingInRow(paramId, marker)`: a dot in the middle of a knob (outlined), above a screen / button (DEST, filter type, shape, toggles); white when the selected step locks it |
 | Lane | `LockLane`: one setting of a row as bars (`showLock(k)`, `laneSetting`), or the CONDITION view; `showInLane(paramId)` from a knob press. Setting menu `openSettingMenu` (groups of setting indexes, incl. SEND, LFO 2, AD 2, PHASE) |
 | Phantom (trigless) locks | Locks on an unlit step (`isPhantom`, `hasStep`): drawn in the lane on an empty step (a drag begun there only makes phantoms, `dragPhantom`; one begun on a trig only edits trigs). Yellow (`PHANTOM_COLOR`): outline + lock dot on the grid, bars in the lane. `tickRow`: its locks (lock conditions applied) go on top of the row's last step (`mergeLocks`), `lockFires` -> `FromSequencerMessage::lockCount` -> main `seqLockSeen`: `seqLocks.apply` without a note, GATE or MOD. Lasts until the row's next trig. Selectable; knobs add locks to it (`lockTarget`); SLIDE strip works; a grid click makes it a trig keeping its locks. `tidyStep` clears it when its last lock goes. Grid drags delete only steps they touched (`touched`). Old patches (no `phantomLocks` key) drop locks on unlit steps |
 | REC | `recordStep()`: knob moves go into the step playing now |
@@ -207,6 +208,21 @@ line), `WavetableMap` (tables or waveform, hits, scan loops, loop point, preview
 
 ## Change log
 
+- 2026-11-15: filter naming and order made one: CUT 1 / CUT 2, RES 1 / RES 2, TYPE 1 / TYPE 2, DRIVE on the panel
+  labels (following the page), the expander's DEST buttons and CV menus, the lane's lock labels and menu, and the
+  tooltips; the lists offer them side by side (display order only, saved values unchanged). The F2 toggle became a
+  1 / 2 page selector left of CUT / RES (section 7).
+- 2026-11-15: filter 2 per artifact, in series after the filter (OFF / LP / BP / HP / NOTCH, CUTOFF 2, RES 2; lockable;
+  settings list 72): OFF by default and skipped (bit-identical, no cost); on: +7..40 ns settled, +44..96 ns moving
+  (GRAIN / SAMPLE, user patch, 5 artifacts). F2 toggle on the panel swaps CUTOFF / RES / TYPE to filter 2. Checks:
+  `tests/test_engine.cpp` (`testFilter2`), `build/probe_filter2.cpp` (3 engines x MORPH / POLY), golden IDENTICAL (section 7).
+  The expander reaches it too: LFO / AD DEST `MOD_DEST_CUTOFF2`, `MOD_DEST_RES2` ("CUT 2", "RES 2", appended to
+  `ModDest`) and CV destinations `CV_CUTOFF2`, `CV_RES2` (appended to `CvDest`, through the settings like RES); checks
+  `build/probe_f2dest.cpp`, `build/probe_f2cv.cpp`.
+- 2026-11-15: lock dots: in the middle of each knob (larger, outlined) instead of above it, where it sat on the label;
+  screens and buttons keep theirs above. Fix: an expander's dots counted the main panel's selected marker's row, so
+  they showed only when that marker was the expander's own (`stepsLockingInRow(paramId, marker)`; section 9). The
+  SEND / RETURN module's SEND knobs get them too (they had none).
 - 2026-11-15: phantom (trigless) locks: draw a lock in the lane on a step with no trig; it changes the playing note's
   settings from that step (on top of the trig's locks) without a note; yellow on the grid and lane. The lane menu now
   offers SEND, LFO 2, AD 2 and both PHASEs. A grid drag no longer cleans up untouched empty steps. Checks:

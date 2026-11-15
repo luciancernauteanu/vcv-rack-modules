@@ -12,27 +12,57 @@ struct ModeButton : app::ParamWidget {
 	NVGcolor color = layout::SCREEN_TEXT;
 	/** Optional accent per value (overrides `color`) */
 	std::vector<NVGcolor> colors;
+	/** Optional order the values are offered in (a click steps along it, the right-click list follows it), for lists
+	whose saved numbers cannot change but read better grouped (CUT 1, CUT 2, RES 1, RES 2...). Empty: value order. */
+	std::vector<int> order;
+
+	void setUndoable(engine::ParamQuantity* pq, float newValue) {
+		float oldValue = pq->getValue();
+		pq->setValue(newValue);
+		history::ParamChange* h = new history::ParamChange;
+		h->name = "change " + pq->getLabel();
+		h->moduleId = module->id;
+		h->paramId = paramId;
+		h->oldValue = oldValue;
+		h->newValue = newValue;
+		APP->history->push(h);
+	}
 
 	void onButton(const ButtonEvent& e) override {
 		if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT && ((e.mods & RACK_MOD_MASK) & ~GLFW_MOD_SHIFT) == 0) {
 			engine::ParamQuantity* pq = getParamQuantity();
 			if (pq) {
-				float oldValue = pq->getValue();
 				int n = (int) std::round(pq->getMaxValue() - pq->getMinValue()) + 1;
-				int v = (int) std::round(oldValue - pq->getMinValue());
-				float newValue = pq->getMinValue() + (float) ((v + 1) % n);
-				pq->setValue(newValue);
-
-				history::ParamChange* h = new history::ParamChange;
-				h->name = "change " + pq->getLabel();
-				h->moduleId = module->id;
-				h->paramId = paramId;
-				h->oldValue = oldValue;
-				h->newValue = newValue;
-				APP->history->push(h);
+				int v = (int) std::round(pq->getValue() - pq->getMinValue());
+				int next = (v + 1) % n;
+				if (!order.empty()) {
+					int at = 0;
+					for (int i = 0; i < (int) order.size(); i++)
+						if (order[i] == v)
+							at = i;
+					next = clamp(order[(at + 1) % order.size()], 0, n - 1);
+				}
+				setUndoable(pq, pq->getMinValue() + (float) next);
 			}
 			e.consume(this);
 			return;
+		}
+		// The right-click list in `order` (Rack's own lists the values by number)
+		if (!order.empty() && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_RIGHT && (e.mods & RACK_MOD_MASK) == 0) {
+			engine::SwitchQuantity* sq = dynamic_cast<engine::SwitchQuantity*>(getParamQuantity());
+			if (sq && module) {
+				ui::Menu* menu = createMenu();
+				menu->addChild(createMenuLabel(sq->getLabel()));
+				int v = (int) std::round(sq->getValue() - sq->getMinValue());
+				for (int idx : order) {
+					if (idx < 0 || idx >= (int) sq->labels.size())
+						continue;
+					menu->addChild(createCheckMenuItem(sq->labels[idx], "", [=]() { return v == idx; },
+						[=]() { setUndoable(sq, sq->getMinValue() + (float) idx); }));
+				}
+				e.consume(this);
+				return;
+			}
 		}
 		ParamWidget::onButton(e);
 	}

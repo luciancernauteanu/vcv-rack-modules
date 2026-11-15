@@ -342,6 +342,10 @@ struct GrainMarkerInput {
 	float cutoff = 1.f;
 	int filterMode = MODE_LP;
 	float res = 0.f;
+	/** Filter 2, in series after the filter: -1 OFF (skipped, the default), else a FilterMode; its own CUTOFF / RES */
+	int filter2Mode = -1;
+	float cutoff2 = 0.5f;
+	float res2 = 0.f;
 	/** Linear gain 0..4 */
 	float gain = 1.f;
 	/** Semitones (PITCH + FINE) */
@@ -801,6 +805,8 @@ public:
 				modeWeights(filterOn, M.filterMode, c.mixS);
 				c.cutS = std::min(std::max(M.cutoff, 0.f), 1.f);
 				c.resS = std::min(std::max(M.res, 0.f), 1.f);
+				if (M.filter2Mode >= 0 || c.f2.active())
+					c.f2.snap(M.filter2Mode, M.cutoff2, M.res2);
 			}
 			bool live = c.running || c.active > 0;
 			if (live) {
@@ -854,6 +860,14 @@ public:
 					c.svfR.reset();
 					yl = yr = 0.f;
 				}
+				// Filter 2 in series, both sides on its settings (skipped while OFF)
+				if (c.f2.needed(M.filter2Mode)) {
+					c.f2.step(M.filter2Mode, M.cutoff2, M.res2, smoothCoef);
+					if (c.f2.active()) {
+						yl = c.f2.process(0, yl, sampleRate);
+						yr = c.f2.process(1, yr, sampleRate);
+					}
+				}
 				sendL[m] = yl;
 				sendR[m] = yr;
 				if (k > 0.f) {
@@ -878,6 +892,7 @@ public:
 			}
 			else if (c.idle == IDLE_RESET) {
 				c.svfL.reset();
+				c.f2.reset();
 				c.svfR.reset();
 				c.diffL.clear();
 				c.diffR.clear();
@@ -1002,6 +1017,8 @@ private:
 		/** SCAN FADE: the level for where the scan is now, and its smoothed value */
 		float scanLevelTarget = 1.f;
 		float scanLevel = 1.f;
+		/** Filter 2, in series after svfL / svfR (skipped while OFF) */
+		Filter2 f2;
 		float cutS = 1.f;
 		float resS = 0.f;
 		float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
@@ -1108,6 +1125,7 @@ private:
 		c.idle = IDLE_RESET + 1;
 		c.w = 0.f;
 		c.svfL.reset();
+		c.f2.reset();
 		c.svfR.reset();
 		c.smearWet = 0.f;
 		c.diffL.clear();

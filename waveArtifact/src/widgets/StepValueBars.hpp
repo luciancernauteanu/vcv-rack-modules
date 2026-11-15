@@ -12,25 +12,44 @@ struct StepValueBars : widget::TransparentWidget {
 	WaveArtifact* module = nullptr;
 	/** Every per-marker control (all markers): only the visible ones of the target marker draw a bar */
 	std::vector<app::ParamWidget*> controls;
+	/** Whose controls these are: -1 the selected marker (the main panel), else that marker (an expander's own) */
+	int marker = -1;
+	/** Per control, when they belong to different markers (the SEND / RETURN module's rows): controlMarkers[i] is
+	controls[i]'s marker. Empty: `marker` for all. */
+	std::vector<int> controlMarkers;
+	/** The main panel's knob strip (ADSR, KEEP) gets upright bars; other panels (false) always draw them under */
+	bool stripVertical = true;
 
 	void drawLayer(const DrawArgs& args, int layer) override {
 		if (layer != 1 || !module)
 			return;
 		NVGcontext* vg = args.vg;
-		NVGcolor col = layout::MARKER_COLORS[clamp(module->selectedMarker, 0, WaveArtifact::NUM_MARKERS - 1)];
-		for (app::ParamWidget* w : controls) {
-			if (!w->isVisible())
+		int shared = clamp(marker >= 0 ? marker : module->selectedMarker, 0, WaveArtifact::NUM_MARKERS - 1);
+		for (size_t ci = 0; ci < controls.size(); ci++) {
+			app::ParamWidget* w = controls[ci];
+			if (!w->isVisible() || w->module != module)
 				continue;
-			// A dot above the control: some step of this marker's row locks it (white: the selected step does).
-			int lockedSteps = module->stepsLockingInRow(w->paramId);
+			int m = ci < controlMarkers.size() ? clamp(controlMarkers[ci], 0, WaveArtifact::NUM_MARKERS - 1) : shared;
+			NVGcolor col = layout::MARKER_COLORS[m];
+			// A dot: some step of the marker's row locks it (white: the selected step does). On a knob it sits in the
+			// knob's middle; on a screen or button (shape, DEST, filter type, toggles) above it, clear of its text.
+			int lockedSteps = module->stepsLockingInRow(w->paramId, m);
 			float value;
 			bool locked;
 			bool hasStep = module->stepValueFor(w->paramId, &value, &locked);
 			if (lockedSteps > 0) {
+				bool knob = dynamic_cast<app::Knob*>(w) != nullptr;
+				Vec at = knob ? w->box.getCenter() : Vec(w->box.pos.x + w->box.size.x / 2.f, w->box.pos.y - 4.6f);
 				nvgBeginPath(vg);
-				nvgCircle(vg, w->box.pos.x + w->box.size.x / 2.f, w->box.pos.y - 4.6f, 1.7f);
+				nvgCircle(vg, at.x, at.y, knob ? 2.6f : 1.7f);
 				nvgFillColor(vg, (hasStep && locked) ? nvgRGB(0xff, 0xff, 0xff) : col);
 				nvgFill(vg);
+				// On the black knob cap: a dark ring keeps a pale color readable
+				if (knob) {
+					nvgStrokeColor(vg, nvgRGB(0x16, 0x18, 0x22));
+					nvgStrokeWidth(vg, 0.8f);
+					nvgStroke(vg);
+				}
 			}
 			if (!hasStep)
 				continue;
@@ -45,7 +64,7 @@ struct StepValueBars : widget::TransparentWidget {
 			// under it before the screen: there the bar stands on its right, along its height, filling upwards.
 			const float thick = 2.4f;
 			float cy = w->box.getCenter().y;
-			bool vertical = cy > mm2px(layout::STRIP_Y0) && cy < mm2px(layout::STRIP_Y0 + layout::STRIP_H);
+			bool vertical = stripVertical && cy > mm2px(layout::STRIP_Y0) && cy < mm2px(layout::STRIP_Y0 + layout::STRIP_H);
 			// The track: `along` is its length, from `start` (left, or bottom when vertical)
 			float along, start, across;
 			if (vertical) {

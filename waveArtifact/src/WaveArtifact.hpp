@@ -297,6 +297,13 @@ struct WaveArtifact : Module {
 		shapes start after a RESET, and how far after the beat they run when synced (wa::Lfo, phaseOffset). Lockable. */
 		ENUMS(MARKER_MOD_LFO_PHASE_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_MOD_LFO2_PHASE_PARAM, NUM_MARKERS),
+		/** Each artifact's filter 2, in series after its filter (wa::Filter2): TYPE 0 OFF (default: skipped, no cost),
+		1..4 LP / BP / HP / NOTCH; its own CUTOFF (0..1 as the filter's, default 0.5) and RES. Lockable. */
+		ENUMS(MARKER_FILTER2_MODE_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_CUTOFF2_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_RES2_PARAM, NUM_MARKERS),
+		/** The panel's F2 page: 0 the CUTOFF / RES / TYPE spots edit filter 1, 1 filter 2 (UI only, saved) */
+		FILTER_PAGE_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -495,6 +502,9 @@ struct WaveArtifact : Module {
 		float modLfo2Rate = 0.f, modLfo2Depth = 0.f;
 		// PHASE of LFO 1 / LFO 2 (0..1 of a cycle)
 		float modLfoPhase = 0.f, modLfo2Phase = 0.f;
+		// Filter 2: -1 OFF, else a FilterMode; its CUTOFF and RES
+		int filter2Mode = -1;
+		float cutoff2 = 0.5f, res2 = 0.f;
 		// The expander's AD 2
 		bool ad2Perc = false;
 		int ad2Dest = 0;
@@ -556,7 +566,7 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 69;
+	static const int NUM_MARKER_SETTINGS = 72;
 	/** UI thread: artifact i's engine as set (0 WAVE, 1 GRAIN, 2 SAMPLE) */
 	int engineOfMarker(int i) {
 		return clamp((int) std::round(params[MARKER_ENGINE_PARAM + clamp(i, 0, NUM_MARKERS - 1)].getValue()), 0, 2);
@@ -661,8 +671,9 @@ struct WaveArtifact : Module {
 	/** A press on one of the selected marker's controls: the sequencer's lane shows that setting for the marker's row
 	(its locks as bars, the other steps at the knob's value). Nothing for a setting that cannot be locked. */
 	void showInLane(int paramId);
-	/** How many lit steps of the selected marker's row lock the setting behind `paramId` (0 without a sequencer) */
-	int stepsLockingInRow(int paramId);
+	/** How many steps (trigs and phantom locks) of `marker`'s row lock the setting behind `paramId`, a control of that
+	marker (-1: the selected marker). 0 without a sequencer. */
+	int stepsLockingInRow(int paramId, int marker = -1);
 	/** A sequencer step of `marker` is selected: the WAVE / START it plays (its lock, or the knob where it has none),
 	for the wavetable map to show and edit instead of the live position. UI thread. */
 	bool stepWaveShown(int marker, float* wave, bool* locked = nullptr);
