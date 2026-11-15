@@ -74,6 +74,9 @@ enum CvDest {
 	CV_EXP_LFO_RATE,
 	CV_EXP_LFO_DEPTH,
 	CV_EXP_AD_DEPTH,
+	/** Filter 2 (appended: saved destinations keep their meaning) */
+	CV_CUTOFF2,
+	CV_RES2,
 	NUM_CV_DESTS
 };
 
@@ -92,8 +95,8 @@ struct CvDestInfo {
 static const CvDestInfo CV_DESTS[NUM_CV_DESTS] = {
 	{0, "WAVE", "START", 7, MOD_WAVE},
 	{8, "GAIN", "GAIN", 7, MOD_GAIN},
-	{9, "CUTOFF", "CUTOFF", 7, MOD_CUTOFF},
-	{10, "RES", "RES", 7, -1},
+	{9, "CUT 1", "CUT 1", 7, MOD_CUTOFF},
+	{10, "RES 1", "RES 1", 7, -1},
 	{12, "DRIVE", "DRIVE", 5, MOD_DRIVE},
 	{13, "PITCH", "PITCH", 7, -1},
 	{15, "FINE", "FINE", 5, MOD_FINE},
@@ -118,6 +121,18 @@ static const CvDestInfo CV_DESTS[NUM_CV_DESTS] = {
 	{41, "EXP LFO RATE", "EXP LFO RATE", 7, -1},
 	{47, "EXP LFO DEPTH", "EXP LFO DEPTH", 7, -1},
 	{52, "EXP AD DEPTH", "EXP AD DEPTH", 7, -1},
+	{70, "CUT 2", "CUT 2", 7, -1},
+	{71, "RES 2", "RES 2", 7, -1},
+};
+
+/** The order the CV destination menu offers them in (the saved numbers stay): sound first with the two filters side
+by side (CUT 1, CUT 2, RES 1, RES 2, then DRIVE), then each engine's own, the envelope, the expander's own */
+static const int CV_DEST_ORDER[NUM_CV_DESTS] = {
+	CV_WAVE, CV_GAIN, CV_CUTOFF, CV_CUTOFF2, CV_RES, CV_RES2, CV_DRIVE, CV_PITCH, CV_FINE, CV_PAN,
+	CV_SMOOTH, CV_LFO_RATE, CV_LFO_AMT,
+	CV_DENSITY, CV_SIZE, CV_SPRAY, CV_SPREAD, CV_PSCATTER, CV_SCAN, CV_FADE, CV_LENGTH, CV_LOOP_POINT,
+	CV_ATTACK, CV_DECAY, CV_SUSTAIN, CV_HOLD, CV_RELEASE,
+	CV_EXP_LFO_RATE, CV_EXP_LFO_DEPTH, CV_EXP_AD_DEPTH,
 };
 
 /** A destination's name on an engine (0 WAVE, 1 GRAIN, 2 SAMPLE) */

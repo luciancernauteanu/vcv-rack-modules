@@ -311,7 +311,8 @@ struct CvDestButton : ModeButton {
 				int id = paramId;
 				int eng = engine;
 				int now = (int) std::round(pq->getValue());
-				for (int d = 0; d < wa::NUM_CV_DESTS; d++) {
+				// In menu order (the filters side by side), not the saved numbers' order
+				for (int d : wa::CV_DEST_ORDER) {
 					if (!wa::cvDestOffered(d, eng))
 						continue;
 					menu->addChild(createCheckMenuItem(wa::cvDestName(d, eng), "",
@@ -371,8 +372,11 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 
 	void rebind(WaveArtifact* main, int marker) {
 		boundMain = main;
-		if (stepBars)
+		if (stepBars) {
 			stepBars->module = main;
+			// This expander's own marker (not the main panel's selected one)
+			stepBars->marker = marker;
+		}
 		boundMarker = marker;
 		for (Bound& b : bound) {
 			b.widget->module = main;
@@ -498,6 +502,8 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 			d->box.size = mm2px(DEST_BUTTON_SIZE);
 			d->box.pos = mm2px(at).minus(d->box.size.div(2.f));
 			d->labels.assign(wa::MOD_DEST_SHORT, wa::MOD_DEST_SHORT + wa::NUM_MOD_DESTS);
+			// The filters side by side: CUT 1, CUT 2, RES 1, RES 2 (the saved numbers stay)
+			d->order.assign(wa::MOD_DEST_ORDER, wa::MOD_DEST_ORDER + wa::NUM_MOD_DESTS);
 			return d;
 		};
 		// The two ADs: the same controls per row, on the marker's AD 1 / AD 2 settings
@@ -555,6 +561,7 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		// where the selected step does), and while a step is selected a bar under each with the value it plays
 		stepBars = createWidget<StepValueBars>(Vec(0, 0));
 		stepBars->box.size = box.size;
+		stepBars->stripVertical = false;
 		for (Bound& b : bound)
 			stepBars->controls.push_back(b.widget);
 		addChild(stepBars);

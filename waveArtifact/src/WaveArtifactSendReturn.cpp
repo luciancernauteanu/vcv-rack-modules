@@ -15,6 +15,7 @@
 #include "widgets/LinkedKnob.hpp"
 #include "widgets/ModeButton.hpp"
 #include "widgets/PanelLabels.hpp"
+#include "widgets/StepValueBars.hpp"
 
 struct WaveArtifactSendReturn : Module {
 	static const int ROWS = wa::NUM_MARKERS;
@@ -205,10 +206,21 @@ struct WaveArtifactSendReturnWidget : ModuleWidget {
 			modeButtons[r] = b;
 		}
 		addChild(createLightCentered<SmallLight<GreenLight>>(mm2px(Vec(W - 6.3f, 6.f)), module, WaveArtifactSendReturn::LINK_LIGHT));
+		// Trig locks on each row's SEND knob, as on the main panel: a dot in the knob (white where the selected step
+		// locks it) and, while a step of that row is selected, the value bar under it. Row r is artifact r.
+		stepBars = createWidget<StepValueBars>(Vec(0, 0));
+		stepBars->box.size = box.size;
+		stepBars->stripVertical = false;
+		for (int r = 0; r < WaveArtifactSendReturn::ROWS; r++) {
+			stepBars->controls.push_back(sendKnobs[r]);
+			stepBars->controlMarkers.push_back(r);
+		}
+		addChild(stepBars);
 	}
 
 	ParamWidget* sendKnobs[WaveArtifactSendReturn::ROWS] = {};
 	ParamWidget* modeButtons[WaveArtifactSendReturn::ROWS] = {};
+	StepValueBars* stepBars = nullptr;
 
 	/** Wave Artifacts on the left, directly or through expanders, or null */
 	Module* mainOnLeft() {
@@ -238,6 +250,8 @@ struct WaveArtifactSendReturnWidget : ModuleWidget {
 				ws[k]->setVisible(main != nullptr);
 			}
 		}
+		if (stepBars)
+			stepBars->module = (WaveArtifact*) main;
 		ModuleWidget::step();
 	}
 };

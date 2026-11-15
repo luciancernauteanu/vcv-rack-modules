@@ -50,6 +50,10 @@ static const Vec CUTOFF_KNOB = Vec(108.5f, ROW1_Y);
 static const Vec DRIVE_KNOB = Vec(124.5f, ROW1_Y);
 static const Vec RES_KNOB = Vec(108.5f, ROW2_Y);
 static const Vec FILTER_MODE_BUTTON = Vec(124.5f, ROW2_Y);
+/** The filter page (1 over 2: which filter CUT / RES / TYPE edit), in the filter section's left strip, centred between
+the knob rows, left of CUT and RES */
+static const Vec FILTER_PAGE_BUTTON = Vec(101.2f, (ROW1_Y + ROW2_Y) / 2.f);
+static const Vec FILTER_PAGE_SIZE = Vec(4.0f, 12.4f);
 // PITCH steps in semitones; the FREE button next to FINE switches it to continuous.
 static const Vec PITCH_KNOB = Vec(145.5f, ROW1_Y);
 static const Vec FINE_KNOB = Vec(140.7f, ROW2_Y);

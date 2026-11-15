@@ -24,6 +24,8 @@ struct PanelLabels : widget::Widget {
 		/** Shown on SAMPLE; `sameAsGrain` = the GRAIN text */
 		std::string sampleText;
 		bool sameAsGrain;
+		/** Shown while `pageParam` is on (the filter 2 page); empty = same text */
+		std::string pageText;
 	};
 	std::vector<Label> labels;
 	/** Module and the param that switches the engine (0 wavetable, 1 granular, 2 sample) */
@@ -32,19 +34,27 @@ struct PanelLabels : widget::Widget {
 	/** Or a flag set by the module (the expander learns the engine from the main module's message): granular or
 	sample, both shown with the GRAIN texts */
 	const std::atomic<bool>* grainFlag = nullptr;
+	/** The param of `module` that turns the page labels to their second text (the filter page), or -1 */
+	int pageParam = -1;
+
+	/** A label with a second text for the other page (CUT 1 / CUT 2) */
+	void addPaged(Vec mmPos, const std::string& text, const std::string& pageText, float size = 7.f) {
+		Label l{mmPos, text, size, false, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, "", size, "", true, pageText};
+		labels.push_back(l);
+	}
 
 	void add(Vec mmPos, const std::string& text, float size = 7.f, bool inverted = false, int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE) {
-		labels.push_back(Label{mmPos, text, size, inverted, align, "", size, "", true});
+		labels.push_back(Label{mmPos, text, size, inverted, align, "", size, "", true, ""});
 	}
 
 	/** A label whose text changes with the engine (grainSize 0 = same size). SAMPLE shows the GRAIN text. */
 	void addModal(Vec mmPos, const std::string& text, const std::string& grainText, float size = 7.f, float grainSize = 0.f) {
-		labels.push_back(Label{mmPos, text, size, false, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, grainText, grainSize > 0.f ? grainSize : size, "", true});
+		labels.push_back(Label{mmPos, text, size, false, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, grainText, grainSize > 0.f ? grainSize : size, "", true, ""});
 	}
 
 	/** Its own text on SAMPLE too (" " = none) */
 	void addModal3(Vec mmPos, const std::string& text, const std::string& grainText, const std::string& sampleText, float size = 7.f, float grainSize = 0.f) {
-		labels.push_back(Label{mmPos, text, size, false, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, grainText, grainSize > 0.f ? grainSize : size, sampleText, false});
+		labels.push_back(Label{mmPos, text, size, false, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, grainText, grainSize > 0.f ? grainSize : size, sampleText, false, ""});
 	}
 
 	/** 0 wavetable, 1 granular, 2 sample */
@@ -64,6 +74,7 @@ struct PanelLabels : widget::Widget {
 		NVGcolor normal = dark ? nvgRGB(0xe6, 0xe6, 0xe6) : nvgRGB(0x26, 0x28, 0x2c);
 		NVGcolor inverted = dark ? nvgRGB(0x26, 0x28, 0x2c) : nvgRGB(0xf2, 0xf2, 0xf2);
 		int engine = engineMode();
+		bool page2 = module && pageParam >= 0 && module->params[pageParam].getValue() > 0.5f;
 
 		nvgFontFaceId(args.vg, font->handle);
 		for (const Label& l : labels) {
@@ -75,6 +86,8 @@ struct PanelLabels : widget::Widget {
 				text = &grain;
 				size = l.grainSize;
 			}
+			if (page2 && !l.pageText.empty())
+				text = &l.pageText;
 			nvgFontSize(args.vg, size);
 			nvgTextAlign(args.vg, l.align);
 			nvgFillColor(args.vg, l.inverted ? inverted : normal);
