@@ -279,4 +279,85 @@ inline std::vector<long> findTransients(const SampleBuffer& S, float sensitivity
 	return out;
 }
 
+/** A hit's loudness: the peak of the sample (mono, level 0) over `frames` frames from `frame`, in dB (-200 for
+silence) */
+inline double hitPeakDb(const SampleBuffer& S, long frame, long frames) {
+	if (!S.valid())
+		return -200.0;
+	long a = std::max(frame, 0L), b = std::min(frame + std::max(frames, 1L), (long) S.frames);
+	float peak = 0.f;
+	for (long i = a; i < b; i++)
+		peak = std::max(peak, std::fabs(monoFrame(S, i)));
+	return peak > 1e-10f ? 20.0 * std::log10((double) peak) : -200.0;
+}
+
+/** Hop of the onset strength curve (about 5.8 ms at 44.1 kHz) */
+static const int ONSET_HOP = 256;
+
+/** The sample's onset strength, one value per ONSET_HOP frames: how much its level rose there, on the plain level and
+the top end's (where a hat's or a click's attack is), in dB, rises only. A slow average (1 s) is taken off, so a swell
+or a steady texture is not a pulse, and it is smoothed a little (about 12 ms), so a hit a few ms off the grid still
+counts. Loud attacks weigh more than soft shakes, which a list of hits cannot tell apart. For the tempo
+(LoopLayout.hpp). */
+inline std::vector<float> onsetStrength(const SampleBuffer& S) {
+	std::vector<float> env;
+	if (!S.valid() || S.frames < (size_t) (16 * ONSET_HOP))
+		return env;
+	long hops = (long) S.frames / ONSET_HOP;
+	std::vector<double> eb((size_t) hops), eh((size_t) hops);
+	float x1 = 0.f, x2 = 0.f;
+	double loudB = -400.0, loudH = -400.0;
+	for (long h = 0; h < hops; h++) {
+		double sb = 0.0, sh = 0.0;
+		for (long i = h * ONSET_HOP; i < (h + 1) * ONSET_HOP; i++) {
+			float x = monoFrame(S, i);
+			float d = x - 2.f * x1 + x2;
+			x2 = x1;
+			x1 = x;
+			sb += (double) x * x;
+			sh += (double) d * d;
+		}
+		eb[(size_t) h] = 10.0 * std::log10(sb / ONSET_HOP + 1e-14);
+		eh[(size_t) h] = 10.0 * std::log10(sh / ONSET_HOP + 1e-14);
+		loudB = std::max(loudB, eb[(size_t) h]);
+		loudH = std::max(loudH, eh[(size_t) h]);
+	}
+	// Nothing under 60 dB below the loudest counts (noise floors, reverb tails)
+	std::vector<double> flux((size_t) hops, 0.0);
+	for (long h = 1; h < hops; h++) {
+		double b0 = std::max(eb[(size_t) (h - 1)], loudB - 60.0), b1 = std::max(eb[(size_t) h], loudB - 60.0);
+		double h0 = std::max(eh[(size_t) (h - 1)], loudH - 60.0), h1 = std::max(eh[(size_t) h], loudH - 60.0);
+		flux[(size_t) h] = std::max(b1 - b0, 0.0) + std::max(h1 - h0, 0.0);
+	}
+	// Minus its 1 s average, rises only
+	long w = std::max(1L, (long) std::lround(0.5 * S.sampleRate / ONSET_HOP));
+	std::vector<double> prefix((size_t) hops + 1, 0.0);
+	for (long h = 0; h < hops; h++)
+		prefix[(size_t) h + 1] = prefix[(size_t) h] + flux[(size_t) h];
+	std::vector<double> rel((size_t) hops);
+	for (long h = 0; h < hops; h++) {
+		long a = std::max(0L, h - w), b = std::min(hops, h + w + 1);
+		double mean = (prefix[(size_t) b] - prefix[(size_t) a]) / (double) (b - a);
+		rel[(size_t) h] = std::max(flux[(size_t) h] - mean, 0.0);
+	}
+	// Smoothed: Gaussian, sigma about 12 ms
+	double sigma = std::max(0.5, 0.012 * S.sampleRate / ONSET_HOP);
+	int r = (int) std::ceil(3.0 * sigma);
+	std::vector<double> kern((size_t) (2 * r + 1));
+	double ks = 0.0;
+	for (int k = -r; k <= r; k++)
+		ks += kern[(size_t) (k + r)] = std::exp(-0.5 * k * k / (sigma * sigma));
+	env.assign((size_t) hops, 0.f);
+	for (long h = 0; h < hops; h++) {
+		double s = 0.0;
+		for (int k = -r; k <= r; k++) {
+			long j = h + k;
+			if (j >= 0 && j < hops)
+				s += kern[(size_t) (k + r)] * rel[(size_t) j];
+		}
+		env[(size_t) h] = (float) (s / ks);
+	}
+	return env;
+}
+
 } // namespace wa

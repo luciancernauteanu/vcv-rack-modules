@@ -610,11 +610,126 @@ static void testModEnvelope() {
 		s.put(wa::MOD_DEST_GAIN, -2.f);
 		s.put(99, 1.f); // out of range: ignored
 		std::printf("  depth x source: PITCH 0.5 -> %+.1f st, PAN -1 -> %+.1f, GAIN -2 -> x%.1f\n", s.add[wa::MOD_DEST_PITCH],
-			s.add[wa::MOD_DEST_PAN], s.gainMul());
-		CHECK(s.add[wa::MOD_DEST_PITCH] == 12.f && s.add[wa::MOD_DEST_PAN] == -2.f && s.gainMul() == 0.f, "destination scaling");
+			s.add[wa::MOD_DEST_PAN], s.gainLevel(1.f));
+		CHECK(s.add[wa::MOD_DEST_PITCH] == 12.f && s.add[wa::MOD_DEST_PAN] == -2.f && s.gainLevel(1.f) == 0.f, "destination scaling");
+	}
+	// GAIN adds to the knob: heard with the GAIN knob all the way down (it used to multiply it, so nothing moved)
+	{
+		wa::ModSum up, down;
+		up.put(wa::MOD_DEST_GAIN, 1.f);
+		down.put(wa::MOD_DEST_GAIN, -0.5f);
+		std::printf("  GAIN knob 0: +1 -> x%.2f, -0.5 -> x%.2f; knob 1: +1 -> x%.2f; knob 4: +1 -> x%.2f\n", up.gainLevel(0.f),
+			down.gainLevel(0.f), up.gainLevel(1.f), up.gainLevel(4.f));
+		CHECK(up.gainLevel(0.f) == 1.f && down.gainLevel(0.f) == 0.f && up.gainLevel(1.f) == 2.f && up.gainLevel(4.f) == 4.f,
+			"GAIN added to the knob");
 	}
 }
+/** PHASE (phaseOffset): 0 changes nothing; set, the periodic shapes run that far ahead of an unshifted twin, also when
+synced; a RESET starts there; turning it glides without a click; the random shapes ignore it. */
+static void testPhaseOffset() {
+	std::printf("phase offset: shifts the periodic shapes, starts there after a reset, glides when turned\n");
+	const float dt = 1.f / SR;
+	int period = (int) (SR * 0.5f); // 120 BPM
+	float knob = knobFor("1/4");
+	// 1. Offset 0 gives exactly the old output, every shape, free and synced
+	{
+		int differ = 0;
+		for (int shape = 0; shape < wa::NUM_LFO_SHAPES; shape++) {
+			for (int sync = 0; sync < 2; sync++) {
+				wa::ClockTracker clock;
+				wa::Lfo a, b;
+				a.seed(7);
+				b.seed(7);
+				for (int n = 0; n < (int) (2.f * SR); n++) {
+					clock.process((n % period < 48) ? 10.f : 0.f, true, SR);
+					float x = a.process(shape, sync, sync ? knob : 0.6f, true, true, clock, dt);
+					float y = b.process(shape, sync, sync ? knob : 0.6f, true, true, clock, dt, 0.f);
+					differ += x != y;
+				}
+			}
+		}
+		std::printf("  offset 0: %d samples differ from the old output (want 0)\n", differ);
+		CHECK(differ == 0, "offset 0 changed the output in %d samples", differ);
+	}
+	// 2. Set: synced, b = shape(phase of the unshifted twin + offset) on every sample (after the first)
+	for (int shape : {wa::LFO_SINE, wa::LFO_TRIANGLE, wa::LFO_SAW, wa::LFO_SQUARE}) {
+		wa::ClockTracker clock;
+		wa::Lfo a, b;
+		double worst = 0.0;
+		int squareMiss = 0;
+		for (int n = 0; n < (int) (3.f * SR); n++) {
+			clock.process((n % period < 48) ? 10.f : 0.f, true, SR);
+			double p = a.getPhase() + 0.25;
+			float want = wa::lfoShapeValue(shape, p - std::floor(p));
+			a.process(shape, true, knob, true, true, clock, dt);
+			float got = b.process(shape, true, knob, true, true, clock, dt, 0.25f);
+			// The square's edge may land a rounding away: count those, measure the rest
+			if (shape == wa::LFO_SQUARE && std::fabs(got - want) > 1.f)
+				squareMiss++;
+			else
+				worst = std::max(worst, (double) std::fabs(got - want));
+		}
+		std::printf("  %-8s synced, 90 deg: worst error vs the shifted twin %.2e (want < 1e-5)%s\n", wa::LFO_SHAPE_NAMES[shape], worst,
+			shape == wa::LFO_SQUARE ? (" , edges off by a rounding: " + std::to_string(squareMiss)).c_str() : "");
+		CHECK(worst < 1e-5, "%s: shifted output off by %f", wa::LFO_SHAPE_NAMES[shape], worst);
+		CHECK(squareMiss <= 4, "square: %d edges in the wrong place", squareMiss);
+	}
+	// 3. After a RESET a 90 deg sine starts at its top (+1), a 180 deg saw at its middle (0)
+	{
+		wa::ClockTracker clock;
+		wa::Lfo s, w;
+		for (int n = 0; n < 1000; n++) {
+			s.process(wa::LFO_SINE, false, 0.6f, true, true, clock, dt, 0.25f);
+			w.process(wa::LFO_SAW, false, 0.6f, true, true, clock, dt, 0.5f);
+		}
+		s.reset();
+		w.reset();
+		float s0 = s.process(wa::LFO_SINE, false, 0.6f, true, true, clock, dt, 0.25f);
+		float w0 = w.process(wa::LFO_SAW, false, 0.6f, true, true, clock, dt, 0.5f);
+		// A fresh LFO starts there too
+		wa::Lfo f;
+		float f0 = f.process(wa::LFO_SINE, false, 0.6f, true, true, clock, dt, 0.25f);
+		std::printf("  after reset: sine 90 deg starts at %.4f (want 1), saw 180 deg at %.4f (want 0); fresh sine 90 deg %.4f\n", s0, w0, f0);
+		CHECK(std::fabs(s0 - 1.f) < 1e-4f && std::fabs(w0) < 1e-4f && std::fabs(f0 - 1.f) < 1e-4f, "reset does not start at the phase");
+	}
+	// 4. Turning it (0 -> 180 deg at once, as a step lock does) glides: no click on a slow sine
+	{
+		wa::ClockTracker clock;
+		wa::Lfo l;
+		float prev = 0.f, worst = 0.f;
+		bool turned = false;
+		for (int n = 0; n < (int) (3.f * SR); n++) {
+			// Turned near a peak, where an instant jump would be largest (~2)
+			if (n > (int) (0.3f * SR) && std::fabs(prev) > 0.9f)
+				turned = true;
+			float off = turned ? 0.5f : 0.f;
+			float v = l.process(wa::LFO_SINE, false, 0.3f, true, true, clock, dt, off);
+			if (n > 0)
+				worst = std::max(worst, std::fabs(v - prev));
+			prev = v;
+		}
+		// The instant jump would be up to 2; a 1 Hz-ish sine alone moves ~1e-4 per sample
+		std::printf("  0 -> 180 deg at once: largest step %.4f per sample (an instant jump: up to 2; want < 0.05)\n", worst);
+		CHECK(worst < 0.05f, "phase change clicks: step %f", worst);
+	}
+	// 5. The random shapes ignore it (same seed, same output)
+	{
+		wa::ClockTracker clock;
+		wa::Lfo a, b;
+		a.seed(11);
+		b.seed(11);
+		int differ = 0;
+		for (int n = 0; n < (int) SR; n++) {
+			differ += a.process(wa::LFO_DRUNK, false, 0.7f, true, true, clock, dt) !=
+				b.process(wa::LFO_DRUNK, false, 0.7f, true, true, clock, dt, 0.4f);
+		}
+		std::printf("  drunk with 144 deg: %d samples differ (want 0)\n", differ);
+		CHECK(differ == 0, "random shape moved by the phase");
+	}
+}
+
 int main() {
+	testPhaseOffset();
 	testModEnvelope();
 	testLfoSmoother();
 	testInternalClock();

@@ -31,6 +31,16 @@ an artifact **RET** while its return replaces its filter.
 - The loop goes through one Rack cable, one sample late (0.02 ms).
 - SEND / RETURN replace the earlier ARTIFACT OUT jacks (separate outputs per artifact). Cables to those jacks are
   dropped when an old patch loads.
+- **Separate L / R jacks: wA SEND / RETURN.** For a stereo effect with two mono inputs and outputs (most reverbs and
+  delays), add *Wave Artifacts Send / Return* (right-click Wave Artifacts > *Add stereo send / return*, or from the
+  browser) at the end of the expander chain: right of the last expander, or right of Wave Artifacts when there is
+  none. One row per artifact: **SEND L, SEND R** (on the dark box) and **RET L, RET R**. It does what the main
+  panel's SEND / RETURN does: the returned sound takes the artifact's filter's place (the same crossfade, RET tag and
+  note envelope after it). Normalled as on hardware: with SEND R unpatched SEND L carries the whole voice (L + R),
+  and with RET R unpatched RET L feeds both sides, so a mono effect needs only the L jacks. When an artifact's RET L
+  is patched here, it wins over the main panel's RETURN for that artifact. The loop goes through the expanders'
+  links, so it is a few samples late: 3 next to Wave Artifacts, 2 more per expander in between (0.06 ms at 48 kHz).
+  Its light is on while it is linked; unlinked, it says where to put it.
 
 The plugin and module slugs stay `waveArtifact` and `waveArtifactExpander`, so patches saved
 with earlier builds still load.
@@ -51,7 +61,7 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
 
 1. **Add the module.** Right-click the rack, search for *Wave Artifacts* and add it.
 2. **Load a WAV.** Click the screen where it says *Load a WAV (max 10 MB)* (or the file line
-   at the bottom of the screen later on), or right-click the module and choose **Load WAV...**
+   at the bottom of the screen later on), or right-click the module and choose **Load WAV (main sample)...**
    Any WAV works: a voice, a pad, a field recording. The module analyses it for a moment and
    the file line then shows the name and the number of artifacts, e.g. `pad.wav  64 artifacts`.
    The **◀ ▶** arrows at the right end of the file line load the previous or next WAV in the
@@ -62,8 +72,6 @@ output. The smallest patch is just Wave Artifacts into **Audio**, which already 
    (C4 with the FREQ knob in the middle).
 5. **Add markers.** Click an empty spot on the marker bar (the line with the bullets) to add a
    marker there, up to five. Each new marker picks the artifact under that spot of the sample.
-   Or right-click the module and choose **⚠ Auto arrange artifacts → Auto arrange now** to
-   place all five evenly. It resets the artifacts you have set up, so it asks first.
 6. **Move through them.** Turn **POSITION**, or drag the white playhead on the bar. The sound
    crossfades between the two markers the playhead is between. Drag a bullet to move a marker.
 7. **Shape each marker.** Click a slot at the top of the screen (or a bullet) to select a
@@ -107,6 +115,27 @@ Useful to know:
   expanders snapped on to the right.
 - To give each artifact its own filter or effect, patch its **SEND** through the module into its **RETURN**
   (right column, one row per artifact).
+
+## One sample per artifact
+
+Every artifact plays the **main sample** (the one loaded on the screen) until you give it its own: up to five
+different WAVs at once, one per artifact, on every engine and in every play mode.
+
+- **Load one:** right-click the artifact's slot on the screen and choose **Load a sample for it...** (or right-click
+  the module: **Artifact samples > Artifact N**). The slot then shows a **WAV** tag. **Use the main sample** gives it
+  back the main one; *Previous / Next WAV in its folder* step through its folder.
+- **The screen follows the selected artifact:** with an artifact selected that has its own file, the map, the hits,
+  the file line and its ◀ ▶ arrows are that file's, and clicking the file line loads into that artifact. Only the
+  markers on the shown file appear on the map.
+- **WAVE:** each artifact's WAVE picks a table of its own file; MORPH glides from one file's timbre into the
+  other's. **GRAIN / SAMPLE:** each cloud reads its own file, and START, LENGTH, LOOP POINT and HIT are in that file
+  (a slice ends at the next START *on the same file*). **POLY, STEP, ALL** play each artifact's note from its file;
+  in **SEQ** each row plays its artifact's file (a small kit: kick, snare, hat ...).
+- **Loading while it plays:** only that artifact fades out (5 ms) and back in on the new file; the others keep
+  playing. Loading the main sample fades everything, as before.
+- **Saved with the patch:** each file is copied into the patch's folder like the main one, so the project opens
+  without the originals. *Artifact count* and *Artifact tone* apply to every file (changing them analyses each one
+  again). *Spread the markers over the transients* uses each artifact's own file.
 
 ## Play modes: MORPH and POLY
 
@@ -170,7 +199,16 @@ Then press PLAY until it shows **SEQ**. SEQ plays nothing until a sequencer is s
   module's clock for that row: /8 /4 /3 /2 | x1 | x2 x3 x4 x8, where x1 is a step per beat (quarter note), the
   default x4 gives 16th notes, and /2 a step every two beats. Rows at different speeds drift against each other.
 - **Length per row:** Ctrl + click a step to end that row there (1 to 16), or use the right-click menu; rows of
-  different lengths drift against each other (polyrhythms). Steps past the end are shown dimmed.
+  different lengths drift against each other (polyrhythms). Steps past the end are shown dimmed. The length shows
+  next to the row's number, left of its CLOCK knob.
+- **LAY and RND (SAMPLE and GRAIN), under each row's number:** **LAY** lays the marker's loop out on its row, a trig on each
+  hit (the guessed length; see *Lay out the loop on the row* in the SAMPLE section); right-click it for every step and
+  the other lengths. **RND** gives the row's trigs random slices of that loop: each gets the START of one of the
+  slices LAY makes and a LENGTH up to the row's next trig, so the rhythm, velocities and conditions stay and only
+  what plays is shuffled. Step 1 always stays (the downbeat). How many trigs change: the **RND amount slider** at the
+  top right (100 %: all of them). To change only some, **Ctrl + Shift + click** steps (or Ctrl + Shift + drag along a row) to mark them
+  (corner brackets; RND is outlined then); a plain click anywhere on the grid clears the marks. Both are undone with
+  Ctrl + Z, and are dimmed when they cannot act (not SAMPLE, the marker off, or no Wave Artifacts on the right).
 - **A row whose marker is off** is dimmed and plays nothing (no trigs, its GATE closed, its MOD at 0 V), but keeps
   time: turn the marker on again and the row comes in on the right step. Its steps can still be edited.
 - **Copy / paste a trig:** with the mouse over a trig (or a trig selected), **Ctrl + C** copies its velocity, locks,
@@ -229,7 +267,8 @@ has none. Expander CV and the LFOs still move a locked value. Locks only play in
   without a lock show the knob's value, so you see which steps a knob move changes. Unipolar settings fill from the
   bottom, bipolar ones such as PAN or PITCH from the middle. Click its name on the left to pick another. Drag over the steps to draw their locks at the mouse height, click a
   locked bar to remove that lock, and hold Shift and drag to remove the locks you pass. Steps without a lock show the
-  knob's value as a thin grey line. Only steps that are on take locks.
+  knob's value as a thin grey line. Only steps that are on take locks, and only inside the row's length: the steps
+  past its end are dimmed and a drag stops at its last step (conditions too).
 - **Knob feedback:** while you hold a knob with a step selected, the knob shows the step's value and its ring turns
   white (a dot in the marker's color marks the knob's own value). Let go and it shows its own value again.
 - **Live record (REC, top left):** turn REC on and select a step of a row. While the pattern plays, holding or turning
@@ -374,7 +413,9 @@ another step sounds exactly like the original, wherever it lands on the beat. A 
 one's release crossfades: the old grains fade out as the new note's fade in (5 ms), so a trig over a
 sounding note has no burst of noise; the new cloud starts as a running one would be, every grain part
 way through and reading on by its age (Smear too: started on one place there, its grains made a loud,
-phasey onset). Off: grains and
+phasey onset). With a free SCAN, those grains also started where the scan was then, so a cloud scanning at real time
+starts on exactly the sample, its grains adding up as it does (before, they read ahead of the scan and partly
+cancelled for the first grain's length). Off: grains and
 a synced SCAN stay locked to the beat grid, so equal trigs on different steps sound different.
 
 Pitch: 0 V plays the sample at its original speed; V/OCT, PITCH and the expander's V/OCT transpose
@@ -444,6 +485,61 @@ default 1 ms): a note that starts in the middle of a sound can still tick even o
 with full level; a longer fade-in (read from just before START) removes that tick. A hit gets softer with a long one. **Spread the markers over the transients** (right-click) puts the active markers'
 STARTs on transients spread evenly over the sample: a quick way to chop a loop across the sequencer rows.
 
+**Lay out the loop on the row** (the row's **LAY** button, or right-click a sequencer row, or a marker on the bar or
+the map; SAMPLE or GRAIN, with the sequencer on the left) turns the marker's slice (START up to its LENGTH or the next marker;
+in BEAT / FIT up to the next marker) into its row of trigs. To lay out only a part of a long file (a bar of a whole
+song), **Shift + drag across the waveform on the map**: a band in the selected marker's color follows the mouse with
+its length (*LAY: 2 bars · 8 beats @ 123 bpm*). The press snaps to the nearest hit (within 3 % of the map), and the
+length snaps to 1, 2, 4 … beats at the file's tempo (found in the audio, see below), so the part always fits a row;
+when the audio has no clear beat it is the drag as it is (dragging left, the part ends where you pressed). Letting go sets the marker's START and LENGTH to
+that part (and FREE, so LENGTH is that time); one Ctrl + Z undoes it. Then press **LAY**. The part stays on the map
+as the marker's slice, and START, LENGTH and the map's handles still fine-tune it. The menu shows the part it takes,
+in seconds; a part too long for a row (a whole song) says so and points to Shift + drag.
+Pressing play then gives the loop back as it is, in pieces you can edit: delete
+trigs, give them conditions, record random STARTs, add slide.
+
+**The tempo is found in the audio; the file name is not needed.** The module measures the sample's onset strength
+(how much its level jumps every 6 ms, on the whole level and on the top end, so loud attacks count more than soft
+shakes). A loop lasts a whole number of beats, so each count of beats between 60 and 200 bpm is scored by how much
+stronger the attacks are on its grid (beats, 8ths and 16ths, or swung 8ths) than on average, and the best wins. For a
+long file (a song), the curve's own repeats give a few candidate tempos, and a beat grid slid along the file picks
+the exact one (about 0.1 bpm). 70 and 140 bpm fit the same loop: the one nearest the module's tempo is taken, so
+the layout plays nearest to how it sounds. A tempo in the file name (`RainShake-70bpm.wav`) only confirms it (the menu
+says *as its name says*); it is used alone when the audio has no clear beat and it makes the loop whole beats, and
+without either the module's tempo guesses the length. The menu shows the tempo and where it came from, and offers
+the other lengths. On test files with their names hidden (a shaker loop, drum breaks, hats, toms, percussion, a
+flute phrase and a 74 s song) every tempo was found (up to half / double); a drone was reported as having no beat.
+
+The row gets the finest clock that fits the loop in 16 steps (1 bar: 16 steps x4; 2 bars: x2; 4 bars: x1) and that many steps. Two ways:
+- **On the hits:** a trig on the step nearest each hit (of several on one step, the one nearest it; the others play
+  inside its slice), its START locked exactly on the hit, and step 1 always from the loop's start. The hits come
+  from the HITS slider. Hits off the beat are played on it, so a swung loop comes out straight.
+- **On every step:** each step plays its own share of the loop, which keeps the loop's own timing exactly (best
+  when the hits are not found well: pads, noise).
+
+**Each trig's velocity comes from its hit**: the sample's peak in the 30 ms after it, against the loop's loudest
+hit. The loudest gets 100 %, and the others less, straight in dB down to 30 % at 30 dB under (12 dB under: 72 %), so
+the loop's accents and ghost notes show in the row, on the sequencer's MOD output and wherever velocity is used. It is
+gentle on purpose: velocity also scales the level (and opens the filter) as the trig plays, and a soft hit is already
+soft in the sample, so it only comes out a little softer still (12 dB under: about 3 dB more).
+Each trig's LENGTH is locked to the gap up to the next trig, and the marker is set to play each slice once up to
+the next trig: FREE, ONE, HIT off (the STARTs are exact already), ATTACK at its shortest, SUSTAIN full, HOLD at the
+top (on until the next trig), and PLAY goes to SEQ. At another tempo each slice still plays at its own speed: slower
+leaves short gaps, faster cuts each slice with the next (like REX loops). It replaces the row's trigs; one Ctrl + Z
+undoes it all.
+
+**On GRAIN, LAY plays the sample as it is too**, through grains: the same trigs, STARTs and velocities, and the
+marker's grains are set to rebuild the sample exactly. The cloud reads through each slice at real time (SCAN +1 x,
+free), with no randomness (SPRAY, P.SPRD and SPREAD at 0, forward, KEEP off), in Tukey grains of 100 ms, one every
+75 ms: each grain's fade out lies exactly over the next one's fade in, so they sum flat, at the sample's own level.
+GRAIN has no "once" at a slice's end (the scan would loop back), so there each trig's HOLD is locked to its slice's
+time (RELEASE at its shortest, 5 ms, as SAMPLE's notes fade when cut), LENGTH is a quarter longer, the scan FADE is
+0, and NOTE RESTART stays on. Played at the loop's tempo, a laid-out row on GRAIN matches the same row on SAMPLE (a
+break, a shaker and toms: correlation 0.99 to 1.00, level within 0.4 dB), and costs less (13 grains a second: 0.8 µs
+a sample for one row against SAMPLE's 1.0). From there, turn the grain knobs to make it grainy: DENSITY, SIZE,
+SPRAY, WINDOW, P.SPRD, or KEEP and PITCH to change the pitch without changing the loop's timing. RND gives GRAIN's
+slices their HOLD too.
+
 On the expander the four CV inputs start on START, LENGTH, LOOP POINT and CUTOFF (click a name to pick another knob;
 LENGTH by CV steps through the note values in BEAT).
 
@@ -508,7 +604,8 @@ From the top of the panel down:
   It also comes out of its jack at +-10 V times **AMT**: patch it anywhere, including the expander's own CV
   inputs.
 - **DEPTH at 100%** moves WAVE / START, CUTOFF, RES and DRIVE across their whole range, PAN from one side
-  to the other, PITCH by 2 octaves, and GAIN from silent to x2 (+6 dB). Both start at 0: nothing moves
+  to the other, PITCH by 2 octaves, and GAIN by the GAIN knob's whole 0 dB (added to the knob: at 0 dB, from silent to
+  x2 = +6 dB; with GAIN all the way down, the LFO / AD alone opens it up to 0 dB). Both start at 0: nothing moves
   until you turn them up.
 
 **Trig locks (SEQ, Elektron style).** The LFO and AD are the marker's own settings (they live in Wave

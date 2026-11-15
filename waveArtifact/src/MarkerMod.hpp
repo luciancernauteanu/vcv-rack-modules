@@ -28,8 +28,8 @@ static const char* const MOD_DEST_SHORT_GRAIN[NUM_MOD_DESTS] = {"START", "GAIN",
 static const char* const MOD_DEST_SHORT_SAMPLE[NUM_MOD_DESTS] = {"START", "GAIN", "CUTOFF", "RES", "DRIVE", "PITCH", "PAN"};
 
 /** How far each destination moves at DEPTH 100% and a full source (LFO at +-1, AD at 1), in its own units: the whole
-range of WAVE, CUTOFF (20 Hz .. 20 kHz), RES and DRIVE, PAN from one side to the other, PITCH 2 octaves. GAIN is a
-level: x(1 + amount), so 0 .. x2 (+6 dB). */
+range of WAVE, CUTOFF (20 Hz .. 20 kHz), RES and DRIVE, PAN from one side to the other, PITCH 2 octaves. GAIN adds
+to the GAIN knob's level (1 = 0 dB): at the default 0 dB, 0 .. x2 (+6 dB); with the knob at silent, up to 0 dB. */
 static const float MOD_DEST_RANGE[NUM_MOD_DESTS] = {1.f, 1.f, 1.f, 1.f, 1.f, 24.f, 2.f};
 
 /** What the LFO and the AD add to each destination this sample (amount = depth x source, -1..1 each) */
@@ -40,9 +40,11 @@ struct ModSum {
 		if (dest >= 0 && dest < NUM_MOD_DESTS)
 			add[dest] += amount * MOD_DEST_RANGE[dest];
 	}
-	/** GAIN: a level multiplier, 0 .. 2 */
-	float gainMul() const {
-		return std::min(std::max(1.f + add[MOD_DEST_GAIN], 0.f), 2.f);
+	/** GAIN: the level with the GAIN knob at `knob` (a level, 0 .. GAIN_LEVEL_MAX). Added, not multiplied, so the
+	LFO / AD is heard even with the knob all the way down. */
+	static constexpr float GAIN_LEVEL_MAX = 4.f;
+	float gainLevel(float knob) const {
+		return std::min(std::max(knob + add[MOD_DEST_GAIN], 0.f), GAIN_LEVEL_MAX);
 	}
 };
 

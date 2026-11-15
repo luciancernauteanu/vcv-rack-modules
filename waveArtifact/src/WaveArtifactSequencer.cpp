@@ -160,6 +160,14 @@ void WaveArtifactSequencer::tickRow(int r) {
 			played = true;
 		}
 	}
+	else if (isPhantom(r, p) && wa::conditionPasses(stepData[r][p], std::max(pass[r], 0L), random01())) {
+		// A phantom lock: its locks (those whose own condition passes) on top of what plays, with its slide. No note.
+		const wa::StepData& s = stepData[r][p];
+		wa::StepData own = s;
+		wa::applyLockConditions(own, s, std::max(pass[r], 0L), [this]() { return random01(); });
+		lastStep[r] = wa::mergeLocks(lastStep[r], own);
+		lockFires[r]++;
+	}
 	groupPlaying[r] = played;
 	gateHigh[r] = played;
 	// MOD: the step's own velocity (a tied step's too, so a long note can carry a moving CV), gliding with its slide.
@@ -238,6 +246,7 @@ void WaveArtifactSequencer::process(const ProcessArgs& args) {
 	out->linked = true;
 	for (int r = 0; r < ROWS; r++) {
 		out->fireCount[r] = fires[r];
+		out->lockCount[r] = lockFires[r];
 		out->velocity[r] = lastVelocity[r];
 		std::memcpy(out->lockValue[r], lastStep[r].value, sizeof(out->lockValue[r]));
 		out->lockMask[r] = lastStep[r].mask;
@@ -294,7 +303,7 @@ json_t* WaveArtifactSequencer::dataToJson() {
 				if (d.mask & d.condMask) {
 					json_t* conds = json_object();
 					for (int k = 0; k < wa::NUM_LOCKABLE; k++) {
-						if (!d.locked(k) || !((d.condMask >> k) & 1u))
+						if (!d.locked(k) || !d.condMask.test(k))
 							continue;
 						const wa::Condition& c = d.lockCond[k];
 						json_t* cj = json_object();
@@ -325,6 +334,8 @@ json_t* WaveArtifactSequencer::dataToJson() {
 	json_object_set_new(root, "laneRow", json_integer(laneRow));
 	json_object_set_new(root, "laneSetting", json_string(wa::LOCK_NAMES[clamp(laneSetting, 0, wa::NUM_LOCKABLE - 1)]));
 	json_object_set_new(root, "laneCondition", json_boolean(laneCondition));
+	// Locks on an unlit step are phantom locks (they play) from here on; older patches never meant them to
+	json_object_set_new(root, "phantomLocks", json_true());
 	return root;
 }
 
@@ -417,6 +428,13 @@ void WaveArtifactSequencer::dataFromJson(json_t* root) {
 			laneSetting = k;
 	}
 	laneCondition = json_is_true(json_object_get(root, "laneCondition"));
+	// A patch from before phantom locks: any locks left on an unlit step were not meant to play
+	if (!json_object_get(root, "phantomLocks")) {
+		for (int r = 0; r < ROWS; r++)
+			for (int s = 0; s < STEPS; s++)
+				if (velocity[r][s] <= 0.f)
+					stepData[r][s].clear();
+	}
 }
 
 // Panel: 32 HP. Geometry matches res/waveArtifactSequencer.svg.
@@ -462,9 +480,19 @@ static const Vec COND_CLR_SIZE = Vec(7.f, 4.f);
 static const float TITLE_X = 84.f;
 /** Accent of the COND controls (warm, apart from the locks' blue) */
 static const NVGcolor COND_COLOR = nvgRGB(0xff, 0xc4, 0x6b);
+/** Phantom (trigless) locks: a clear yellow, apart from COND's warm orange */
+static const NVGcolor PHANTOM_COLOR = nvgRGB(0xf5, 0xe6, 0x2a);
 /** Shift arrows of each row, stacked between the CLOCK knob and the first step: ◀ on top, ▶ below */
 static const float SHIFT_X0 = 19.2f, SHIFT_W = 4.0f, SHIFT_H = 5.0f;
 static const float SHIFT_LEFT_DY = 1.0f, SHIFT_RIGHT_DY = 6.8f;
+/** Row header, left of the CLOCK knob: the marker's number on a small chip with the row length beside it, and
+under them LAY (lay out the loop on the row) and RND (random slices) */
+static const float CHIP_X = 3.6f, CHIP_DY = 2.8f, CHIP_R = 2.0f;
+static const float LEN_X = 9.2f;
+static const float HEAD_BTN_X0 = 1.3f, HEAD_BTN_W = 5.1f, HEAD_BTN_GAP = 0.6f, HEAD_BTN_DY = 6.5f, HEAD_BTN_H = 4.6f;
+inline float headButtonX(int b) {
+	return HEAD_BTN_X0 + b * (HEAD_BTN_W + HEAD_BTN_GAP);
+}
 /** SLIDE strip under each lit trig, apart from its cell (SLIDE_DY below it): drag right for more slide (left end =
 off). The cell above stays all velocity. */
 static const float SLIDE_DY = 0.5f, SLIDE_H = 2.0f;
@@ -611,6 +639,9 @@ static void appendRowMenu(ui::Menu* menu, WaveArtifactSequencer* m, int r) {
 				m->stepData[r][s].clear();
 		}
 	}));
+	// SAMPLE: the marker's loop as trigs on this row, each starting on a hit (the main module adds the undo entry)
+	if (WaveArtifact* main = mainOf(m))
+		main->appendLoopLayoutMenu(menu, r);
 	menu->addChild(createMenuItem("Clear locks in this row", "", [=]() {
 		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
 			m->stepData[r][s].clearLocks();
@@ -771,6 +802,7 @@ struct StepGrid : widget::OpaqueWidget {
 		return gapNear(p, TIE_R + 0.4f, row, s, &on) && on;
 	}
 	void onHover(const HoverEvent& e) override {
+		updateHeadTip(e.pos);
 		if (!gapNear(e.pos, TIE_HOVER_MM, &hoverRow, &hoverGap, &hoverOnHandle)) {
 			hoverRow = hoverGap = -1;
 			hoverOnHandle = false;
@@ -778,6 +810,7 @@ struct StepGrid : widget::OpaqueWidget {
 		OpaqueWidget::onHover(e);
 	}
 	void onLeave(const LeaveEvent& e) override {
+		hideHeadTip();
 		hoverRow = hoverGap = -1;
 		hoverOnHandle = false;
 		OpaqueWidget::onLeave(e);
@@ -794,7 +827,8 @@ struct StepGrid : widget::OpaqueWidget {
 			if (y <= top || y > seqlayout::slideTop(r) + seqlayout::SLIDE_H + 0.7f)
 				continue;
 			int c = (int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW());
-			if (c < 0 || c >= WaveArtifactSequencer::STEPS || module->velocity[r][c] <= 0.f)
+			// A trig, or a phantom lock (its slide glides its locks in)
+			if (c < 0 || c >= WaveArtifactSequencer::STEPS || !module->hasStep(r, c))
 				return false;
 			*row = r;
 			*col = c;
@@ -822,6 +856,29 @@ struct StepGrid : widget::OpaqueWidget {
 		pressOnSlide = false;
 		int r = -1, c = -1;
 		bool onCell = cellAt(e.pos, &r, &c);
+		// A row's LAY / RND buttons (left of its CLOCK knob)
+		int hr, hb;
+		if ((e.button == GLFW_MOUSE_BUTTON_LEFT || e.button == GLFW_MOUSE_BUTTON_RIGHT) && headButtonAt(e.pos, &hr, &hb)) {
+			pressHeadButton(hr, hb, e.button);
+			pressRow = pressCol = -1;
+			e.consume(this);
+			return;
+		}
+		// Ctrl + Shift + click / drag: mark steps for RND (a click toggles one; a drag gives the steps passed the same)
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == (RACK_MOD_CTRL | GLFW_MOD_SHIFT)) {
+			if (onCell) {
+				markValue = !module->marked[r][c];
+				module->marked[r][c] = markValue;
+				markRow = r;
+				markCol = c;
+			}
+			pressRow = pressCol = -1;
+			e.consume(this);
+			return;
+		}
+		// Any other left click ends the marking
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT)
+			module->clearMarks();
 		// A row's shift arrows: its trigs (and everything on them) one step left or right
 		int arrowRow, arrowDir;
 		if (e.button == GLFW_MOUSE_BUTTON_LEFT && arrowAt(e.pos, &arrowRow, &arrowDir)) {
@@ -899,6 +956,9 @@ struct StepGrid : widget::OpaqueWidget {
 		}
 		dragRow = r;
 		dragCol = c;
+		for (bool& t : touched)
+			t = false;
+		touched[c] = true;
 		pressY = e.pos.y;
 		moved = false;
 		erasing = (e.mods & RACK_MOD_MASK) == GLFW_MOD_SHIFT;
@@ -917,6 +977,105 @@ struct StepGrid : widget::OpaqueWidget {
 			selectStep(module, r, c);
 		}
 		e.consume(this);
+	}
+
+	/** The steps the velocity drag has touched (only those can end up deleted when it ends) */
+	bool touched[WaveArtifactSequencer::STEPS] = {};
+	/** A Ctrl + Shift drag marking steps: its row, the step it is on, and what the steps passed get */
+	int markRow = -1, markCol = -1;
+	bool markValue = false;
+
+	/** The press (panel pixels) is on a row's LAY (b = 0) or RND (b = 1) */
+	bool headButtonAt(Vec p, int* row, int* b) {
+		float x = p.x / SVG_DPI * MM_PER_IN, y = p.y / SVG_DPI * MM_PER_IN;
+		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
+			float y0 = seqlayout::rowTop(r) + seqlayout::HEAD_BTN_DY;
+			if (y < y0 || y > y0 + seqlayout::HEAD_BTN_H)
+				continue;
+			for (int k = 0; k < 2; k++) {
+				float x0 = seqlayout::headButtonX(k);
+				if (x >= x0 && x <= x0 + seqlayout::HEAD_BTN_W) {
+					*row = r;
+					*b = k;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/** LAY: click lays out the marker's loop on its hits (the guessed length); right-click (or when it cannot) shows
+	the layout's menu. RND: click gives the row's trigs (the marked ones, if any) random slices; right-click (or when
+	nothing changed) says how it works. */
+	void pressHeadButton(int r, int b, int button) {
+		WaveArtifactSequencer* m = module;
+		WaveArtifact* main = mainOf(m);
+		if (b == 0) {
+			if (button == GLFW_MOUSE_BUTTON_LEFT && main && main->layoutLoopWithUndo(r, 0, false)) {
+				m->clearMarks();
+				return;
+			}
+			ui::Menu* menu = createMenu();
+			menu->addChild(createMenuLabel(string::f("LAY: marker %d's loop on row %d", r + 1, r + 1)));
+			if (main)
+				main->appendLoopLayoutItems(menu, r);
+			else
+				menu->addChild(createMenuLabel("Needs Wave Artifacts on the right"));
+			return;
+		}
+		bool only = m->anyMarked(r);
+		float amount = clamp(m->params[WaveArtifactSequencer::RND_AMOUNT_PARAM].getValue(), 0.f, 1.f);
+		if (button == GLFW_MOUSE_BUTTON_LEFT && main) {
+			bool done = false;
+			undoable(m, "random slices", [&]() { return done = main->randomizeSlices(r, only ? m->marked[r] : nullptr, amount); });
+			if (done)
+				return;
+		}
+		ui::Menu* menu = createMenu();
+		menu->addChild(createMenuLabel(string::f("RND: random slices on row %d", r + 1)));
+		std::string why = main ? main->loopLayoutInfo(r).why : "Needs Wave Artifacts on the right";
+		if (!why.empty())
+			menu->addChild(createMenuLabel(why));
+		menu->addChild(createMenuLabel("Each trig gets a random slice of the marker's loop (the ones LAY makes),"));
+		menu->addChild(createMenuLabel("playing up to the next trig. Step 1 stays; rhythm and velocities stay."));
+		menu->addChild(createMenuLabel(string::f("How many: the RND amount slider, top right (now %.0f %%)", amount * 100.f)));
+		menu->addChild(createMenuLabel(only ? "Only the marked steps (Ctrl + Shift + click / drag marks steps)" : "Every trig of the row (Ctrl + Shift + click / drag: only some)"));
+		if (only)
+			menu->addChild(createMenuItem("Clear the marks", "", [=]() { m->clearMarks(); }));
+	}
+
+	/** Tooltip over a LAY / RND button */
+	ui::Tooltip* headTip = nullptr;
+	int headTipKey = -1;
+	void updateHeadTip(Vec pos) {
+		int r, b;
+		int key = headButtonAt(pos, &r, &b) ? r * 2 + b : -1;
+		if (key == headTipKey)
+			return;
+		hideHeadTip();
+		headTipKey = key;
+		if (key < 0 || !settings::tooltips)
+			return;
+		headTip = new ui::Tooltip;
+		headTip->text = (b == 0)
+			? "LAY: lay out the marker's loop on this row, a trig on each hit\n(the loop: START to LENGTH, or to the next marker;\nShift + drag on the map picks a part, in whole bars)\nRight-click: on every step, other lengths"
+			: "RND: a random slice on each trig of the row (step 1 stays)\nHow many: the RND amount slider, top right\nCtrl + Shift + click / drag: mark steps, then RND changes only them";
+		APP->scene->addChild(headTip);
+	}
+	void hideHeadTip() {
+		if (headTip) {
+			APP->scene->removeChild(headTip);
+			delete headTip;
+			headTip = nullptr;
+		}
+		headTipKey = -1;
+	}
+	void onHide(const HideEvent& e) override {
+		hideHeadTip();
+		OpaqueWidget::onHide(e);
+	}
+	~StepGrid() {
+		hideHeadTip();
 	}
 
 	/** The press (panel pixels) is on a row's ◀ (dir -1) or ▶ (dir 1) */
@@ -986,6 +1145,17 @@ struct StepGrid : widget::OpaqueWidget {
 		if (!module || e.button != GLFW_MOUSE_BUTTON_LEFT)
 			return;
 		Vec local = mouseOverride ? mouseAt : APP->scene->getMousePos().minus(getAbsoluteOffset(Vec(0, 0))).div(getAbsoluteZoom());
+		// Ctrl + Shift drag: the steps passed in the row get the first one's mark
+		if (markRow >= 0) {
+			float mx = local.x / SVG_DPI * MM_PER_IN;
+			int col = clamp((int) std::floor((mx - seqlayout::GRID_X0) / seqlayout::cellW()), 0, WaveArtifactSequencer::STEPS - 1);
+			int dir = (col > markCol) ? 1 : -1;
+			while (markCol != col) {
+				markCol += dir;
+				module->marked[markRow][markCol] = markValue;
+			}
+			return;
+		}
 		if (slideRow >= 0) {
 			module->stepData[slideRow][slideCol].slide = slideAt(slideCol, local.x);
 			return;
@@ -1001,6 +1171,7 @@ struct StepGrid : widget::OpaqueWidget {
 		while (dragCol != col) {
 			dragCol += step;
 			moved = true;
+			touched[dragCol] = true;
 			if (erasing)
 				module->deleteStep(dragRow, dragCol);
 			else
@@ -1012,14 +1183,15 @@ struct StepGrid : widget::OpaqueWidget {
 
 	void onDragEnd(const DragEndEvent& e) override {
 		// Steps dragged down to off lose their locks, condition and slide now (kept during the drag, so dragging back
-		// up brings a step back whole).
+		// up brings a step back whole). Only the steps this drag touched: the row's phantom locks elsewhere stay.
 		if (module && dragRow >= 0) {
 			for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
-				if (module->velocity[dragRow][s] <= 0.f)
+				if (touched[s] && module->velocity[dragRow][s] <= 0.f)
 					module->deleteStep(dragRow, s);
 		}
 		dragRow = dragCol = -1;
 		slideRow = slideCol = -1;
+		markRow = markCol = -1;
 		erasing = false;
 	}
 
@@ -1062,13 +1234,23 @@ struct StepGrid : widget::OpaqueWidget {
 					nvgFillColor(vg, nvgRGBAf(0.f, 0.f, 0.f, dark ? 0.45f : 0.3f));
 					nvgFill(vg);
 				}
-				if (module && v > 0.f) {
+				// A phantom (trigless) lock: no trig, only locks: a yellow outline (and a yellow lock dot below)
+				bool phantom = module && v <= 0.f && module->isPhantom(r, s);
+				if (phantom) {
+					nvgBeginPath(vg);
+					nvgRoundedRect(vg, cx + 0.6f, cy + 0.6f, cwPx - 1.2f, chPx - 1.2f, 1.2f);
+					nvgStrokeColor(vg, nvgTransRGBAf(seqlayout::PHANTOM_COLOR, inside ? 1.f : 0.3f));
+					nvgStrokeWidth(vg, 1.2f);
+					nvgStroke(vg);
+				}
+				if (module && (v > 0.f || phantom)) {
 					const wa::StepData& d = module->stepData[r][s];
-					// Locks: a dot in the top corner. Slide: a slash in the other. Condition: its text at the bottom.
+					// Locks: a dot in the top corner (yellow on a phantom lock). Slide: a slash in the other. Condition:
+					// its text at the bottom.
 					if (d.mask) {
 						nvgBeginPath(vg);
 						nvgCircle(vg, cx + cwPx - 3.2f, cy + 3.2f, 1.9f);
-						nvgFillColor(vg, nvgRGB(0xff, 0xff, 0xff));
+						nvgFillColor(vg, phantom ? seqlayout::PHANTOM_COLOR : nvgRGB(0xff, 0xff, 0xff));
 						nvgFill(vg);
 						nvgStrokeColor(vg, nvgRGB(0x16, 0x18, 0x22));
 						nvgStrokeWidth(vg, 0.7f);
@@ -1153,6 +1335,26 @@ struct StepGrid : widget::OpaqueWidget {
 					nvgStrokeWidth(vg, 2.2f);
 					nvgStroke(vg);
 				}
+				// Marked for RND (Ctrl + Shift + click / drag): corner brackets in the row's color
+				if (module && module->marked[r][s]) {
+					float x0 = cx - 0.6f, y0 = cy - 0.6f, x1 = cx + cwPx + 0.6f, y1 = cy + chPx + 0.6f, k = std::min(cwPx, chPx) * 0.3f;
+					nvgBeginPath(vg);
+					nvgMoveTo(vg, x0, y0 + k);
+					nvgLineTo(vg, x0, y0);
+					nvgLineTo(vg, x0 + k, y0);
+					nvgMoveTo(vg, x1 - k, y0);
+					nvgLineTo(vg, x1, y0);
+					nvgLineTo(vg, x1, y0 + k);
+					nvgMoveTo(vg, x1, y1 - k);
+					nvgLineTo(vg, x1, y1);
+					nvgLineTo(vg, x1 - k, y1);
+					nvgMoveTo(vg, x0 + k, y1);
+					nvgLineTo(vg, x0, y1);
+					nvgLineTo(vg, x0, y1 - k);
+					nvgStrokeColor(vg, dark ? nvgRGB(0xff, 0xff, 0xff) : nvgRGB(0x16, 0x18, 0x22));
+					nvgStrokeWidth(vg, 1.8f);
+					nvgStroke(vg);
+				}
 			}
 			// TIE handle, on hover between two lit trigs of this row: + ties them, − unties them
 			if (module && hoverRow == r && tieHandleUsable(r, hoverGap)) {
@@ -1218,7 +1420,7 @@ struct LockLane : widget::OpaqueWidget {
 		float v = q->getMinValue() + t * (q->getMaxValue() - q->getMinValue());
 		int k = clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1);
 		WaveArtifact* main = mainOf(module);
-		bool choice = main && (main->lockJumpMask >> k & 1u);
+		bool choice = main && main->lockJumpMask.test(k);
 		return (choice || q->snapEnabled) ? std::round(v) : v;
 	}
 
@@ -1230,16 +1432,35 @@ struct LockLane : widget::OpaqueWidget {
 		menu->addChild(new MenuSeparator);
 		struct Group {
 			const char* name;
-			int from, to;
+			std::vector<int> keys;
 		};
-		// Index ranges in MARKER_SETTING_PARAMS order (see StepLocks.hpp)
-		static const int GROUP_KEYS[][2] = {{0, 1}, {8, 12}, {13, 16}, {28, 32}, {2, 7}, {17, 27}, {33, 36}, {37, 40}, {41, 52}};
-		static const char* const GROUP_NAMES[] = {"Wave", "Level / filter / drive", "Pitch / pan", "Envelope (A D S H R)", "LFO", "Grain", "Grain scan",
-			"Sample", "Expander LFO / AD"};
-		for (int g = 0; g < 9; g++) {
-			int from = GROUP_KEYS[g][0], to = GROUP_KEYS[g][1];
-			menu->addChild(createSubmenuItem(GROUP_NAMES[g], "", [=](ui::Menu* sub) {
-				for (int k = from; k <= to; k++) {
+		// Settings in MARKER_SETTING_PARAMS order (see StepLocks.hpp); the not-lockable ones are left out below
+		auto range = [](int from, int to) {
+			std::vector<int> v;
+			for (int k = from; k <= to; k++)
+				v.push_back(k);
+			return v;
+		};
+		std::vector<int> expander = range(41, 52);
+		for (int k : range(57, 68))
+			expander.push_back(k);
+		std::vector<int> level = range(8, 12);
+		level.push_back(55); // SEND level (BUS)
+		const Group groups[] = {
+			{"Wave", range(0, 1)},
+			{"Level / filter / drive / send", level},
+			{"Pitch / pan", range(13, 16)},
+			{"Envelope (A D S H R)", range(28, 32)},
+			{"LFO", range(2, 7)},
+			{"Grain", range(17, 27)},
+			{"Grain scan", range(33, 36)},
+			{"Sample", range(37, 40)},
+			{"Expander LFO 1 / 2, AD 1 / 2", expander},
+		};
+		for (const Group& g : groups) {
+			std::vector<int> keys = g.keys;
+			menu->addChild(createSubmenuItem(g.name, "", [=](ui::Menu* sub) {
+				for (int k : keys) {
 					if (wa::isLockable(k))
 						sub->addChild(createCheckMenuItem(wa::LOCK_LABELS[k], "", [=]() { return !m->laneCondition && m->laneSetting == k; }, [=]() { m->showLock(k); }));
 				}
@@ -1251,10 +1472,31 @@ struct LockLane : widget::OpaqueWidget {
 		module->stepData[module->laneRow][s].setLock(clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1), v);
 	}
 
-	/** CONDITION view: the step can take a condition (lit, and not tied: a tied trig follows its group) */
+	/** The lane's row length: steps past it do not play, so the lane does not edit them */
+	int laneLen() {
+		return clamp(module->length[clamp(module->laneRow, 0, WaveArtifactSequencer::ROWS - 1)], 1, WaveArtifactSequencer::STEPS);
+	}
+	/** The step can take a lock: inside the row's length and lit */
+	bool lockStep(int s) {
+		return s >= 0 && s < laneLen() && module->velocity[module->laneRow][s] > 0.f;
+	}
+	/** Inside the row's length and unlit: a lock drawn there is a phantom (trigless) lock */
+	bool phantomStep(int s) {
+		return s >= 0 && s < laneLen() && module->velocity[module->laneRow][s] <= 0.f;
+	}
+	/** The drag began on an unlit step: it draws phantom locks on the unlit steps it passes (and leaves the trigs);
+	one begun on a trig edits only trigs, as before */
+	bool dragPhantom = false;
+	bool dragTakes(int s) {
+		return dragPhantom ? phantomStep(s) : lockStep(s);
+	}
+	void clearLockAt(int s, int k) {
+		module->stepData[module->laneRow][s].clearLock(k);
+		module->tidyStep(module->laneRow, s);
+	}
+	/** CONDITION view: the step can take a condition (a lock step, and not tied: a tied trig follows its group) */
 	bool conditionStep(int s) {
-		int row = module->laneRow;
-		return s >= 0 && s < WaveArtifactSequencer::STEPS && module->velocity[row][s] > 0.f && !module->isTied(row, s);
+		return lockStep(s) && !module->isTied(module->laneRow, s);
 	}
 	/** CONDITION view: a chance from the mouse height, in 5 % steps; the top is Always */
 	void setChance(int s, float yPx) {
@@ -1292,6 +1534,7 @@ struct LockLane : widget::OpaqueWidget {
 						module->stepData[row][s].clearLocks();
 					else
 						module->stepData[row][s].clearLock(k);
+					module->tidyStep(row, s);
 				}
 			}
 			e.consume(this);
@@ -1336,11 +1579,11 @@ struct LockLane : widget::OpaqueWidget {
 				setChance(s, e.pos.y);
 			return;
 		}
-		// Right-click a lit trig: the condition of its lock of the lane's setting
+		// Right-click a lit trig or a phantom lock: the condition of its lock of the lane's setting
 		if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
 			int s = colAt(e.pos.x + box.pos.x);
 			int row = module->laneRow;
-			if (s < 0 || s >= WaveArtifactSequencer::STEPS || module->velocity[row][s] <= 0.f)
+			if (!lockStep(s) && !(phantomStep(s) && module->isPhantom(row, s)))
 				return;
 			int k = clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1);
 			selectStep(module, row, s);
@@ -1350,7 +1593,10 @@ struct LockLane : widget::OpaqueWidget {
 				appendLockConditionItems(menu, module, row, s, k);
 				menu->addChild(new MenuSeparator);
 				WaveArtifactSequencer* m = module;
-				menu->addChild(createMenuItem("Remove this lock", "", [=]() { m->stepData[row][s].clearLock(k); }));
+				menu->addChild(createMenuItem("Remove this lock", "", [=]() {
+					m->stepData[row][s].clearLock(k);
+					m->tidyStep(row, s);
+				}));
 			}
 			else {
 				menu->addChild(createMenuLabel("Not locked: draw a lock first, then give it a condition here"));
@@ -1363,7 +1609,8 @@ struct LockLane : widget::OpaqueWidget {
 		ParamQuantity* q = quantity();
 		int s = colAt(e.pos.x + box.pos.x);
 		e.consume(this);
-		if (!q || s < 0 || s >= WaveArtifactSequencer::STEPS || module->velocity[module->laneRow][s] <= 0.f) {
+		// A trig, or an unlit step: drawing there makes a phantom (trigless) lock, shown in yellow
+		if (!q || !(lockStep(s) || phantomStep(s))) {
 			dragCol = -1;
 			return;
 		}
@@ -1371,13 +1618,15 @@ struct LockLane : widget::OpaqueWidget {
 		dragCol = s;
 		pressY = e.pos.y;
 		moved = false;
+		dragPhantom = phantomStep(s);
 		erasing = (e.mods & RACK_MOD_MASK) == GLFW_MOD_SHIFT;
 		wasLocked = module->stepData[module->laneRow][s].locked(k);
-		selectStep(module, module->laneRow, s);
 		if (erasing)
-			module->stepData[module->laneRow][s].clearLock(k);
+			clearLockAt(s, k);
 		else if (!wasLocked)
 			setLock(s, valueAt(q, e.pos.y));
+		// Selected after the lock is drawn, so a new phantom lock is there to select
+		selectStep(module, module->laneRow, s);
 	}
 
 	void onDragMove(const DragMoveEvent& e) override {
@@ -1387,7 +1636,7 @@ struct LockLane : widget::OpaqueWidget {
 			Vec local = mouseOverride ? mouseAt : APP->scene->getMousePos().minus(getAbsoluteOffset(Vec(0, 0))).div(getAbsoluteZoom());
 			if (std::fabs(local.y - pressY) > 2.f)
 				moved = true;
-			int col = clamp(colAt(local.x + box.pos.x), 0, WaveArtifactSequencer::STEPS - 1);
+			int col = clamp(colAt(local.x + box.pos.x), 0, laneLen() - 1);
 			int dir = (col > dragCol) ? 1 : -1;
 			auto touch = [&](int s) {
 				if (!conditionStep(s))
@@ -1413,13 +1662,14 @@ struct LockLane : widget::OpaqueWidget {
 		Vec local = mouseOverride ? mouseAt : APP->scene->getMousePos().minus(getAbsoluteOffset(Vec(0, 0))).div(getAbsoluteZoom());
 		if (std::fabs(local.y - pressY) > 2.f)
 			moved = true;
-		int col = clamp(colAt(local.x + box.pos.x), 0, WaveArtifactSequencer::STEPS - 1);
+		// The drag stops at the row's last step
+		int col = clamp(colAt(local.x + box.pos.x), 0, laneLen() - 1);
 		int step = (col > dragCol) ? 1 : -1;
 		auto touch = [&](int s) {
-			if (module->velocity[module->laneRow][s] <= 0.f)
+			if (!dragTakes(s))
 				return;
 			if (erasing)
-				module->stepData[module->laneRow][s].clearLock(k);
+				clearLockAt(s, k);
 			else
 				setLock(s, valueAt(q, local.y));
 		};
@@ -1438,7 +1688,7 @@ struct LockLane : widget::OpaqueWidget {
 			if (module->laneCondition)
 				module->stepData[module->laneRow][dragCol].cond = wa::COND_ALWAYS;
 			else
-				module->stepData[module->laneRow][dragCol].clearLock(clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1));
+				clearLockAt(dragCol, clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1));
 		}
 		dragCol = -1;
 		erasing = false;
@@ -1555,7 +1805,11 @@ struct LockLane : widget::OpaqueWidget {
 		bool bipolar = lo < 0.f && std::fabs(lo + hi) <= 1e-4f * (hi - lo);
 		float cw = seqlayout::cellW();
 		float h = seqlayout::LANE_H * mm;
+		// Steps past the row's length do not play and cannot be edited: dimmed, as on the grid
+		int len = module ? laneLen() : WaveArtifactSequencer::STEPS;
+		nvgSave(vg);
 		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++) {
+			nvgGlobalAlpha(vg, s < len ? 1.f : 0.3f);
 			float x = (seqlayout::cellX(s) - box.pos.x / mm + seqlayout::CELL_GAP / 2.f) * mm, w = (cw - seqlayout::CELL_GAP) * mm;
 			bool on = module ? module->velocity[row][s] > 0.f : (s % 4 == 0);
 			nvgBeginPath(vg);
@@ -1566,10 +1820,30 @@ struct LockLane : widget::OpaqueWidget {
 				drawCondition(vg, font, row, s, x, w, h);
 				continue;
 			}
-			if (!on || hi <= lo)
+			// A phantom (trigless) lock: no trig, locks; drawn in yellow
+			bool phantom = !on && module && module->isPhantom(row, s);
+			if (phantom && !condView) {
+				nvgBeginPath(vg);
+				nvgRoundedRect(vg, x + 0.4f, 0.4f, w - 0.8f, h - 0.8f, 1.f);
+				nvgStrokeColor(vg, nvgTransRGBAf(seqlayout::PHANTOM_COLOR, 0.55f));
+				nvgStrokeWidth(vg, 0.8f);
+				nvgStroke(vg);
+			}
+			if (!(on || phantom) || hi <= lo || (phantom && condView))
 				continue;
 			const wa::StepData* d = module ? &module->stepData[row][s] : nullptr;
 			bool locked = d && d->locked(k);
+			// A phantom lock that does not lock this setting: only its outline (it plays the trig's value or the knob)
+			if (phantom && !locked) {
+				if (module->selRow == row && module->selStep == s) {
+					nvgBeginPath(vg);
+					nvgRoundedRect(vg, x - 0.8f, -0.8f, w + 1.6f, h + 1.6f, 1.6f);
+					nvgStrokeColor(vg, nvgRGB(0x8f, 0xb8, 0xff));
+					nvgStrokeWidth(vg, 1.6f);
+					nvgStroke(vg);
+				}
+				continue;
+			}
 			float value = locked ? d->value[k] : (q ? q->getValue() : 0.5f);
 			float t = clamp((value - lo) / (hi - lo), 0.f, 1.f);
 			float a = bipolar ? 0.5f : 0.f;
@@ -1577,7 +1851,7 @@ struct LockLane : widget::OpaqueWidget {
 			if (locked) {
 				nvgBeginPath(vg);
 				nvgRoundedRect(vg, x, y0, w, std::max(y1 - y0, 1.f), 1.f);
-				nvgFillColor(vg, col);
+				nvgFillColor(vg, phantom ? seqlayout::PHANTOM_COLOR : col);
 				nvgFill(vg);
 				// Its own condition: the text in the COND color, on a dark backing in the middle of the cell
 				char text[16];
@@ -1600,6 +1874,7 @@ struct LockLane : widget::OpaqueWidget {
 				nvgStroke(vg);
 			}
 		}
+		nvgRestore(vg);
 		// The playing step of the lane's row, framed like on the grid, so the lock that plays now is seen
 		{
 			int playing = module ? module->playing[row].load() : 3;
@@ -1642,18 +1917,43 @@ struct StepRowLabels : widget::TransparentWidget {
 		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
 			NVGcolor col = layout::MARKER_COLORS[r];
 			float cy = (seqlayout::rowTop(r) + seqlayout::ROW_H / 2.f) * mm;
+			// The marker's number on a small chip, the row length beside it
+			float chipY = (seqlayout::rowTop(r) + seqlayout::CHIP_DY) * mm;
 			nvgBeginPath(vg);
-			nvgCircle(vg, seqlayout::BADGE_X * mm, cy - 2.f * mm, 3.1f * mm);
+			nvgCircle(vg, seqlayout::CHIP_X * mm, chipY, seqlayout::CHIP_R * mm);
 			nvgFillColor(vg, col);
 			nvgFill(vg);
-			nvgFontSize(vg, 11.f);
-			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
-			nvgFillColor(vg, nvgRGB(0x16, 0x18, 0x22));
-			nvgText(vg, seqlayout::BADGE_X * mm, cy - 2.f * mm + 3.8f, std::to_string(r + 1).c_str(), NULL);
 			nvgFontSize(vg, 8.f);
+			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+			nvgFillColor(vg, nvgRGB(0x16, 0x18, 0x22));
+			nvgText(vg, seqlayout::CHIP_X * mm, chipY + 0.5f, std::to_string(r + 1).c_str(), NULL);
 			nvgFillColor(vg, col);
 			std::string len = module ? string::f("%d", module->length[r]) : "16";
-			nvgText(vg, seqlayout::BADGE_X * mm, cy + 5.5f * mm, len.c_str(), NULL);
+			nvgText(vg, seqlayout::LEN_X * mm, chipY + 0.5f, len.c_str(), NULL);
+			// LAY and RND: lit while they can act (SAMPLE or GRAIN, Wave Artifacts on the right, the marker on)
+			WaveArtifact* main = module ? mainOf(module) : nullptr;
+			bool live = main && main->engineOfMarker(r) >= 1 && main->isMarkerActive(r);
+			bool marks = module && module->anyMarked(r);
+			for (int b = 0; b < 2; b++) {
+				float bx = seqlayout::headButtonX(b) * mm, by = (seqlayout::rowTop(r) + seqlayout::HEAD_BTN_DY) * mm;
+				float bw = seqlayout::HEAD_BTN_W * mm, bh = seqlayout::HEAD_BTN_H * mm;
+				nvgBeginPath(vg);
+				nvgRoundedRect(vg, bx, by, bw, bh, 1.5f);
+				nvgFillColor(vg, nvgRGBA(0x16, 0x18, 0x22, live ? 0xd0 : 0x60));
+				nvgFill(vg);
+				// RND with marked steps: outlined, it acts on them only
+				if (b == 1 && marks) {
+					nvgStrokeColor(vg, col);
+					nvgStrokeWidth(vg, 1.f);
+					nvgStroke(vg);
+				}
+				nvgFontSize(vg, 6.f);
+				nvgFillColor(vg, live ? col : nvgTransRGBAf(col, 0.35f));
+				nvgText(vg, bx + bw / 2.f, by + bh / 2.f + 0.4f, b == 0 ? "LAY" : "RND", NULL);
+			}
+			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
+			nvgFontSize(vg, 8.f);
+			nvgFillColor(vg, col);
 			// The row's clock, under its knob
 			std::string mult = module ? WaveArtifactSequencer::multiplierText((int) std::round(module->params[WaveArtifactSequencer::CLOCK_MULT_PARAM + r].getValue())) : "x4";
 			nvgText(vg, seqlayout::CLOCK_KNOB_X * mm, cy + 5.5f * mm, mult.c_str(), NULL);
@@ -1734,10 +2034,10 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		// Help, bottom
 		const float helpX = 89.f;
 		labels->add(Vec(helpX, 117.6f), "drag: draw (height = velocity)  click: select  double-click: delete  Shift+drag: erase  strip under a trig: slide", 5.5f);
-		labels->add(Vec(helpX, 121.1f), "selected step: turn the marker's knobs to lock  Ctrl+click: row end  + between trigs: tie (long gate)  right-click: step", 5.5f);
+		labels->add(Vec(helpX, 121.1f), "selected step: turn the marker's knobs to lock  Ctrl+click: row end  + between trigs: tie  Ctrl+Shift+drag: mark for RND  right-click: step", 5.5f);
 		labels->add(Vec(W / 2.f, 125.2f), "left of Wave Artifacts   |   PLAY: SEQ   |   clock: CLOCK input or internal tempo", 5.5f);
 		labels->add(Vec(CLOCK_KNOB_X, 14.5f), "CLOCK", 5.f);
-		labels->add(Vec(BADGE_X, 14.5f), "LEN", 5.f);
+		labels->add(Vec(LEN_X, 14.5f), "LEN", 5.f);
 		labels->add(Vec(GATE_X, GATE_LABEL_Y), "GATE", 5.f, true);
 		labels->add(Vec(MOD_X, GATE_LABEL_Y), "MOD", 5.f, true);
 		labels->add(REC_LABEL, "REC", 6.f);
@@ -1791,7 +2091,8 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		// The selection is for one marker on the main module: if it goes, so does the selection.
 		if (m && m->hasSelection()) {
 			WaveArtifact* main = mainOf(m);
-			if (!main || m->velocity[m->selRow][m->selStep] <= 0.f)
+			// (a phantom lock stays selected while it has locks)
+			if (!main || !m->hasStep(m->selRow, m->selStep))
 				m->select(-1, -1);
 		}
 		ModuleWidget::step();

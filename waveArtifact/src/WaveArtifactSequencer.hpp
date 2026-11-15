@@ -90,6 +90,19 @@ struct WaveArtifactSequencer : Module {
 		laneSetting = k;
 		laneCondition = false;
 	}
+	/** Steps marked with Ctrl + Shift + click / drag, for the row's RND (random slices). UI thread, not saved. */
+	bool marked[ROWS][STEPS] = {};
+	bool anyMarked(int r) const {
+		for (int s = 0; s < STEPS; s++)
+			if (marked[r][s])
+				return true;
+		return false;
+	}
+	void clearMarks() {
+		for (int r = 0; r < ROWS; r++)
+			for (int s = 0; s < STEPS; s++)
+				marked[r][s] = false;
+	}
 
 	WaveArtifactSequencer();
 	~WaveArtifactSequencer();
@@ -143,6 +156,20 @@ struct WaveArtifactSequencer : Module {
 		if (s + 1 < STEPS)
 			stepData[r][s + 1].tie = false;
 	}
+	/** A phantom (trigless) lock: no trig, but locks. When the row reaches it, its locks go on top of what the row
+	plays (the note already sounding changes), without a note, a GATE or a MOD change, until the row's next trig. */
+	bool isPhantom(int r, int s) const {
+		return velocity[r][s] <= 0.f && bool(stepData[r][s].mask);
+	}
+	/** A trig or a phantom lock: a step that can be selected and locked */
+	bool hasStep(int r, int s) const {
+		return velocity[r][s] > 0.f || bool(stepData[r][s].mask);
+	}
+	/** An unlit step whose last lock went: nothing left of it (its condition and slide go too) */
+	void tidyStep(int r, int s) {
+		if (velocity[r][s] <= 0.f && !stepData[r][s].mask)
+			stepData[r][s].clear();
+	}
 	/** The step is lit and tied to the lit step before it (a long gate). Groups do not wrap round the row's end. */
 	bool isTied(int r, int s) const {
 		return s > 0 && s < STEPS && velocity[r][s] > 0.f && velocity[r][s - 1] > 0.f && stepData[r][s].tie;
@@ -187,6 +214,8 @@ struct WaveArtifactSequencer : Module {
 
 private:
 	uint32_t seenReset = 0, fires[ROWS] = {};
+	/** Phantom locks played (each row): the main module applies the locks without a note */
+	uint32_t lockFires[ROWS] = {};
 	/** The step number each row's clock is at (steps since reset), to see when it moves on */
 	long lastIndex[ROWS] = {};
 	float lastVelocity[ROWS] = {1.f, 1.f, 1.f, 1.f, 1.f};

@@ -66,6 +66,12 @@ inline int lfoDivision(float knob, bool triplets, bool dotted) {
 	return NUM_SYNC_DIVISIONS - 1;
 }
 
+/** A synced rate knob as it would be with every note value on (triplets and dotted): the same note value. For LFOs
+whose T / D switches went away (always on); an older patch's knob moves so it keeps its note value. */
+inline float lfoKnobAllKinds(float knob, bool triplets, bool dotted) {
+	return (float) lfoDivision(knob, triplets, dotted) / (float) (NUM_SYNC_DIVISIONS - 1);
+}
+
 /** Folds x into 0..1 by reflection, so modulation past an end bounces back instead of sticking. */
 inline float fold01(float x) {
 	x = std::fmod(std::fabs(x), 2.f);
@@ -303,8 +309,11 @@ public:
 		return process(LFO_SINE, sync, rateKnob, triplets, dotted, clock, sampleTime);
 	}
 
-	/** Returns -1..1. */
-	float process(int shape, bool sync, float rateKnob, bool triplets, bool dotted, const ClockTracker& clock, float sampleTime) {
+	/** Returns -1..1. `phaseOffset` (0..1 of a cycle) shifts where the periodic shapes are in their cycle: after a
+	RESET they start there, and synced they stay that far after the beat. A change glides there the short way round
+	in ~5 ms, so turning it does not click. The random shapes ignore it (they have no start point). */
+	float process(int shape, bool sync, float rateKnob, bool triplets, bool dotted, const ClockTracker& clock, float sampleTime,
+			float phaseOffset = 0.f) {
 		if (shape != lastShape) {
 			// Random shapes start from wherever the output was, so switching does not jump.
 			lastShape = shape;
@@ -350,7 +359,23 @@ public:
 			out = from + (to - from) * t;
 		}
 		else {
-			out = lfoShapeValue(shape, phase);
+			// Settled at 0 (every LFO but a shifted expander one): the plain phase, as before
+			if (phaseOffset != 0.f || offset != 0.0) {
+				double target = phaseOffset;
+				double d = target - offset;
+				d -= std::floor(d + 0.5); // shortest way round: -0.5..0.5
+				// Fresh or just RESET: start right there (the reset jumps anyway)
+				if (offsetJump || std::fabs(d) < OFFSET_SNAP)
+					offset = target;
+				else
+					offset += d * std::min(1.0, sampleTime / OFFSET_TIME);
+				offset -= std::floor(offset);
+				double p = phase + offset;
+				out = lfoShapeValue(shape, p - std::floor(p));
+			}
+			else {
+				out = lfoShapeValue(shape, phase);
+			}
 		}
 		double pull = correction * std::min(1.0, sampleTime / CORRECTION_TIME);
 		correction -= pull;
@@ -363,6 +388,7 @@ public:
 			to = nextTarget(shape);
 		}
 		lastOut = out;
+		offsetJump = false;
 		return out;
 	}
 
@@ -370,6 +396,7 @@ public:
 	void reset() {
 		phase = 0.0;
 		correction = 0.0;
+		offsetJump = true;
 		if (lfoShapeIsRandom(lastShape)) {
 			from = lastOut;
 			to = nextTarget(lastShape);
@@ -382,6 +409,13 @@ public:
 
 private:
 	static constexpr double CORRECTION_TIME = 0.02;
+	/** PHASE glides to a new offset over about this long; it lands when nearer than OFFSET_SNAP (cycles) */
+	static constexpr double OFFSET_TIME = 0.005;
+	static constexpr double OFFSET_SNAP = 1e-6;
+	/** The phase offset as it is now (gliding to the PHASE setting) */
+	double offset = 0.0;
+	/** The next sample takes the PHASE setting at once (first sample, after a RESET) */
+	bool offsetJump = true;
 	/** The rate as last worked out (process() recomputes it only when one of these changes) */
 	float cachedKnob = -1.f;
 	bool cachedSync = false, cachedTriplets = false, cachedDotted = false;

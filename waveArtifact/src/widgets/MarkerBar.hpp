@@ -57,6 +57,13 @@ struct MarkerBar : widget::Widget {
 		bool cv = module->isMarkerActive(i) && module->shownCv[i].load(std::memory_order_relaxed);
 		return math::Rect(Vec(r.pos.x + pad + (cv ? 24.f : 9.f), r.pos.y + pad), Vec(17.f, 8.5f));
 	}
+	/** After them: WAV, the artifact plays its own sample */
+	math::Rect wavTagRect(int i) {
+		math::Rect r = retTagRect(i);
+		if (module->isMarkerActive(i) && module->shownReturn[i].load(std::memory_order_relaxed))
+			r.pos.x += r.size.x + 2.f;
+		return r;
+	}
 
 	math::Rect slotsArea() {
 		math::Rect a = slotRect(0);
@@ -94,11 +101,15 @@ struct MarkerBar : widget::Widget {
 		menu->addChild(createMenuLabel("Marker " + std::to_string(i + 1)));
 		int t = m->markerTable(i);
 		if (t >= 0)
-			menu->addChild(createMenuLabel(string::f("Artifact %d / %d", t + 1, m->activeBank.load()->numTables)));
+			menu->addChild(createMenuLabel(string::f("Artifact %d / %d", t + 1, m->bankOf(i)->numTables)));
 		menu->addChild(createMenuItem("Edit", "", [=]() {
 			m->selectedMarker = i;
 		}));
 		addMarkerCopyPasteItems(menu, m, i);
+		menu->addChild(new MenuSeparator);
+		addArtifactSampleItems(menu, m, i);
+		m->appendLoopLayoutMenu(menu, i);
+		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuItem(m->isMarkerMuted(i) ? "Unmute" : "Mute", "double-click", [=]() {
 			toggleMuteWithUndo(m, i);
 		}));
@@ -121,10 +132,10 @@ struct MarkerBar : widget::Widget {
 	}
 	/** Shown once a WAV has been loaded (dim when its folder has no other WAV) */
 	bool showArrows() {
-		return module && !module->filePath.empty();
+		return module && !module->slots[module->shownSlot()].filePath.empty();
 	}
 	bool arrowsActive() {
-		return module && module->hasSiblings();
+		return module && module->hasSiblings(module->shownSlot());
 	}
 	/** Arrow under `p` (0 previous, 1 next), or -1 */
 	int arrowAt(Vec p) {
@@ -163,15 +174,16 @@ struct MarkerBar : widget::Widget {
 		// Previous / next WAV in the folder (no dialog, so it can act on press)
 		int arrow = arrowAt(e.pos);
 		if (arrow >= 0) {
+			// Into the selected artifact's own file, so the other artifacts keep theirs
 			if (left)
-				module->loadSibling(arrow == 0 ? -1 : 1);
+				module->screenStep(arrow == 0 ? -1 : 1);
 			e.consume(this);
 			return;
 		}
 
 		// Load: the file line, or the empty screen before anything is loaded. The dialog opens on
 		// release (onDragEnd), so the press/release pair is not split by the modal dialog.
-		bool noBank = !module->activeBank.load();
+		bool noBank = !module->slots[module->shownSlot()].activeBank.load();
 		if (left && (inStatusLine(e.pos) || (noBank && e.pos.y < mm2px(layout::SLOTS_BOTTOM + 1.f)))) {
 			loadOnRelease = true;
 			e.consume(this);
@@ -253,7 +265,8 @@ struct MarkerBar : widget::Widget {
 			module->pressedMarker = -1;
 		if (loadOnRelease) {
 			loadOnRelease = false;
-			openLoadDialog(module);
+			// The selected artifact's own file (the main one only while nothing is loaded at all)
+			openLoadDialog(module, module->screenLoadSlot());
 		}
 	}
 
@@ -304,7 +317,15 @@ struct MarkerBar : widget::Widget {
 		std::shared_ptr<window::Font> font = wadraw::monoFont();
 		if (!font)
 			return;
-		std::string text = module ? module->getStatus() : "Load a WAV (max 10 MB)";
+		std::string text = module ? module->getStatus(module->shownSlot()) : "Load a WAV (max 10 MB)";
+		// Once some artifact has its own file, say when the selected one plays the main sample
+		if (module && module->shownSlot() == 0 && !text.empty()) {
+			bool anyOwn = false;
+			for (int i = 0; i < wa::NUM_MARKERS; i++)
+				anyOwn = anyOwn || module->slots[1 + i].hasFile();
+			if (anyOwn)
+				text = "Main: " + text;
+		}
 		float y = mm2px(layout::STATUS_Y);
 		// Fixed start, after the arrows' slot, whether or not the arrows are shown.
 		float x = mm2px(layout::BAR_X0 + layout::FILE_TEXT_INDENT);
@@ -321,7 +342,7 @@ struct MarkerBar : widget::Widget {
 			nvgStrokeWidth(args.vg, 0.7f);
 			nvgStroke(args.vg);
 		}
-		if (module && module->activeBank.load()) {
+		if (module && module->slots[module->shownSlot()].activeBank.load()) {
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 			nvgFillColor(args.vg, layout::SCREEN_DIM);
 			nvgText(args.vg, mm2px(layout::BAR_X1), y, "click the file name to load another WAV", NULL);
@@ -344,12 +365,13 @@ struct MarkerBar : widget::Widget {
 
 	void drawSlots(const DrawArgs& args) {
 		// Safe to read: only the UI thread (this thread) frees banks, in ModuleWidget::step().
-		const wa::WavetableBank* bank = module ? module->activeBank.load() : nullptr;
 		std::shared_ptr<window::Font> font = wadraw::monoFont();
 		float pad = mm2px(0.8f);
 
 		for (int i = 0; i < wa::NUM_MARKERS; i++) {
 			math::Rect r = slotRect(i);
+			// The marker's own file, or the main one
+			const wa::WavetableBank* bank = module ? module->bankOf(i) : nullptr;
 			bool muted = module && module->isMarkerMuted(i);
 			NVGcolor c = muted ? layout::MUTED_COLOR : layout::MARKER_COLORS[i];
 			bool active = module ? module->isMarkerActive(i) : (i < 3);
@@ -386,7 +408,7 @@ struct MarkerBar : widget::Widget {
 			nvgStroke(args.vg);
 
 			float index = 0.f;
-			bool grain = module && module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue() > 0.5f;
+			bool grain = module && module->params[WaveArtifact::MARKER_ENGINE_PARAM + i].getValue() > 0.5f;
 			float readAt = 0.f;
 			// While a selected trig's WAVE / START is being moved (map drag or knob held), the slot shows that trig's
 			// start, following the move; otherwise what the marker plays now (moving with its LFO, scan and trigs).
@@ -450,7 +472,9 @@ struct MarkerBar : widget::Widget {
 				nvgFillColor(args.vg, nvgTransRGBAf(c, 1.f));
 			};
 			if (module && active && module->shownReturn[i].load(std::memory_order_relaxed))
-				tag(retTagRect(i), "RET", false);
+				tag(retTagRect(i), module->shownBus[i].load(std::memory_order_relaxed) ? "BUS" : "RET", false);
+			if (module && active && module->slots[1 + i].hasFile())
+				tag(wavTagRect(i), "WAV", false);
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
 			std::string info;
 			if (!active)
@@ -461,6 +485,15 @@ struct MarkerBar : widget::Widget {
 				info = string::f("%.2fs", readAt * bank->sourceSeconds);
 			else if (bank)
 				info = string::f("%d/%d", (int) std::round(index) + 1, bank->numTables);
+			// Artifacts on different engines: each slot says its own (W, G, S) before what it plays
+			if (module && active) {
+				bool mixed = false;
+				for (int k = 0; k < wa::NUM_MARKERS; k++)
+					mixed = mixed || (module->isMarkerActive(k) && module->engineOfMarker(k) != module->engineOfMarker(i));
+				static const char* const ENGINE_TAGS[3] = {"W ", "G ", "S "};
+				if (mixed)
+					info = ENGINE_TAGS[module->engineOfMarker(i)] + info;
+			}
 			nvgText(args.vg, r.getRight() - pad - 1.f, r.pos.y + pad, info.c_str(), NULL);
 		}
 
@@ -471,7 +504,7 @@ struct MarkerBar : widget::Widget {
 		if (!module)
 			return;
 		int t = module->previewTable.load();
-		const wa::WavetableBank* bank = module->activeBank.load();
+		const wa::WavetableBank* bank = module->slots[clamp(module->previewSlot.load(), 0, WaveArtifact::NUM_SLOTS - 1)].activeBank.load();
 		if (t < 0 || !bank || t >= bank->numTables)
 			return;
 		math::Rect a = slotsArea();

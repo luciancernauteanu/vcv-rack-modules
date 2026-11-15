@@ -62,10 +62,10 @@ WaveArtifactExpander::WaveArtifactExpander() {
 	}
 	// The LFO jack's level. Unlike the CV amounts (which start at 0 so nothing is modulated until you ask), this
 	// starts at 100%: an LFO output that starts silent would look broken.
-	configParam(LFO_AMT_PARAM + 0, 0.f, 1.f, 1.f, "LFO output level", "%", 0.f, 100.f);
-	configParam(LFO_AMT_PARAM + 1, 0.f, 1.f, 1.f, "Unused");
-	getParamQuantity(LFO_AMT_PARAM + 1)->randomizeEnabled = false;
-	configOutput(LFO_OUTPUT + 0, "Marker's LFO (+-10 V at 100%)");
+	configParam(LFO_AMT_PARAM + 0, 0.f, 1.f, 1.f, "LFO 1 output level", "%", 0.f, 100.f);
+	configParam(LFO_AMT_PARAM + 1, 0.f, 1.f, 1.f, "LFO 2 output level", "%", 0.f, 100.f);
+	configOutput(LFO_OUTPUT + 0, "Marker's LFO 1 (+-10 V at 100%)");
+	configOutput(LFO_OUTPUT + 1, "Marker's LFO 2 (+-10 V at 100%)");
 	configInput(VOCT_INPUT, "V/OCT for this artifact (1 V/oct, added to the main V/OCT)");
 	configInput(GATE_INPUT, "Gate for this artifact: starts its AD. MORPH: it sounds only while the gate is high, shaped by the AD. POLY: plays its note with its own ADSR while high, instead of the playhead");
 	for (int id : {ATTACK_PARAM, DECAY_PARAM, PERC_PARAM}) {
@@ -93,7 +93,9 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 	Module* left = leftExpander.module;
 	Module* right = rightExpander.module;
 	bool leftOk = isMain(left) || isWaveArtifactExpander(left);
-	bool rightIsExp = isWaveArtifactExpander(right);
+	// On the right: another expander, or the stereo SEND / RETURN module (the end of the chain): both take our
+	// message and send theirs back
+	bool rightIsExp = isWaveArtifactExpander(right) || isWaveArtifactSendReturn(right);
 
 	// From the left: clock and our place in the chain.
 	wa::ToExpanderMessage fromLeft;
@@ -119,6 +121,8 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		// The LFO jack patched: the main module runs the marker's LFO even while it is not routed anywhere
 		if (outputs[LFO_OUTPUT + 0].isConnected())
 			acc.lfoJack[m] = true;
+		if (outputs[LFO_OUTPUT + 1].isConnected())
+			acc.lfoJack2[m] = true;
 		// A patched GATE goes to the main module, which runs the marker's AD (its settings are marker settings, so
 		// trigs can lock them). In MORPH the artifact's level follows the AD (the main module's 5 ms gain smoothing
 		// keeps even the fastest open / close click-free); in POLY the gate plays the marker's note with its ADSR,
@@ -132,7 +136,7 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 			acc.voct[m] += inputs[VOCT_INPUT].getVoltage();
 			acc.modulated[m] = true;
 		}
-		int e = fromLeft.granular ? 1 : (fromLeft.sample ? 2 : 0);
+		int e = std::min((int) fromLeft.engines[m], 2);
 		for (int s = 0; s < wa::NUM_CV_SLOTS; s++) {
 			if (!inputs[MOD_INPUT + s].isConnected())
 				continue;
@@ -164,8 +168,12 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		out->reset = fromLeft.reset;
 		out->granular = fromLeft.granular;
 		out->sample = fromLeft.sample;
+		std::copy(fromLeft.engines, fromLeft.engines + wa::NUM_MARKERS, out->engines);
 		out->poly = fromLeft.poly;
 		std::copy(fromLeft.modLfo, fromLeft.modLfo + wa::NUM_MARKERS, out->modLfo);
+		std::copy(fromLeft.modLfo2, fromLeft.modLfo2 + wa::NUM_MARKERS, out->modLfo2);
+		std::copy(fromLeft.sendL, fromLeft.sendL + wa::NUM_MARKERS, out->sendL);
+		std::copy(fromLeft.sendR, fromLeft.sendR + wa::NUM_MARKERS, out->sendR);
 		right->leftExpander.requestMessageFlip();
 	}
 
@@ -173,6 +181,8 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 	// them), at this expander's AMT. Silent while not linked.
 	float lfoOut = active ? fromLeft.modLfo[getMarker()] * params[LFO_AMT_PARAM + 0].getValue() : 0.f;
 	outputs[LFO_OUTPUT + 0].setVoltage(10.f * lfoOut);
+	float lfoOut2 = active ? fromLeft.modLfo2[getMarker()] * params[LFO_AMT_PARAM + 1].getValue() : 0.f;
+	outputs[LFO_OUTPUT + 1].setVoltage(10.f * lfoOut2);
 
 	if (lightDivider.process()) {
 		float dt = args.sampleTime * lightDivider.getDivision();
@@ -180,9 +190,11 @@ void WaveArtifactExpander::process(const ProcessArgs& args) {
 		lights[LINK_LIGHT + 1].setBrightnessSmooth(fromLeft.linked && !active ? 1.f : 0.f, dt);
 		lights[LFO_LIGHT + 0].setBrightnessSmooth(std::max(lfoOut, 0.f), dt);
 		lights[LFO_LIGHT + 1].setBrightnessSmooth(std::max(-lfoOut, 0.f), dt);
+		lights[LFO_LIGHT + 2].setBrightnessSmooth(std::max(lfoOut2, 0.f), dt);
+		lights[LFO_LIGHT + 3].setBrightnessSmooth(std::max(-lfoOut2, 0.f), dt);
 		linked = active;
 		chainIndex = index;
-		engine = !fromLeft.linked ? 0 : (fromLeft.granular ? 1 : (fromLeft.sample ? 2 : 0));
+		engine = !fromLeft.linked ? 0 : std::min((int) fromLeft.engines[getMarker()], 2);
 		marker = getMarker();
 	}
 }
@@ -240,34 +252,36 @@ static const float CV_CELL_X[2] = {4.f, 25.4f};
 static const float CV_JACK_DX = 6.2f;
 static const float CV_AMT_DX = 16.4f;
 static const float CV_NAME_DX = 10.7f;
-static const float CV_JACK_Y[2] = {52.f, 70.f};
-static const float CV_NAME_DY = -6.4f;
+static const float CV_JACK_Y[2] = {58.4f, 72.4f};
+static const float CV_NAME_DY = -6.2f;
 static const Vec CV_DEST_SIZE = Vec(19.f, 4.4f);
-// The marker's AD: ATTACK, DECAY, PERC, then where it goes (DEST) and how much (DEPTH); names above.
+// The marker's two ADs, a row each (its number on the left): ATTACK, DECAY, PERC, then where it goes (DEST) and how
+// much (DEPTH); names above the first row.
 static const float AD_NAME_Y = 28.4f;
-static const float AD_Y = 34.2f;
-static const float ATTACK_X = 8.2f;
-static const float DECAY_X = 15.6f;
-static const Vec PERC_BUTTON = Vec(23.7f, 34.2f);
+static const float AD_Y[2] = {33.2f, 41.6f};
+static const float AD_NUM_X = 5.6f;
+static const float ATTACK_X = 9.8f;
+static const float DECAY_X = 16.9f;
+static const float PERC_X = 24.6f;
 static const Vec PERC_BUTTON_SIZE = Vec(7.4f, 4.4f);
-static const Vec AD_DEST_BUTTON = Vec(33.4f, 34.2f);
-static const float AD_DEPTH_X = 42.6f;
+static const float AD_DEST_X = 34.f;
+static const float AD_DEPTH_X = 43.2f;
 static const Vec DEST_BUTTON_SIZE = Vec(10.f, 4.6f);
-// The marker's LFO, left column, top to bottom: title (+ light), shape screen, SYNC / T / D centered under the
-// screen, RATE + AMT (the jack's level) with their labels above, the output. Right column: where it goes (DEST)
-// and how much (DEPTH).
-static const float LFO_X = 14.8f;
-static const float LFO_LABEL_Y = 83.2f;
-static const float LFO_SCREEN_Y = 88.8f;
-static const Vec LFO_SCREEN_SIZE = Vec(16.f, 6.4f);
-static const float LFO_BUTTON_Y = 95.2f;
-static const float LFO_KNOB_LABEL_Y = 100.f;
-static const float LFO_KNOB_Y = 104.4f;
-static const float LFO_KNOB_DX = 5.1f;
-static const float LFO_OUT_Y = 114.6f;
-static const float LFO_DEST_X = 36.2f;
-static const float LFO_DEST_LABEL_Y = 87.4f;
-static const float LFO_DEST_Y = 92.6f;
+// The marker's two LFOs, side by side, each a column (no title: LFO 1 left, LFO 2 right), top to bottom: its light, a
+// small shape screen and SYNC, DEST + DEPTH, RATE + AMT (the jack's level), the output + PHASE. Synced rates step
+// through every note value (no T / D).
+static const float LFO_COL_X[2] = {14.7f, 36.1f};
+static const float LFO_LEFT_DX = -4.6f, LFO_RIGHT_DX = 5.4f;
+static const float LFO_LIGHT_Y = 82.6f;
+static const float LFO_ROW1_Y = 86.4f;
+static const Vec LFO_SCREEN_SIZE = Vec(9.f, 4.4f);
+static const float LFO_SYNC_DX = 4.4f;
+static const float LFO_ROW2_LABEL_Y = 90.4f;
+static const float LFO_ROW2_Y = 94.8f;
+static const float LFO_KNOB_LABEL_Y = 99.f;
+static const float LFO_KNOB_Y = 103.f;
+static const float LFO_PHASE_LABEL_Y = 109.f;
+static const float LFO_OUT_Y = 114.8f;
 } // namespace xlayout
 
 /** The main module this expander is chained to, or null */
@@ -339,8 +353,11 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		int base;
 	};
 	std::vector<Bound> bound;
-	LinkedKnob<LfoRateKnobT<RoundSmallBlackKnob>>* rateKnob = nullptr;
-	ModeButton* destButtons[2] = {};
+	/** Each LFO's rate knob and the first ID of its SYNC (the knob's menu toggles the marker's) */
+	LinkedKnob<LfoRateKnobT<RoundSmallBlackKnob>>* rateKnobs[2] = {};
+	int rateSyncBase[2] = {};
+	/** AD 1, LFO 1, LFO 2, AD 2 */
+	ModeButton* destButtons[4] = {};
 	WaveArtifact* boundMain = nullptr;
 	/** Trig-lock dots and value bars over the bound controls (StepValueBars, as on the main module) */
 	StepValueBars* stepBars = nullptr;
@@ -361,10 +378,12 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 			b.widget->module = main;
 			b.widget->paramId = b.base + marker;
 		}
-		if (rateKnob) {
-			rateKnob->syncId = WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM + marker;
-			rateKnob->tripletId = WaveArtifact::MARKER_MOD_LFO_TRIPLET_PARAM + marker;
-			rateKnob->dottedId = WaveArtifact::MARKER_MOD_LFO_DOTTED_PARAM + marker;
+		for (int k = 0; k < 2; k++) {
+			if (!rateKnobs[k])
+				continue;
+			rateKnobs[k]->syncId = rateSyncBase[k] + marker;
+			rateKnobs[k]->tripletId = LFO_KIND_ALWAYS;
+			rateKnobs[k]->dottedId = LFO_KIND_ALWAYS;
 		}
 		// Redraw each one at its new value
 		for (Bound& b : bound) {
@@ -430,13 +449,18 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 		labels->add(Vec(GATE_JACK.x, TOP_LABEL_Y + 1.f), "GATE", 6.f);
 		labels->add(Vec(ATTACK_X, AD_NAME_Y), "ATTACK", 5.f);
 		labels->add(Vec(DECAY_X, AD_NAME_Y), "DECAY", 5.f);
-		labels->add(Vec(AD_DEST_BUTTON.x, AD_NAME_Y), "AD DEST", 5.f);
+		labels->add(Vec(AD_DEST_X, AD_NAME_Y), "AD DEST", 5.f);
+		labels->add(Vec(AD_NUM_X, AD_Y[0]), "1", 5.5f);
+		labels->add(Vec(AD_NUM_X, AD_Y[1]), "2", 5.5f);
 		labels->add(Vec(AD_DEPTH_X, AD_NAME_Y), "DEPTH", 5.f);
-		labels->add(Vec(LFO_X, LFO_LABEL_Y), "LFO", 6.f);
-		labels->add(Vec(LFO_X - LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "RATE", 6.f);
-		labels->add(Vec(LFO_X + LFO_KNOB_DX, LFO_KNOB_LABEL_Y), "AMT", 6.f);
-		labels->add(Vec(LFO_DEST_X, LFO_DEST_LABEL_Y), "LFO DEST", 5.f);
-		labels->add(Vec(LFO_DEST_X, LFO_KNOB_LABEL_Y), "DEPTH", 6.f);
+		for (int k = 0; k < 2; k++) {
+			float cx = LFO_COL_X[k];
+			labels->add(Vec(cx + LFO_LEFT_DX, LFO_ROW2_LABEL_Y), "DEST", 5.f);
+			labels->add(Vec(cx + LFO_RIGHT_DX, LFO_ROW2_LABEL_Y), "DEPTH", 5.f);
+			labels->add(Vec(cx + LFO_LEFT_DX, LFO_KNOB_LABEL_Y), "RATE", 5.f);
+			labels->add(Vec(cx + LFO_RIGHT_DX, LFO_KNOB_LABEL_Y), "AMT", 5.f);
+			labels->add(Vec(cx + LFO_RIGHT_DX, LFO_PHASE_LABEL_Y), "PHASE", 5.f);
+		}
 		addChild(labels);
 
 		ModeButton* marker = createParam<ModeButton>(Vec(0, 0), module, WaveArtifactExpander::MARKER_PARAM);
@@ -476,29 +500,56 @@ struct WaveArtifactExpanderWidget : ModuleWidget {
 			d->labels.assign(wa::MOD_DEST_SHORT, wa::MOD_DEST_SHORT + wa::NUM_MOD_DESTS);
 			return d;
 		};
-		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(ATTACK_X, AD_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_AD_ATTACK_PARAM));
-		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(DECAY_X, AD_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_AD_DECAY_PARAM));
-		addParam(bind(createLitToggle(PERC_BUTTON, nullptr, 0, "PERC", c, PERC_BUTTON_SIZE), WaveArtifact::MARKER_MOD_AD_PERC_PARAM));
-		destButtons[0] = bind(dest(AD_DEST_BUTTON), WaveArtifact::MARKER_MOD_AD_DEST_PARAM);
-		addParam(destButtons[0]);
-		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(AD_DEPTH_X, AD_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_AD_DEPTH_PARAM));
+		// The two ADs: the same controls per row, on the marker's AD 1 / AD 2 settings
+		struct AdIds {
+			int attack, decay, perc, dest, depth;
+		};
+		const AdIds adIds[2] = {
+			{WaveArtifact::MARKER_MOD_AD_ATTACK_PARAM, WaveArtifact::MARKER_MOD_AD_DECAY_PARAM, WaveArtifact::MARKER_MOD_AD_PERC_PARAM,
+				WaveArtifact::MARKER_MOD_AD_DEST_PARAM, WaveArtifact::MARKER_MOD_AD_DEPTH_PARAM},
+			{WaveArtifact::MARKER_MOD_AD2_ATTACK_PARAM, WaveArtifact::MARKER_MOD_AD2_DECAY_PARAM, WaveArtifact::MARKER_MOD_AD2_PERC_PARAM,
+				WaveArtifact::MARKER_MOD_AD2_DEST_PARAM, WaveArtifact::MARKER_MOD_AD2_DEPTH_PARAM},
+		};
+		for (int k = 0; k < 2; k++) {
+			float y = AD_Y[k];
+			const AdIds& ids = adIds[k];
+			addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(ATTACK_X, y)), nullptr, 0), ids.attack));
+			addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(DECAY_X, y)), nullptr, 0), ids.decay));
+			addParam(bind(createLitToggle(Vec(PERC_X, y), nullptr, 0, "PERC", c, PERC_BUTTON_SIZE), ids.perc));
+			destButtons[k == 0 ? 0 : 3] = bind(dest(Vec(AD_DEST_X, y)), ids.dest);
+			addParam(destButtons[k == 0 ? 0 : 3]);
+			addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(AD_DEPTH_X, y)), nullptr, 0), ids.depth));
+		}
 
-		addParam(bind(createLfoShapeScreen(Vec(LFO_X, LFO_SCREEN_Y), LFO_SCREEN_SIZE, nullptr, 0, c), WaveArtifact::MARKER_MOD_LFO_SHAPE_PARAM));
-		rateKnob = createLfoRateKnob<LinkedKnob<LfoRateKnobT<RoundSmallBlackKnob>>>(Vec(LFO_X - LFO_KNOB_DX, LFO_KNOB_Y), nullptr,
-			WaveArtifact::MARKER_MOD_LFO_RATE_PARAM, WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM,
-			WaveArtifact::MARKER_MOD_LFO_TRIPLET_PARAM, WaveArtifact::MARKER_MOD_LFO_DOTTED_PARAM);
-		addParam(bind(rateKnob, WaveArtifact::MARKER_MOD_LFO_RATE_PARAM));
-		// The jack's level: this expander's own
-		addParam(createParamCentered<Trimpot>(mm2px(Vec(LFO_X + LFO_KNOB_DX, LFO_KNOB_Y)), module, WaveArtifactExpander::LFO_AMT_PARAM + 0));
-		// SYNC (wide), then the narrow T and D, centered as a group under the shape screen.
-		addParam(bind(createLitToggle(Vec(LFO_X - 4.7f, LFO_BUTTON_Y), nullptr, 0, "SYNC", c), WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM));
-		addParam(bind(createLitToggle(Vec(LFO_X + 1.3f, LFO_BUTTON_Y), nullptr, 0, "T", c, layout::LFO_TOGGLE_SMALL), WaveArtifact::MARKER_MOD_LFO_TRIPLET_PARAM));
-		addParam(bind(createLitToggle(Vec(LFO_X + 6.f, LFO_BUTTON_Y), nullptr, 0, "D", c, layout::LFO_TOGGLE_SMALL), WaveArtifact::MARKER_MOD_LFO_DOTTED_PARAM));
-		addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(LFO_X, LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + 0));
-		addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(LFO_X + 8.6f, LFO_LABEL_Y)), module, WaveArtifactExpander::LFO_LIGHT));
-		destButtons[1] = bind(dest(Vec(LFO_DEST_X, LFO_DEST_Y)), WaveArtifact::MARKER_MOD_LFO_DEST_PARAM);
-		addParam(destButtons[1]);
-		addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(LFO_DEST_X, LFO_KNOB_Y)), nullptr, 0), WaveArtifact::MARKER_MOD_LFO_DEPTH_PARAM));
+		// The two LFOs: the same controls per column, on the marker's LFO 1 / LFO 2 settings
+		struct LfoIds {
+			int shape, rate, sync, dest, depth, phase;
+		};
+		const LfoIds lfoIds[2] = {
+			{WaveArtifact::MARKER_MOD_LFO_SHAPE_PARAM, WaveArtifact::MARKER_MOD_LFO_RATE_PARAM, WaveArtifact::MARKER_MOD_LFO_SYNC_PARAM,
+				WaveArtifact::MARKER_MOD_LFO_DEST_PARAM, WaveArtifact::MARKER_MOD_LFO_DEPTH_PARAM, WaveArtifact::MARKER_MOD_LFO_PHASE_PARAM},
+			{WaveArtifact::MARKER_MOD_LFO2_SHAPE_PARAM, WaveArtifact::MARKER_MOD_LFO2_RATE_PARAM, WaveArtifact::MARKER_MOD_LFO2_SYNC_PARAM,
+				WaveArtifact::MARKER_MOD_LFO2_DEST_PARAM, WaveArtifact::MARKER_MOD_LFO2_DEPTH_PARAM, WaveArtifact::MARKER_MOD_LFO2_PHASE_PARAM},
+		};
+		for (int k = 0; k < 2; k++) {
+			float cx = LFO_COL_X[k];
+			const LfoIds& ids = lfoIds[k];
+			addParam(bind(createLfoShapeScreen(Vec(cx + LFO_LEFT_DX, LFO_ROW1_Y), LFO_SCREEN_SIZE, nullptr, 0, c), ids.shape));
+			addParam(bind(createLitToggle(Vec(cx + LFO_SYNC_DX, LFO_ROW1_Y), nullptr, 0, "SYNC", c), ids.sync));
+			destButtons[1 + k] = bind(dest(Vec(cx + LFO_LEFT_DX, LFO_ROW2_Y)), ids.dest);
+			addParam(destButtons[1 + k]);
+			addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(cx + LFO_RIGHT_DX, LFO_ROW2_Y)), nullptr, 0), ids.depth));
+			rateKnobs[k] = createLfoRateKnob<LinkedKnob<LfoRateKnobT<RoundSmallBlackKnob>>>(Vec(cx + LFO_LEFT_DX, LFO_KNOB_Y), nullptr,
+				ids.rate, ids.sync, LFO_KIND_ALWAYS, LFO_KIND_ALWAYS);
+			rateSyncBase[k] = ids.sync;
+			addParam(bind(rateKnobs[k], ids.rate));
+			// The jack's level: this expander's own
+			addParam(createParamCentered<Trimpot>(mm2px(Vec(cx + LFO_RIGHT_DX, LFO_KNOB_Y)), module, WaveArtifactExpander::LFO_AMT_PARAM + k));
+			// The output under RATE, PHASE (the marker's, lockable) under AMT
+			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(cx + LFO_LEFT_DX, LFO_OUT_Y)), module, WaveArtifactExpander::LFO_OUTPUT + k));
+			addParam(bind(createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(cx + LFO_RIGHT_DX, LFO_OUT_Y)), nullptr, 0), ids.phase));
+			addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(cx + 8.6f, LFO_LIGHT_Y)), module, WaveArtifactExpander::LFO_LIGHT + 2 * k));
+		}
 
 		// Trig locks, as on the main module: a dot above each control some step of the marker's row locks (white
 		// where the selected step does), and while a step is selected a bar under each with the value it plays

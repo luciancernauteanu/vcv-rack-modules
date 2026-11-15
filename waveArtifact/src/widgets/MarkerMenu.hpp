@@ -119,3 +119,26 @@ inline void addMarkerCopyPasteItems(ui::Menu* menu, WaveArtifact* m, int i) {
 		copyEnvelopeToAll(m, i);
 	}));
 }
+
+/** An artifact's own sample in its right-click menus: which file it plays, load one for it, or back to the main one */
+inline void addArtifactSampleItems(ui::Menu* menu, WaveArtifact* m, int i) {
+	const SampleSlot& own = m->slots[1 + i];
+	if (own.hasFile())
+		menu->addChild(createMenuLabel("Own sample: " + own.fileName));
+	else
+		menu->addChild(createMenuLabel("Plays the main sample"));
+	menu->addChild(createMenuItem(own.hasFile() ? "Load another sample for it..." : "Load a sample for it...", "", [=]() {
+		openLoadDialog(m, 1 + i);
+	}));
+	if (own.hasFile()) {
+		menu->addChild(createMenuItem("Previous WAV in its folder", "", [=]() {
+			m->loadSibling(-1, 1 + i);
+		}, !m->hasSiblings(1 + i)));
+		menu->addChild(createMenuItem("Next WAV in its folder", "", [=]() {
+			m->loadSibling(1, 1 + i);
+		}, !m->hasSiblings(1 + i)));
+		menu->addChild(createMenuItem("Use the main sample", "", [=]() {
+			m->clearArtifactSample(i);
+		}));
+	}
+}

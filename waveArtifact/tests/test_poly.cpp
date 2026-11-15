@@ -1273,22 +1273,28 @@ static void checkReturn(const char* name, std::function<void(Rig&)> setup) {
 		runReturn(r, mode, 0.6, 0.3, &l, send);
 		return rms(l, 0, l.size());
 	};
-	double s0, s1, s2, s3;
+	double s0, s1, s2, s3, s4;
 	double open = level(1.f, RETURN_NONE, &s0), low = level(0.15f, RETURN_NONE, &s1);
 	double loop = level(0.15f, RETURN_LOOP, &s2), silent = level(0.15f, RETURN_SILENT, &s3);
-	double dB = 20.0 * std::log10(std::max(loop, 1e-9) / std::max(open, 1e-9));
-	std::printf("  %-13s: filter open %.4f, closed %.4f; RETURN looped from SEND %.4f (%+.2f dB from open), silent RETURN %.5f; send %.4f\n",
-		name, open, low, loop, dB, silent, s2);
+	double loopOpen = level(1.f, RETURN_LOOP, &s4);
+	double dB = 20.0 * std::log10(std::max(loop, 1e-9) / std::max(low, 1e-9));
+	double dBOpen = 20.0 * std::log10(std::max(loopOpen, 1e-9) / std::max(open, 1e-9));
+	std::printf("  %-13s: filter open %.4f, closed %.4f; RETURN looped from SEND: closed %.4f (%+.2f dB from closed), open %.4f (%+.2f dB);\n"
+		"                 silent RETURN %.5f; send closed %.4f, open %.4f\n",
+		name, open, low, loop, dB, loopOpen, dBOpen, silent, s2, s4);
 	CHECK(open > 0.01 && low < 0.5 * open, "%s: the check cannot fail (open %.4f, closed %.4f)", name, open, low);
-	CHECK(std::fabs(dB) < 1.5, "%s: the looped RETURN is %+.2f dB from the open filter", name, dB);
+	// The filter stays in the flow: the SEND is after it, so the looped RETURN sounds like the artifact's own filter
+	CHECK(std::fabs(dB) < 1.5, "%s: the looped RETURN is %+.2f dB from the closed filter (the filter left the flow?)", name, dB);
+	CHECK(std::fabs(dBOpen) < 1.5, "%s: with the filter open the looped RETURN is %+.2f dB from no return", name, dBOpen);
+	CHECK(s2 < 0.5 * s4, "%s: the SEND does not carry the filter (closed %.4f, open %.4f)", name, s2, s4);
 	CHECK(silent < 0.02 * open, "%s: a silent RETURN still lets %.5f through", name, silent);
-	CHECK(s2 > 0.1 * open, "%s: the SEND is nearly silent (%.4f)", name, s2);
+	CHECK(s4 > 0.1 * open, "%s: the SEND is nearly silent (%.4f)", name, s4);
 }
 
 static void testSendReturn() {
 	std::printf("SEND / RETURN\n");
-	// Marker 1 under the playhead, its CUTOFF closed (0.15, 57 Hz LP). The send is taken before the filter, so a
-	// return that just loops it back sounds like the filter wide open; a silent return silences the marker.
+	// Marker 1 under the playhead, its CUTOFF closed (0.15, 57 Hz LP). The send is taken after DRIVE and the filter,
+	// so a return that just loops it back sounds like the marker's own (closed) filter; a silent return silences it.
 	checkReturn<WaveRig>("WAVE, MORPH", [](WaveRig& r) {
 		r.in.poly = false;
 		r.in.wantSend = true;

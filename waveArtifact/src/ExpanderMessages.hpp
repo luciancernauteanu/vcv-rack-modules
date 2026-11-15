@@ -156,15 +156,23 @@ struct ToExpanderMessage {
 	bool linked = false;
 	/** RESET arrived this sample: restart the LFOs */
 	bool reset = false;
-	/** The main module runs the granular engine: the CV inputs are labelled START / P.SPRD / DENSITY */
+	/** Artifact 1 runs the granular engine (kept for the message layout; the expanders read `engines`) */
 	bool granular = false;
-	/** The main module runs the sample player: WAVE reads START and FINE is LENGTH */
+	/** Artifact 1 runs the sample player (kept; see `engines`) */
 	bool sample = false;
+	/** Each artifact's engine (0 WAVE, 1 GRAIN: the CV inputs are labelled START / P.SPRD / DENSITY, 2 SAMPLE: WAVE
+	reads START and FINE is LENGTH) */
+	uint8_t engines[NUM_MARKERS] = {};
 	/** The main module is in POLY: GATE plays the marker's own ADSR instead of scaling its level */
 	bool poly = false;
 	/** Each marker's expander LFO (-1..1, run by the main module: its settings are marker settings, lockable), for
 	the expanders' LFO jacks */
 	float modLfo[NUM_MARKERS] = {};
+	/** ... and its LFO 2, for the expanders' second LFO jack */
+	float modLfo2[NUM_MARKERS] = {};
+	/** Each artifact's SEND (what its filter gets, L and R, +-1 = 5 V), for the stereo SEND / RETURN module at the
+	end of the chain */
+	float sendL[NUM_MARKERS] = {}, sendR[NUM_MARKERS] = {};
 };
 
 /** Main -> sequencer (the sequencer sits on the LEFT of the main module). The beat position is a level and the
@@ -182,11 +190,13 @@ struct ToSequencerMessage {
 struct FromSequencerMessage {
 	bool linked = false;
 	uint32_t fireCount[NUM_MARKERS] = {};
+	/** A phantom (trigless) lock played: the locks below changed without a note */
+	uint32_t lockCount[NUM_MARKERS] = {};
 	float velocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	/** The latest played step's locks (see StepLocks.hpp), its slide (0 = off, else the share of a step it glides
 	over), and one step's length in beats */
 	float lockValue[NUM_MARKERS][NUM_LOCKABLE] = {};
-	uint64_t lockMask[NUM_MARKERS] = {};
+	LockMask lockMask[NUM_MARKERS];
 	float slide[NUM_MARKERS] = {};
 	double stepBeats[NUM_MARKERS] = {0.25, 0.25, 0.25, 0.25, 0.25};
 	/** The latest played step is tied to the one before: its note goes on (see PolyVoices legato) */
@@ -209,9 +219,17 @@ struct ToMainMessage {
 	bool modulated[NUM_MARKERS] = {};
 	/** An expander's LFO jack is patched for the artifact: its LFO must run even while it moves nothing */
 	bool lfoJack[NUM_MARKERS] = {};
+	/** ... and its LFO 2 jack */
+	bool lfoJack2[NUM_MARKERS] = {};
 	/** The CVs on the other knobs (CvDestInfo::fast = -1), from every linked expander */
 	CvKnobMod knobMods[MAX_CV_KNOB_MODS] = {};
 	int numKnobMods = 0;
+	/** The stereo SEND / RETURN module (end of the chain): an artifact's RET L is patched (its return replaces the
+	artifact's filter, over the main panel's RETURN), with its volts (RET R unpatched: RET L on both sides) */
+	bool stereoReturn[NUM_MARKERS] = {};
+	float stereoRetL[NUM_MARKERS] = {}, stereoRetR[NUM_MARKERS] = {};
+	/** One of its SEND jacks is patched (the engines work out the sends only while one is) */
+	bool stereoSendWanted = false;
 };
 
 } // namespace wa

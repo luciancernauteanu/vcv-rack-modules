@@ -6,11 +6,12 @@
     <rect id="background" x="0" y="0" width="50.8" height="128.5" fill="#e9e7e2"/>
     <g id="sections" fill="#d9d6cf">
       <rect x="4" y="11" width="42.8" height="13.8" rx="2" ry="2"/>
-      <rect x="4" y="41.2" width="42.8" height="38" rx="2" ry="2"/>
-      <rect x="4" y="26" width="42.8" height="14" rx="2" ry="2"/>
+      <rect x="4" y="49.2" width="42.8" height="30" rx="2" ry="2"/>
+      <rect x="4" y="26" width="42.8" height="22" rx="2" ry="2"/>
       <rect x="4" y="80.4" width="42.8" height="40.3" rx="2" ry="2"/>
     </g>
-    <rect id="lfo1-out" x="7.8" y="109.8" width="14" height="9.6" rx="1.5" ry="1.5" fill="#26282c"/>
+    <rect id="lfo1-out" x="5.1" y="109.8" width="10" height="9.6" rx="1.5" ry="1.5" fill="#26282c"/>
+    <rect id="lfo2-out" x="26.5" y="109.8" width="10" height="9.6" rx="1.5" ry="1.5" fill="#26282c"/>
   </g>
   <g id="components" style="display:none">
     <rect id="MARKER_PARAM" x="5" y="13.25" width="16" height="6.5" fill="#ff0000"/>
@@ -33,11 +34,12 @@
     <circle id="MOD_LFO_DEPTH (main param)" cx="36.2" cy="104.4" r="3" fill="#ff0000"/>
     <rect id="MOD_AD_PERC (main param)" x="20" y="32" width="7.4" height="4.4" fill="#ff0000"/>
     <rect id="LFO_SHAPE_PARAM_0" x="6.8" y="85.6" width="16" height="6.4" fill="#ff0000"/>
-    <circle id="LFO_RATE_PARAM_0" cx="9.7" cy="104.4" r="4" fill="#ff0000"/>
-    <circle id="LFO_AMT_PARAM_0" cx="19.9" cy="104.4" r="3" fill="#ff0000"/>
+    <circle id="LFO_RATE_PARAM_0" cx="10.1" cy="103" r="4" fill="#ff0000"/>
+    <circle id="LFO_AMT_PARAM_0" cx="20.1" cy="103" r="3" fill="#ff0000"/>
     <rect id="LFO_SYNC_PARAM_0" x="6.7" y="93" width="6.8" height="4.4" fill="#ff0000"/>
     <rect id="LFO_TRIPLET_PARAM_0" x="14" y="93" width="4.2" height="4.4" fill="#ff0000"/>
     <rect id="LFO_DOTTED_PARAM_0" x="18.7" y="93" width="4.2" height="4.4" fill="#ff0000"/>
-    <circle id="LFO_OUTPUT_0" cx="14.8" cy="114.6" r="4" fill="#0000ff"/>
+    <circle id="LFO_OUTPUT_0" cx="10.1" cy="114.8" r="4" fill="#0000ff"/>
+    <circle id="MOD_LFO_PHASE (main param)" cx="20.1" cy="114.8" r="3" fill="#ff0000"/>
   </g>
 </svg>
