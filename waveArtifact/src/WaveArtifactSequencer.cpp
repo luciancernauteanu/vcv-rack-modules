@@ -294,7 +294,7 @@ json_t* WaveArtifactSequencer::dataToJson() {
 				if (d.mask & d.condMask) {
 					json_t* conds = json_object();
 					for (int k = 0; k < wa::NUM_LOCKABLE; k++) {
-						if (!d.locked(k) || !((d.condMask >> k) & 1u))
+						if (!d.locked(k) || !d.condMask.test(k))
 							continue;
 						const wa::Condition& c = d.lockCond[k];
 						json_t* cj = json_object();
@@ -1383,7 +1383,7 @@ struct LockLane : widget::OpaqueWidget {
 		float v = q->getMinValue() + t * (q->getMaxValue() - q->getMinValue());
 		int k = clamp(module->laneSetting, 0, wa::NUM_LOCKABLE - 1);
 		WaveArtifact* main = mainOf(module);
-		bool choice = main && (main->lockJumpMask >> k & 1u);
+		bool choice = main && main->lockJumpMask.test(k);
 		return (choice || q->snapEnabled) ? std::round(v) : v;
 	}
 

@@ -6,7 +6,7 @@ thread they run on and the state they touch. Search a function name to find it (
 
 **Keep it current:** every change to the module updates the matching section here, and the change log at the end.
 
-Last updated: 2026-11-14.
+Last updated: 2026-11-15.
 
 ---
 
@@ -77,7 +77,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 | Read the file | `loadFile(path, slot)`: size checks (`MAX_FILE_BYTES`), `wavBytes`, `wavHash`, `fileName`, then `startAnalysis(slot)` |
 | Analysis | `startAnalysis`: worker thread -> `wa::analyzeWav` (WavetableBank.cpp) -> `pendingBank` (generation check drops stale results) |
 | The new bank plays | `process()`: main slot swaps when the engines are silent (`swapWanted` fades everything 5 ms); an artifact's own slot swaps when that artifact is silent (`markerSwap[i]`, checked every 32 samples) and sets `markerSlot[i]`; the old bank goes to `retiredBank`, freed by `uiStep()` |
-| Hits for HIT / LAY | `uiStep()` -> `updateTransients(slot)` (only when an artifact on GRAIN / SAMPLE plays that file: `slotHeardAsSample`) -> `wa::findTransients(sample, HITS slider)`; handed to audio via `hitsPending` -> `hitsActive` |
+| Hits for HIT / LAY | **Per artifact**: `artHits[i]` (`ArtifactHits`), its own slider `MARKER_HIT_SENSITIVITY_PARAM + i` (one `MiniSlider` per artifact, `hitsSliders[i]`, the selected one shown; Shift + drag: every artifact, via `linkStep`). `uiStep()` -> `updateHits(i)` (on GRAIN / SAMPLE; 30 ms drag throttle; copies another artifact's list on the same file at the same setting) -> `wa::findTransients(sample of slotOf(i), its slider)`; handed to audio via `pending` -> `active` (`markerHits(i)`). Old patches: `dataFromJson` copies `SAMPLE_HIT_SENSITIVITY_PARAM` into all five (flag `artifactHits`) |
 | Status line | `setStatus` / `getStatus(slot)`; `MarkerBar::drawStatus` prefixes "Main:" when the selected artifact plays the main sample and another has its own |
 
 ## 4. Artifacts (markers): add, select, move, mute, copy, link
@@ -140,7 +140,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 | STOP | `STOP_PARAM` -> `holdSilent` (5 ms fade; LFOs and clock keep running) |
 | WAVE LFO (per artifact) | `lfos[i]` -> `m.lfo`, only on WAVE with AMT > 0 (`waveLfoLive` grace 1 s) |
 | POS LFO | `posLfo` + `posLfoSmoother` (SMOOTH), centred sweep `lfoCentered` |
-| Expander LFO + AD | `modLfos[i]`, `modAds[i]` (`MarkerMod.hpp`), routed by `ModSum` to a destination with depth; live only while heard (`modLfoLive`) |
+| Expander LFO 1, LFO 2, AD 1, AD 2 | `modLfos[i]`, `modLfos2[i]`, `modAds[i]`, `modAds2[i]` (`MarkerMod.hpp`; AD 2 starts on the same notes, trigs and GATE as AD 1 and runs only while its DEPTH is not 0 or the sequencer is on), each routed by `ModSum` to its destination with its depth; live only while heard (`modLfoLive` / `modLfoLive2`: depth, its jack via `lfoJack` / `lfoJack2`, or the sequencer on). Settings are the marker's (`MARKER_MOD_LFO_*`, `MARKER_MOD_LFO2_*`: lockable rate, shape, DEST, DEPTH). Synced rates step through **every** note value (`LFO_KIND_ALWAYS` in `LfoRateQuantity` / `LfoRateKnobT`; the old T / D params are unused): an older patch's synced LFO 1 knob moves to the same note value on the full list (`wa::lfoKnobAllKinds`, `dataFromJson`, flag `lfoAllKinds`). Expander panel: two columns (small shape screen + SYNC, DEST + DEPTH, RATE + AMT, jack `LFO_OUTPUT + k`), bound to the marker in `WaveArtifactExpanderWidget::rebind` |
 | Expander CV | `ToMainMessage`: fast paths `mod[i][...]` (wave, cutoff, drive, fine, pan, gain VCA `gainMul`), slow ones as `knobMods` -> `cvAdd` / `cvMask` read in `refreshSettings` / `mv()` |
 | Master CV | `masterCv(...)` per master knob, gain CV as a VCA |
 
@@ -161,14 +161,18 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 
 Entry: the row's LAY button (`WaveArtifactSequencer.cpp pressHeadButton`), the marker / map menus ("Lay out the loop on
 the row", `appendLoopLayoutMenu` / `appendLoopLayoutItems`), Shift + drag on the map to pick a part (`WavetableMap`,
-`wa::laySelection`, snaps to a hit and to 1, 2, 4... beats).
+`wa::laySelection`, snaps to a hit and to 1, 2, 4... beats). The drag and LAY count beats in **one** tempo,
+`layGridBpm(slot)` (the loop's own grid, else the audio's, else the name's): with the audio's alone a 120 bpm loop of
+16ths read as 160 (4 / 3), so a "4 beats" drag was 3 beats to LAY and gave 12 steps.
 
 | Step | Code |
 |---|---|
-| What is laid out | `loopLayoutInfo(marker)`: only GRAIN / SAMPLE artifacts with the sequencer on; the slice from START to LENGTH (or the next active marker on the same file); counts hits (`updateTransients`) |
+| What is laid out | `loopLayoutInfo(marker)`: only GRAIN / SAMPLE artifacts with the sequencer on; the slice from START to LENGTH (or the next active marker on the same file); counts its hits |
+| Which hits | `layHits(marker)`: exactly that artifact's own HITS slider's list (the map's ticks while it is selected; fewer .. more), all worked out first when the file or the slider changed (`updateHits(marker, true)`: no drag throttle, whatever its engine). The LAY menu shows the count and its slider. At 0 % a loud hit hides the ones near it (6 dB range, 250 ms gap): raise the slider for more slices |
+| On the file's beats | First `wa::loopFileBpm(fileSeconds, bpmFromName, fileTempoOf, moduleTempo)`: the name's tempo (also a leading `90_` / `120 `), else the one found in the whole file, at an octave where the **whole file is whole beats** (within 1 %). If there is one, the part starts on the hit nearest START (within 1/8 beat) and lasts whole beats, and that is the row's tempo (a slice set by hand a few ms off the beat stretched the steps off the hits). Else: |
 | How many beats | `wa::loopTempo(onsetOf(slot), ...)`: the beat count whose grid is strongest in the onset curve, the octave nearest the module's tempo; else the file name's (`bpmFromName`, only a number next to "bpm"); else `guessLoopBeats` |
-| Which row | `wa::layoutRow(beats, 16)`: the finest row clock whose steps cover the loop in whole steps (at most 16) |
-| Which trigs | `wa::layoutTrigs(hits, from, frames, steps, grid, laySnapSteps(stepSeconds))`: a trig only on a hit within **12 ms / 0.2 step** of a step (`LAY_SNAP_SECONDS`, `LAY_SNAP_STEPS`), the nearest per step; a hit between steps plays inside the slice before it, at its own time (no micro-timing in the sequencer); step 1 always from the loop's start; each trig plays up to the next. "On every step": `grid` |
+| Which row | `wa::layoutRowForHits(hits, ...)`: of the row clocks whose steps cover the part in whole steps (at most 16), the one with the most hits right on a step (within the snap), then the most trigs; a tie goes to the finer (a triplet loop gets x3 / /3). "On every step": `wa::layoutRow` (the finest). The LAY menu shows the steps, clock and "N of the M hits on trigs" per length. 16 steps is the limit: a 3-beat part of 32nds (24 steps) keeps its 16ths only; lay out a shorter part (Shift + drag) for finer |
+| Which trigs | `wa::layoutTrigs(layHits(marker), from, frames, steps, grid, laySnapSteps(stepSeconds))`: **every** hit gets a trig on its nearest step (the nearest per step). Its slice starts on the hit when it is within **12 ms / 0.2 step** (`LAY_SNAP_SECONDS`, `LAY_SNAP_STEPS`); further off (a live break's early 16th, a 16th on an 8th row) it starts on the step's own place in the audio, so the hit plays at its own time inside its slice or at the end of the one before (no micro-timing in the sequencer). Step 1 always from the loop's start; each trig plays up to the next. "On every step": `grid` |
 | Writing the row | `layoutLoopOnRow`: clears the row, sets length / clock, per trig START lock and LENGTH (`setSliceLocks`; GRAIN: HOLD too), velocity from the hit's peak (`hitPeakDb`, `layVelocity`), sets the artifact for clean playback (FREE length, ONE, no attack, SEQ; GRAIN: real-time scan, Tukey grains); `layoutLoopWithUndo` wraps it in one undo for both modules |
 | Random slices | `randomizeSlices`: the row's lit steps play random slices from the same list (`layoutTrigs` with the same tolerance), each up to the next trig |
 
@@ -176,9 +180,9 @@ the row", `appendLoopLayoutMenu` / `appendLoopLayoutItems`), Shift + drag on the
 
 | Thing | Code |
 |---|---|
-| SEND per artifact | Engines' `getSend(i)` (what its filter gets, before its level) -> `SEND_OUTPUT + i` (2 ch, or L+R mono when a mono module answers: `monoSend`), and `chainSendL/R` to the SEND / RETURN module through the expander chain |
-| RETURN per artifact | `RETURN_INPUT + i` or the SEND / RETURN module's RET L/R (`ToMainMessage::stereoReturn`, wins): replaces that artifact's filter (20 ms crossfade). It is **after** the artifact's GAIN and note level, so a shared effect bus returned into one artifact gets gated by that artifact's notes (use a mixer return for a bus) |
-| SEND / RETURN module | `WaveArtifactSendReturn::process`: sits at the end of the expander chain, reads `ToExpanderMessage::sendL/R`, writes `ToMainMessage` returns |
+| SEND per artifact | **Only on the stereo SEND / RETURN module** (the main panel's SEND / RETURN jacks are gone; `SEND_OUTPUT` / `RETURN_INPUT` IDs reserved, old cables dropped as they have no port widget). Engines' `getSend(i)` (what its filter gets, before its level) -> `chainSendL/R` -> `ToExpanderMessage::sendL/R` along the expander chain |
+| RETURN per artifact | The SEND / RETURN module's RET L/R (`ToMainMessage::stereoReturn`). `MARKER_RETURN_MODE_PARAM + i` (`settings[i].returnBus`): **INSERT** (default): replaces that artifact's filter (20 ms crossfade), after its GAIN and note level, so a shared bus returned into one artifact is gated by its notes. **BUS**: `in.busSend[i]` makes the engines' send the finished sound (after filter, level, gain, pan: GrainEngine cloud loop, MorphEngine `renderPoly` / `renderChains`), x the SEND level `MARKER_SEND_LEVEL_PARAM + i` (lockable per trig, default 0, slewed 5 ms: `sendLevelS`); the return (`busRet[i]`) is added to the mix before the master, ungated, so a delay's tail rings out after the trig that fed it (Elektron style). Slot tag BUS (`shownBus`) |
+| SEND / RETURN module | `WaveArtifactSendReturn::process`: sits at the end of the expander chain, reads `ToExpanderMessage::sendL/R`, writes `ToMainMessage` returns. Each row's second line: a SEND `LinkedKnob<Trimpot>` (a plain knob cannot lock: with smoothed params the per-frame revert of `lockCaptureStep` fights it; LinkedKnob writes the selected trig's lock directly) and an INS / BUS `ModeButton`, bound in `WaveArtifactSendReturnWidget::step()` to the main module's params (`mainOnLeft()` walks the expander chain), so trig locks work as on the main knobs (`lockCaptureStep` with a step selected) |
 | Master | `mixMaster` (filter type, cutoff, res, spread, feedback, drive + CV), master gain (+CV VCA), `mixLimiter` (10 V), mono option (`monoOutput`, 10 ms crossfade) -> `LEFT_OUTPUT` / `RIGHT_OUTPUT` |
 
 ## 12. What the screens show
@@ -202,5 +206,33 @@ line), `WavetableMap` (tables or waveform, hits, scan loops, loop point, preview
 
 ## Change log
 
+- 2026-11-15: a second expander AD per marker (attack, decay, PERC, DEST, DEPTH; a second row on the panel, the CV
+  section a little shorter). Settings list 67, past 64: the lock masks are `wa::LockMask` (128 bits, `StepLocks.hpp`)
+  instead of `uint64_t`; `NOT_LOCKABLE` is a list (section 8, 9).
+
+- 2026-11-15: the main panel is 36 HP (182.88 mm, was 42): the empty SEND / RETURN column is gone (`PANEL_W`, both
+  SVGs). In an existing patch the expanders to its right sit 6 HP away until moved back against it.
+- 2026-11-15: the main panel's SEND / RETURN jacks and their box are removed (no replacement; the column is empty):
+  sends and returns only through the stereo SEND / RETURN module (section 11).
+- 2026-11-15: a second expander LFO per marker (rate, shape, sync, DEST, DEPTH, its own jack and level); both LFOs
+  step through every note value (no T / D; old synced rates keep their note value); smaller shape screens. Fresh
+  modules' LFO 1 starts at 1/4 (knob 0.565). Settings list 62 (section 8).
+- 2026-11-15: RETURN mode per artifact (INSERT / BUS) and a SEND level lockable per trig, on the SEND / RETURN module's
+  rows: a delay only on the trigs that send to it, its tail ringing out (section 11). Settings list 57.
+- 2026-11-15: every found hit gets a trig again; one off its step by more than 12 ms starts its slice on the step's
+  place (a break's 16th 21 ms early was dropped: 1 trig for 2 hits). The row clock scores hits right on steps first
+  (section 10).
+- 2026-11-15: the map's Shift + drag counts beats in LAY's tempo (`layGridBpm`): a 4-beat drag now lays 4 beats
+  (16 steps), not 3 (12) (section 10).
+- 2026-11-15: LAY picks the row clock that puts the most hits on trigs (`layoutRowForHits`), not the finest; the
+  LAY menu shows how many hits each length places (section 10).
+- 2026-11-15: each artifact has its own HITS slider and hit list (`ArtifactHits`, `updateHits`; sections 3, 10):
+  LAY, HIT, the map's ticks and the hit arrows use the artifact's own. Settings list 55 (HITS not lockable).
+- 2026-11-15: LAY uses exactly the HITS slider's hits again (the 50 % floor removed, at the user's request), always
+  up to date when it lays out; the LAY menu shows the slider (section 10).
+- 2026-11-15: LAY puts the part on the loop file's own beat grid (`loopFileBpm`, name prefix tempos): a 90 bpm
+  break's 1.38 s slice (7 ms late, 3.5 % long) got 1 trig, now 7 on its 16ths (section 10).
+- 2026-11-15: LAY finds its own hits at the HITS slider but at least 50 % (`layHits`): at 0 % a drum break's slice
+  got 3 trigs of its 8 (section 10).
 - 2026-11-14: each artifact has its own engine (section 5); one shared master section; WAVE priming; the screen loads
   into the selected artifact (section 3); LAY only cuts at hits close to a step (section 10). File created.

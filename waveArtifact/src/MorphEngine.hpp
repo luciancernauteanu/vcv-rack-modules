@@ -98,6 +98,9 @@ struct EngineInput {
 	bool insert[NUM_MARKERS] = {};
 	float retL[NUM_MARKERS] = {};
 	float retR[NUM_MARKERS] = {};
+	/** BUS mode (the module's RETURN mode): the marker's SEND is its finished sound (after its filter, level, gain and
+	pan) instead of what its filter gets; its return goes to the module's mix, not here */
+	bool busSend[NUM_MARKERS] = {};
 	/** POLY play mode: the voices below instead of the morph. Switching fades like a structural change. */
 	bool poly = false;
 	/** Level of each marker's ADSR, 0..1 */
@@ -685,6 +688,11 @@ private:
 					yl += (in.retL[m] * env * gain * cl - yl) * k;
 					yr += (in.retR[m] * env * gain * cr - yr) * k;
 				}
+				// BUS: the send is the voice as it is heard
+				if (in.busSend[m]) {
+					sendL[m] = yl;
+					sendR[m] = yr;
+				}
 			}
 			else {
 				d.running = false;
@@ -788,6 +796,11 @@ private:
 			// The return already carries the position share (the send did)
 			float el = in.retL[m] * gain * cl, er = in.retR[m] * gain * cr;
 			float yl = y * cl + (el - y * cl) * k, yr = y * cr + (er - y * cr) * k;
+			// BUS: the send is the artifact's own chain as heard (its share of the playhead, its filter)
+			if (in.busSend[m]) {
+				sendL[m] = yl;
+				sendR[m] = yr;
+			}
 			if (in.wantDirect[m])
 				d.limiter.process(yl, yr, LIMIT, &directL[m], &directR[m]);
 			else

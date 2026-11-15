@@ -223,7 +223,8 @@ struct WavetableMap : widget::Widget {
 		const wa::WavetableBank* b = bank();
 		if (!b || !b->sample.valid())
 			return;
-		const SampleSlot& s = module->slots[slot()];
+		// The selected artifact's hits (its own HITS slider)
+		const ArtifactHits& s = module->artHits[module->selectedMarker];
 		long total = (long) b->sample.frames;
 		double sr = (double) b->sample.sampleRate;
 		// A press within 3 % of the map's width of a hit starts on it
@@ -330,19 +331,9 @@ struct WavetableMap : widget::Widget {
 		if (e.button == GLFW_MOUSE_BUTTON_LEFT && (e.mods & RACK_MOD_MASK) == GLFW_MOD_SHIFT && isGrain() && b->sample.valid() &&
 			onMap(module->selectedMarker)) {
 			layMarker = module->selectedMarker;
-			module->updateTransients(slot());
-			// The file's tempo from its hits; the name's only when the audio shows no clear beat
-			bool fromName = false;
-			wa::FoundTempo ft = module->fileTempoOf(slot(), &fromName);
-			double named = wa::bpmFromName(module->slots[slot()].fileName);
-			if (ft.found) {
-				layBpm = ft.bpm;
-				layTempoFrom = fromName ? "found, as its name says" : "found";
-			}
-			else {
-				layBpm = named;
-				layTempoFrom = named > 0.0 ? "its name" : "";
-			}
+			module->updateHits(layMarker, true);
+			// The same tempo LAY counts beats in (the loop's own grid first), so the beats picked here are the beats laid out
+			layBpm = module->layGridBpm(slot(), &layTempoFrom);
 			layAnchor = layTo = frameAt(e.pos.x);
 			updateLaySelection();
 			e.consume(this);
@@ -774,10 +765,10 @@ struct WavetableMap : widget::Widget {
 			}
 		}
 
-		// SAMPLE and GRAIN: the hits found (the HITS slider), short ticks along the bottom
-		if ((int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) >= 1 && module->slots[slot()].transientFrames > 0) {
-			const SampleSlot& s = module->slots[slot()];
-			module->updateTransients(slot());
+		// SAMPLE and GRAIN: the selected artifact's hits (its own HITS slider), short ticks along the bottom
+		if ((int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) >= 1 && module->artHits[module->selectedMarker].transientFrames > 0) {
+			const ArtifactHits& s = module->artHits[module->selectedMarker];
+			module->updateHits(module->selectedMarker);
 			nvgBeginPath(vg);
 			for (long t : s.transients) {
 				float x = (float) ((double) t / (double) s.transientFrames) * W;

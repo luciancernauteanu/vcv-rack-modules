@@ -66,6 +66,12 @@ inline int lfoDivision(float knob, bool triplets, bool dotted) {
 	return NUM_SYNC_DIVISIONS - 1;
 }
 
+/** A synced rate knob as it would be with every note value on (triplets and dotted): the same note value. For LFOs
+whose T / D switches went away (always on); an older patch's knob moves so it keeps its note value. */
+inline float lfoKnobAllKinds(float knob, bool triplets, bool dotted) {
+	return (float) lfoDivision(knob, triplets, dotted) / (float) (NUM_SYNC_DIVISIONS - 1);
+}
+
 /** Folds x into 0..1 by reflection, so modulation past an end bounces back instead of sticking. */
 inline float fold01(float x) {
 	x = std::fmod(std::fabs(x), 2.f);

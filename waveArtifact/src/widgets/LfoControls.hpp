@@ -2,14 +2,24 @@
 #include "../Lfo.hpp"
 #include "../plugin.hpp"
 
+/** A triplet / dotted "param" that is always on: the LFO steps through every note value and has no switch for it */
+static const int LFO_KIND_ALWAYS = -2;
+
+/** The default of a synced rate knob, given as it was with straight values only, for an LFO with every kind on */
+inline float lfoAllKindsKnob(float straightKnob) {
+	return wa::lfoKnobAllKinds(straightKnob, false, false);
+}
+
 /** LFO rate: Hz in free mode, note value (e.g. "1/8T") in sync mode, from the enabled kinds.
-The sync/triplet/dotted switches are other params of the same module. */
+The sync/triplet/dotted switches are other params of the same module (LFO_KIND_ALWAYS: always on). */
 struct LfoRateQuantity : ParamQuantity {
 	int syncId = -1;
 	int tripletId = -1;
 	int dottedId = -1;
 
 	bool flag(int paramId) {
+		if (paramId == LFO_KIND_ALWAYS)
+			return true;
 		return module && paramId >= 0 && module->params[paramId].getValue() > 0.5f;
 	}
 	bool isSync() {
@@ -63,8 +73,11 @@ struct LfoRateKnobT : TBase {
 			);
 		};
 		menu->addChild(toggle(syncId, "Sync to tempo (BPM / CLOCK)"));
-		menu->addChild(toggle(tripletId, "Triplets"));
-		menu->addChild(toggle(dottedId, "Dotted"));
+		// Kinds that are always on have no switch
+		if (tripletId >= 0)
+			menu->addChild(toggle(tripletId, "Triplets"));
+		if (dottedId >= 0)
+			menu->addChild(toggle(dottedId, "Dotted"));
 	}
 };
 

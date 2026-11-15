@@ -118,9 +118,13 @@ static void testLockable() {
 	int count = 0;
 	for (int k = 0; k < wa::NUM_LOCKABLE; k++)
 		count += wa::isLockable(k) ? 1 : 0;
-	std::printf("  lockable settings: %d of %d (want 37: SAMPLE's LOOP point locks, its ONE / LOOP / PING does not; the expander LFO's\n"
-		"  rate, shape, DEST, DEPTH and the AD's attack, decay, DEST, DEPTH lock, their SYNC / T / D and PERC do not)\n", count, wa::NUM_LOCKABLE);
-	CHECK(count == 37, "lockable count %d", count);
+	std::printf("  lockable settings: %d of %d (want 46: SAMPLE's LOOP point locks, its ONE / LOOP / PING does not; the expander LFO's\n"
+		"  rate, shape, DEST, DEPTH and the AD's attack, decay, DEST, DEPTH lock, their SYNC / T / D and PERC do not; the BUS SEND\n"
+		"  level and the expander LFO 2 and AD 2 lock as LFO 1 and AD 1; ENGINE, HITS, RETURN mode, LFO 2 SYNC, AD 2 PERC do not)\n",
+		count, wa::NUM_LOCKABLE);
+	CHECK(count == 46, "lockable count %d", count);
+	CHECK(wa::isLockable(55) && std::string(wa::LOCK_NAMES[55]) == "sendLevel", "the SEND level locks per trig");
+	CHECK(!wa::isLockable(53) && !wa::isLockable(54) && !wa::isLockable(56), "ENGINE, HITS, RETURN mode are per artifact only");
 	// The expander modulation (StepLocks.hpp 41..52)
 	for (int k : {41, 42, 46, 47, 48, 49, 51, 52})
 		CHECK(wa::isLockable(k), "%s must be lockable", wa::LOCK_NAMES[k]);
@@ -235,7 +239,7 @@ static void testSlideAmountAndTie() {
 	CHECK(m.slide == 0.6f && m.tie, "its own slide, marked tied");
 	wa::StepData empty;
 	wa::StepData m2 = wa::mergeTied(head, empty);
-	CHECK(m2.mask == head.mask, "a tied step without locks keeps the group's: %llx vs %llx", (unsigned long long) m2.mask, (unsigned long long) head.mask);
+	CHECK(m2.mask == head.mask, "a tied step without locks keeps the group's: %llx vs %llx", (unsigned long long) m2.mask.w[0], (unsigned long long) head.mask.w[0]);
 	wa::StepData t;
 	t.tie = true;
 	CHECK(!t.isPlain(), "a tie is saved");
@@ -279,7 +283,7 @@ static void testLockConditions() {
 	half.a = 1;
 	half.b = 2;
 	s.setLockCondition(CUT, half);
-	CHECK(s.condMask == (1ull << CUT), "only CUTOFF has a condition: %llx", (unsigned long long) s.condMask);
+	CHECK(s.condMask == (1ull << CUT), "only CUTOFF has a condition: %llx", (unsigned long long) s.condMask.w[0]);
 	// 1:2 applies on passes 1, 3 ... (index 0, 2) and not on 2, 4 ...; DRIVE (no condition) always stays
 	for (long p = 0; p < 6; p++) {
 		wa::StepData out = s;
@@ -319,8 +323,9 @@ static void testLockConditions() {
 	int draws = 0;
 	wa::StepData out = plain;
 	wa::applyLockConditions(out, plain, 0, [&]() { draws++; return 0.f; });
-	CHECK(out.mask == plain.mask && draws == 0, "no lock conditions: mask %llx, draws %d", (unsigned long long) out.mask, draws);
+	CHECK(out.mask == plain.mask && draws == 0, "no lock conditions: mask %llx, draws %d", (unsigned long long) out.mask.w[0], draws);
 }
+
 int main() {
 	testLockConditions();
 	testGlideValue();

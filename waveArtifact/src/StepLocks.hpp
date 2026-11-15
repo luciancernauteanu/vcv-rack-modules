@@ -11,7 +11,7 @@
 
 namespace wa {
 
-static const int NUM_LOCKABLE = 54;
+static const int NUM_LOCKABLE = 67;
 
 /** Saved in the patch (JSON keys): never rename one. Same order as WaveArtifact::MARKER_SETTING_PARAMS. */
 static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
@@ -27,7 +27,9 @@ static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
 	"sampleLoop", "sampleLoopPoint", "sampleBeat", "sampleHitSnap",
 	"modLfoRate", "modLfoShape", "modLfoSync", "modLfoTriplet", "modLfoDotted", "modLfoDest", "modLfoDepth",
 	"modAdAttack", "modAdDecay", "modAdPerc", "modAdDest", "modAdDepth",
-	"engine",
+	"engine", "hitSensitivity", "sendLevel", "returnMode",
+	"modLfo2Rate", "modLfo2Shape", "modLfo2Sync", "modLfo2Dest", "modLfo2Depth",
+	"modAd2Attack", "modAd2Decay", "modAd2Perc", "modAd2Dest", "modAd2Depth",
 };
 
 /** Shown in the lane's setting menu and on the panel */
@@ -44,25 +46,103 @@ static const char* const LOCK_LABELS[NUM_LOCKABLE] = {
 	"ONE / LOOP / PING", "LOOP POINT", "BEAT", "HIT",
 	"EXP LFO RATE", "EXP LFO SHAPE", "EXP LFO SYNC", "EXP LFO T", "EXP LFO D", "EXP LFO DEST", "EXP LFO DEPTH",
 	"EXP AD ATTACK", "EXP AD DECAY", "EXP AD PERC", "EXP AD DEST", "EXP AD DEPTH",
-	"ENGINE",
+	"ENGINE", "HITS", "SEND", "RET MODE",
+	"EXP LFO2 RATE", "EXP LFO2 SHAPE", "EXP LFO2 SYNC", "EXP LFO2 DEST", "EXP LFO2 DEPTH",
+	"EXP AD2 ATTACK", "EXP AD2 DECAY", "EXP AD2 PERC", "EXP AD2 DEST", "EXP AD2 DEPTH",
 };
 
 /** Settings a step cannot lock: switches that only change how another control is read (SYNC / T / D, PITCH FREE)
 or the scan's mode (KEEP, LOOP / PING). While a step is selected they still act on the marker itself. The lockable
 switches and lists are the filter type, the grain window and direction, and the LFO shape. */
-static const uint64_t NOT_LOCKABLE =
-	(1ull << 4) | (1ull << 5) | (1ull << 6) |    // LFO SYNC, T, D
-	(1ull << 14) |                               // PITCH FREE
-	(1ull << 21) | (1ull << 22) | (1ull << 23) | // GRAIN SYNC, T, D
-	(1ull << 33) | (1ull << 34) |                // KEEP, LOOP / PING
-	(1ull << 37) | (1ull << 39) | (1ull << 40) | // SAMPLE ONE / LOOP / PING, BEAT, HIT
-	(1ull << 43) | (1ull << 44) | (1ull << 45) | // EXP LFO SYNC, T, D
-	(1ull << 50) |                               // EXP AD PERC
-	(1ull << 53);                                // ENGINE (per artifact, never per step)
+static const int NOT_LOCKABLE[] = {
+	4, 5, 6,    // LFO SYNC, T, D
+	14,         // PITCH FREE
+	21, 22, 23, // GRAIN SYNC, T, D
+	33, 34,     // KEEP, LOOP / PING
+	37, 39, 40, // SAMPLE ONE / LOOP / PING, BEAT, HIT
+	43, 44, 45, // EXP LFO SYNC, T, D
+	50,         // EXP AD PERC
+	53,         // ENGINE (per artifact, never per step)
+	54,         // HITS (per artifact)
+	56,         // RETURN mode (SEND level is lockable)
+	59,         // EXP LFO 2 SYNC
+	64,         // EXP AD 2 PERC
+};
 
 inline bool isLockable(int k) {
-	return k >= 0 && k < NUM_LOCKABLE && !((NOT_LOCKABLE >> k) & 1u);
+	if (k < 0 || k >= NUM_LOCKABLE)
+		return false;
+	for (int n : NOT_LOCKABLE)
+		if (n == k)
+			return false;
+	return true;
 }
+
+/** One bit per setting (NUM_LOCKABLE of them, more than 64): a step's locks, the ones that glide, the switches. Built
+from a plain number for the first 64 (so `= 0`, `== 0` and the old tests read as before); true when any bit is set. */
+struct LockMask {
+	static const int WORDS = 2;
+	uint64_t w[WORDS] = {};
+
+	LockMask(uint64_t low = 0) {
+		w[0] = low;
+	}
+	static LockMask bit(int k) {
+		LockMask m;
+		if (k >= 0 && k < 64 * WORDS)
+			m.w[k / 64] = (uint64_t) 1u << (k % 64);
+		return m;
+	}
+	bool test(int k) const {
+		return k >= 0 && k < 64 * WORDS && ((w[k / 64] >> (k % 64)) & 1u);
+	}
+	void set(int k) {
+		*this |= bit(k);
+	}
+	void reset(int k) {
+		*this &= ~bit(k);
+	}
+	explicit operator bool() const {
+		for (uint64_t x : w)
+			if (x)
+				return true;
+		return false;
+	}
+	LockMask operator|(const LockMask& o) const {
+		LockMask m;
+		for (int i = 0; i < WORDS; i++)
+			m.w[i] = w[i] | o.w[i];
+		return m;
+	}
+	LockMask operator&(const LockMask& o) const {
+		LockMask m;
+		for (int i = 0; i < WORDS; i++)
+			m.w[i] = w[i] & o.w[i];
+		return m;
+	}
+	LockMask operator~() const {
+		LockMask m;
+		for (int i = 0; i < WORDS; i++)
+			m.w[i] = ~w[i];
+		return m;
+	}
+	LockMask& operator|=(const LockMask& o) {
+		return *this = *this | o;
+	}
+	LockMask& operator&=(const LockMask& o) {
+		return *this = *this & o;
+	}
+	bool operator==(const LockMask& o) const {
+		for (int i = 0; i < WORDS; i++)
+			if (w[i] != o.w[i])
+				return false;
+		return true;
+	}
+	bool operator!=(const LockMask& o) const {
+		return !(*this == o);
+	}
+};
+static_assert(NUM_LOCKABLE <= 64 * LockMask::WORDS, "LockMask too small for the settings");
 
 enum TrigCondition {
 	COND_ALWAYS,
@@ -110,7 +190,7 @@ inline void conditionText(const Condition& c, char* out, int size) {
 struct StepData {
 	/** The locked values, in each setting's own param units. Only the ones whose bit is set in `mask` count. */
 	float value[NUM_LOCKABLE] = {};
-	uint64_t mask = 0;
+	LockMask mask;
 	uint8_t cond = COND_ALWAYS;
 	uint8_t chance = 50;
 	uint8_t a = 1, b = 2;
@@ -123,7 +203,7 @@ struct StepData {
 	/** Each lock's own condition: when the trig plays, a lock whose condition fails this time does not apply (that
 	setting plays the knob). Only the locks whose bit is set in `condMask` have one (always a subset of `mask`). */
 	Condition lockCond[NUM_LOCKABLE];
-	uint64_t condMask = 0;
+	LockMask condMask;
 
 	/** The trig's own condition */
 	Condition trigCondition() const {
@@ -142,13 +222,13 @@ struct StepData {
 	}
 	/** Lock k's condition (Always when it has none) */
 	Condition lockCondition(int k) const {
-		return ((condMask >> k) & 1u) ? lockCond[k] : Condition();
+		return condMask.test(k) ? lockCond[k] : Condition();
 	}
 	/** Gives lock k a condition (Always removes it). Nothing when k is not locked. */
 	void setLockCondition(int k, const Condition& c) {
 		if (!locked(k))
 			return;
-		uint64_t bit = (uint64_t) 1u << k;
+		LockMask bit = LockMask::bit(k);
 		lockCond[k] = c;
 		if (c.cond == COND_ALWAYS)
 			condMask &= ~bit;
@@ -157,18 +237,18 @@ struct StepData {
 	}
 
 	bool locked(int k) const {
-		return (mask >> k) & 1u;
+		return mask.test(k);
 	}
 	void setLock(int k, float v) {
 		if (!isLockable(k))
 			return;
 		value[k] = v;
-		mask |= (uint64_t) 1u << k;
+		mask.set(k);
 	}
 	/** Removes lock k, with its condition */
 	void clearLock(int k) {
-		mask &= ~((uint64_t) 1u << k);
-		condMask &= ~((uint64_t) 1u << k);
+		mask.reset(k);
+		condMask.reset(k);
 	}
 	/** Removes every lock, with their conditions */
 	void clearLocks() {
@@ -176,7 +256,7 @@ struct StepData {
 		condMask = 0;
 	}
 	bool isPlain() const {
-		return mask == 0 && cond == COND_ALWAYS && slide <= 0.f && !tie;
+		return !mask && cond == COND_ALWAYS && slide <= 0.f && !tie;
 	}
 	void clear() {
 		*this = StepData();
@@ -190,7 +270,7 @@ inline StepData mergeTied(const StepData& group, const StepData& step) {
 	for (int k = 0; k < NUM_LOCKABLE; k++) {
 		if (step.locked(k)) {
 			out.value[k] = step.value[k];
-			out.mask |= (uint64_t) 1u << k;
+			out.mask.set(k);
 		}
 	}
 	out.slide = step.slide;
@@ -208,14 +288,15 @@ inline bool conditionPasses(const StepData& s, long pass, float random01) {
 `rnd()` gives a uniform number in [0, 1), drawn once per lock with a chance. */
 template <class Rnd>
 inline void applyLockConditions(StepData& out, const StepData& src, long pass, Rnd rnd) {
-	uint64_t m = src.mask & src.condMask;
-	while (m) {
-		int k = __builtin_ctzll(m);
-		m &= m - 1;
+	LockMask m = src.mask & src.condMask;
+	for (int k = 0; k < NUM_LOCKABLE && m; k++) {
+		if (!m.test(k))
+			continue;
+		m.reset(k);
 		const Condition& c = src.lockCond[k];
 		float u = (c.cond == COND_CHANCE) ? rnd() : 0.f;
 		if (!conditionPasses(c, pass, u))
-			out.mask &= ~((uint64_t) 1u << k);
+			out.mask.reset(k);
 	}
 }
 
@@ -263,16 +344,16 @@ inline void conditionText(const StepData& s, char* out, int size) {
 settings the new step changes glide there over SLIDE x one of the row's steps instead of jumping. Audio thread. */
 struct MarkerLocks {
 	float value[NUM_LOCKABLE] = {};
-	uint64_t mask = 0;
+	LockMask mask;
 	/** Settings still gliding, each from `from` toward its target (the lock, or the knob where unlocked) */
-	uint64_t gliding = 0;
+	LockMask gliding;
 	float from[NUM_LOCKABLE] = {};
 	double progress = 1.0;
 	double glideBeats = 1.0;
 
 	/** The value setting k plays now, given the knob's own value */
 	float get(int k, float knob) const {
-		uint64_t bit = (uint64_t) 1u << k;
+		LockMask bit = LockMask::bit(k);
 		if (!((mask | gliding) & bit))
 			return knob;
 		float to = (mask & bit) ? value[k] : knob;
@@ -283,13 +364,13 @@ struct MarkerLocks {
 
 	/** A new step plays. `knobs` are the knob values now (to start glides from what is heard). `jumpMask`: settings
 	that never glide (switches and lists). */
-	void apply(const float* newValue, uint64_t newMask, float slide, double stepBeats, const float* knobs, uint64_t jumpMask) {
-		uint64_t glide = 0;
+	void apply(const float* newValue, LockMask newMask, float slide, double stepBeats, const float* knobs, LockMask jumpMask) {
+		LockMask glide;
 		float start[NUM_LOCKABLE];
 		slide = slide > 1.f ? 1.f : slide;
 		if (slide > 0.f && stepBeats > 0.0) {
 			for (int k = 0; k < NUM_LOCKABLE; k++) {
-				uint64_t bit = (uint64_t) 1u << k;
+				LockMask bit = LockMask::bit(k);
 				if (!((mask | newMask | gliding) & bit) || (jumpMask & bit))
 					continue;
 				float now = get(k, knobs[k]);
@@ -304,7 +385,7 @@ struct MarkerLocks {
 		mask = newMask;
 		gliding = glide;
 		for (int k = 0; k < NUM_LOCKABLE; k++)
-			if ((glide >> k) & 1u)
+			if (glide.test(k))
 				from[k] = start[k];
 		progress = glide ? 0.0 : 1.0;
 		// SLIDE 100% glides over the whole step, 1% over a hundredth of it.

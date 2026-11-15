@@ -377,6 +377,9 @@ struct GrainInput {
 	bool insert[NUM_MARKERS] = {};
 	float retL[NUM_MARKERS] = {};
 	float retR[NUM_MARKERS] = {};
+	/** BUS mode: the cloud's SEND is its finished sound (after its filter, level, gain and pan, and the engine's fade)
+	instead of what its filter gets */
+	bool busSend[NUM_MARKERS] = {};
 	/** POLY play mode: each cloud follows voiceEnv instead of the position crossfade */
 	bool poly = false;
 	/** Level of each marker's ADSR, 0..1 */
@@ -867,6 +870,11 @@ public:
 					float angle = (c.panS + 1.f) * M_PI_4_F;
 					yl *= std::cos(angle) * SQRT2;
 					yr *= std::sin(angle) * SQRT2;
+				}
+				// BUS: the send is the finished sound (the effect hears the note as it is heard, so its tail starts there)
+				if (in.busSend[m]) {
+					sendL[m] = yl * gain;
+					sendR[m] = yr * gain;
 				}
 			}
 			else if (c.idle == IDLE_RESET) {

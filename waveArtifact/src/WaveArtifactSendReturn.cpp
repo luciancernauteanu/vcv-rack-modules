@@ -5,10 +5,15 @@
 // - RET L / R: replace the artifact's filter (the same 20 ms crossfade and RET tag). RET R unpatched: RET L feeds both
 //   sides. Patched here, the return wins over the main panel's RETURN for that artifact.
 // The audio goes through the expanders' messages: a few samples late (one per module on the way, each way).
+// Each row also has the artifact's SEND level knob and its INSERT / BUS button: they are the main module's params
+// (MARKER_SEND_LEVEL_PARAM, lockable per trig, and MARKER_RETURN_MODE_PARAM), bound once this module finds it.
 #include "plugin.hpp"
 #include "ExpanderMessages.hpp"
 #include "Layout.hpp"
+#include "WaveArtifact.hpp"
 #include "WaveArtifactExpander.hpp"
+#include "widgets/LinkedKnob.hpp"
+#include "widgets/ModeButton.hpp"
 #include "widgets/PanelLabels.hpp"
 
 struct WaveArtifactSendReturn : Module {
@@ -111,6 +116,9 @@ static const float ROW_Y0 = 26.f, ROW_DY = 17.f;
 inline float rowY(int r) {
 	return ROW_Y0 + r * ROW_DY;
 }
+/** Each row's second line: its SEND knob (under the SEND jacks) and its INSERT / BUS button (under the RETURN jacks) */
+static const float CTRL_DY = 8.3f;
+static const float SEND_KNOB_X = (SEND_L_X + SEND_R_X) / 2.f, MODE_X = (RET_L_X + RET_R_X) / 2.f;
 } // namespace srlayout
 
 /** Each row's number in its artifact's color, and a dim hint while not linked */
@@ -137,8 +145,8 @@ struct SendReturnRowNumbers : widget::TransparentWidget {
 		if (module && !module->linked) {
 			nvgFontSize(vg, 6.5f);
 			nvgFillColor(vg, nvgRGB(0xd0, 0x60, 0x50));
-			nvgText(vg, srlayout::W / 2.f * mm, 114.f * mm, "snap it right of Wave Artifacts", NULL);
-			nvgText(vg, srlayout::W / 2.f * mm, 117.f * mm, "or of its last expander", NULL);
+			nvgText(vg, srlayout::W / 2.f * mm, 119.6f * mm, "snap it right of Wave Artifacts", NULL);
+			nvgText(vg, srlayout::W / 2.f * mm, 122.4f * mm, "or of its last expander", NULL);
 		}
 	}
 };
@@ -165,8 +173,9 @@ struct WaveArtifactSendReturnWidget : ModuleWidget {
 		labels->add(Vec((RET_L_X + RET_R_X) / 2.f, HEAD_Y - 3.6f), "RETURN", 6.f);
 		labels->add(Vec(RET_L_X, HEAD_Y), "L", 6.f);
 		labels->add(Vec(RET_R_X, HEAD_Y), "R", 6.f);
-		labels->add(Vec(W / 2.f, 106.f), "only L patched: mono (L + R out,", 5.f);
-		labels->add(Vec(W / 2.f, 109.f), "L back to both sides)", 5.f);
+		labels->add(Vec(W / 2.f, 110.5f), "knob: SEND level in BUS (lock it per trig)", 5.f);
+		labels->add(Vec(W / 2.f, 113.3f), "INS: in its notes  BUS: rings out", 5.f);
+		labels->add(Vec(W / 2.f, 116.1f), "only L patched: mono", 5.f);
 		addChild(labels);
 
 		SendReturnRowNumbers* numbers = createWidget<SendReturnRowNumbers>(Vec(0, 0));
@@ -180,8 +189,56 @@ struct WaveArtifactSendReturnWidget : ModuleWidget {
 			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(SEND_R_X, y)), module, WaveArtifactSendReturn::SEND_R_OUTPUT + r));
 			addInput(createInputCentered<ThemedPJ301MPort>(mm2px(Vec(RET_L_X, y)), module, WaveArtifactSendReturn::RET_L_INPUT + r));
 			addInput(createInputCentered<ThemedPJ301MPort>(mm2px(Vec(RET_R_X, y)), module, WaveArtifactSendReturn::RET_R_INPUT + r));
+			// The main module's params for this artifact, bound in step() (hidden until then)
+			// A LinkedKnob, as on the main panel: with a trig selected its drag moves that trig's lock directly
+			LinkedKnob<Trimpot>* k = createParamCentered<LinkedKnob<Trimpot>>(mm2px(Vec(SEND_KNOB_X, y + CTRL_DY)), nullptr, 0);
+			k->setVisible(false);
+			addChild(k);
+			sendKnobs[r] = k;
+			ModeButton* b = new ModeButton;
+			b->box.size = mm2px(Vec(10.f, 4.4f));
+			b->box.pos = mm2px(Vec(MODE_X, y + CTRL_DY)).minus(b->box.size.div(2.f));
+			b->labels = {"INS", "BUS"};
+			b->colors = {layout::SCREEN_TEXT, nvgRGB(0x8f, 0xe3, 0xb0)};
+			b->setVisible(false);
+			addChild(b);
+			modeButtons[r] = b;
 		}
 		addChild(createLightCentered<SmallLight<GreenLight>>(mm2px(Vec(W - 6.3f, 6.f)), module, WaveArtifactSendReturn::LINK_LIGHT));
+	}
+
+	ParamWidget* sendKnobs[WaveArtifactSendReturn::ROWS] = {};
+	ParamWidget* modeButtons[WaveArtifactSendReturn::ROWS] = {};
+
+	/** Wave Artifacts on the left, directly or through expanders, or null */
+	Module* mainOnLeft() {
+		Module* m = module ? module->leftExpander.module : nullptr;
+		for (int n = 0; m && n <= wa::MAX_EXPANDERS; n++) {
+			if (m->model == modelWaveArtifact)
+				return m;
+			if (!isWaveArtifactExpander(m))
+				return nullptr;
+			m = m->leftExpander.module;
+		}
+		return nullptr;
+	}
+
+	void step() override {
+		Module* main = mainOnLeft();
+		for (int r = 0; r < WaveArtifactSendReturn::ROWS; r++) {
+			ParamWidget* ws[2] = {sendKnobs[r], modeButtons[r]};
+			int ids[2] = {WaveArtifact::MARKER_SEND_LEVEL_PARAM + r, WaveArtifact::MARKER_RETURN_MODE_PARAM + r};
+			for (int k = 0; k < 2; k++) {
+				if (!ws[k])
+					continue;
+				if (ws[k]->module != main || ws[k]->paramId != ids[k]) {
+					ws[k]->module = main;
+					ws[k]->paramId = ids[k];
+				}
+				ws[k]->setVisible(main != nullptr);
+			}
+		}
+		ModuleWidget::step();
 	}
 };
 

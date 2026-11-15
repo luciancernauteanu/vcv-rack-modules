@@ -46,6 +46,47 @@ inline double bpmFromName(const std::string& name) {
 				return v;
 		}
 	}
+	// A sample-pack name that starts with its tempo: "90_Blok_01", "120 C White" (2 or 3 digits, then _ space or -;
+	// 60..200 only, so take numbers like "01_" are not a tempo)
+	size_t d = 0;
+	while (d < s.size() && std::isdigit((unsigned char) s[d]))
+		d++;
+	if ((d == 2 || d == 3) && d < s.size() && (s[d] == '_' || s[d] == ' ' || s[d] == '-')) {
+		double v = std::atof(s.substr(0, d).c_str());
+		if (v >= 60.0 && v <= 200.0)
+			return v;
+	}
+	return 0.0;
+}
+
+/** A loop file's own tempo: of the candidates (the name's, then the one found in the audio) and their octaves in the
+tempo range, those at which the whole file lasts a whole number of beats (within 1 %); the octave nearest `prefer`.
+0 when none fits (a take, not a loop). The 16ths of a 90 bpm loop are also 8th triplets at 120: the whole beats tell
+them apart (a 10.667 s loop is 16 beats at 90, 21.3 at 120). */
+inline double loopFileBpm(double fileSeconds, double nameBpm, double foundBpm, double prefer) {
+	if (fileSeconds <= 0.0)
+		return 0.0;
+	double cands[2] = {nameBpm, foundBpm};
+	for (double c : cands) {
+		if (c <= 0.0)
+			continue;
+		double best = 0.0, bestD = 1e9;
+		for (int k = -3; k <= 3; k++) {
+			double b = c * std::pow(2.0, k);
+			if (b < 60.0 - 1e-9 || b > 200.0 + 1e-9)
+				continue;
+			double beats = fileSeconds * b / 60.0;
+			if (beats < 1.0 || std::fabs(beats - std::round(beats)) > 0.01 * beats)
+				continue;
+			double dd = std::fabs(std::log(b / std::max(prefer, 1.0)));
+			if (dd < bestD) {
+				bestD = dd;
+				best = b;
+			}
+		}
+		if (best > 0.0)
+			return best;
+	}
 	return 0.0;
 }
 
@@ -379,12 +420,12 @@ struct LayoutTrig {
 	long length;
 };
 
-/** How far from its step (in steps, and in seconds) a hit may be for LAY to start a trig on it. A trig plays on its
-step, so a hit off it would be heard early or late by as much, and the slice before it would stop short (a gap) or be
-cut. A hit further off (a 16th between the steps of an 8th row) plays inside the slice before it, at its own time.
-12 ms: the detector places a hit a few ms into its attack (about 7 ms on a drum loop), so hits on the beat still get
-their trig. Measured on a 6 s drum loop laid on 8th steps (all 147 of its hits, at HITS 0 %): every hit plays, at
-worst 8 ms off its time (half a step, 181 ms, and 13 hits cut out before). */
+/** How far from its step (in steps, and in seconds) a hit may be for its slice to start exactly on it. A trig plays on
+its step, so a slice starting on a hit further off would play it early or late by as much, and the slice before would
+stop short (a gap) or be cut. Such a hit (a live break's 16th 21 ms early, a 16th between the steps of an 8th row) still
+gets its trig on its nearest step, but its slice starts on the step's own place in the audio: the hit plays inside it,
+or at the end of the slice before, at its own time. 12 ms: the detector places a hit a few ms into its attack (about
+7 ms on a drum loop), so hits on the beat start their slices. */
 static constexpr double LAY_SNAP_STEPS = 0.2;
 static constexpr double LAY_SNAP_SECONDS = 0.012;
 inline double laySnapSteps(double stepSeconds) {
@@ -392,17 +433,24 @@ inline double laySnapSteps(double stepSeconds) {
 }
 
 /** The trigs for the loop `from` .. `from + frames` laid over `steps` steps. `grid`: every step plays its own
-share of the loop. Otherwise each hit inside the loop within `maxOff` steps of a step goes on it (of several on a
-step, the one nearest to it; the others play inside its slice; a hit that rounds to the loop's end belongs to the next
-pass), and step 1 always plays from the loop's start, so what comes before the first hit is heard too. Each trig plays
-up to the next one's start (the last: up to the loop's end). */
-inline std::vector<LayoutTrig> layoutTrigs(const std::vector<long>& hits, long from, long frames, int steps, bool grid, double maxOff = 0.5) {
+share of the loop. Otherwise each hit inside the loop goes on its nearest step (of several on a step, the one nearest
+to it; the others play inside its slice; a hit that rounds to the loop's end belongs to the next pass); its slice
+starts on the hit when it is within `snap` steps of the step, else on the step's own place (see LAY_SNAP_STEPS). Step 1
+always plays from the loop's start, so what comes before the first hit is heard too. Each trig plays up to the next
+one's start (the last: up to the loop's end). `onHits`: how many trigs after step 1 start right on their hit. */
+inline std::vector<LayoutTrig> layoutTrigs(const std::vector<long>& hits, long from, long frames, int steps, bool grid, double snap = 0.5,
+	int* onHits = nullptr) {
 	std::vector<LayoutTrig> out;
+	if (onHits)
+		*onHits = 0;
 	if (frames <= 0 || steps <= 0)
 		return out;
+	auto gridAt = [&](int s) {
+		return from + (long) std::llround((double) s * (double) frames / steps);
+	};
 	if (grid) {
 		for (int s = 0; s < steps; s++)
-			out.push_back({s, from + (long) std::llround((double) s * (double) frames / steps), 0});
+			out.push_back({s, gridAt(s), 0});
 	}
 	else {
 		// Of the hits that round to a step, the one nearest to it (a soft hit half a step before a beat is not the beat)
@@ -413,22 +461,58 @@ inline std::vector<LayoutTrig> layoutTrigs(const std::vector<long>& hits, long f
 				continue;
 			double pos = (double) (h - from) / (double) frames * steps;
 			long s = std::lround(pos);
-			if (s >= steps || std::fabs(pos - (double) s) >= off[(size_t) s] || std::fabs(pos - (double) s) > maxOff)
+			if (s >= steps || std::fabs(pos - (double) s) >= off[(size_t) s])
 				continue;
 			at[(size_t) s] = h;
 			off[(size_t) s] = std::fabs(pos - (double) s);
 		}
-		if (at[0] < 0)
+		if (at[0] < 0) {
 			at[0] = from;
-		for (int s = 0; s < steps; s++)
-			if (at[(size_t) s] >= 0)
-				out.push_back({s, at[(size_t) s], 0});
+			off[0] = 0.0;
+		}
+		for (int s = 0; s < steps; s++) {
+			if (at[(size_t) s] < 0)
+				continue;
+			// Close to its step: the slice starts on the hit. Further off: on the step's own place, so the hit plays
+			// inside its slice (late hit) or at the end of the one before (early hit), at its own time either way.
+			bool onHit = off[(size_t) s] <= snap;
+			if (onHit && onHits && s > 0)
+				(*onHits)++;
+			out.push_back({s, onHit ? at[(size_t) s] : gridAt(s), 0});
+		}
 	}
 	for (size_t i = 0; i < out.size(); i++) {
 		long next = (i + 1 < out.size()) ? out[i + 1].start : from + frames;
 		out[i].length = std::max(next - out[i].start, 1L);
 	}
 	return out;
+}
+
+/** The row for a loop of `beats` (`from` .. `from + frames`, `seconds` long) that fits `hits` best: of the row clocks
+whose steps cover it in whole steps (at most `maxSteps`), the one with the most hits right on a step (within
+laySnapSteps), then the most trigs; a tie goes to the finer clock. A triplet loop gets a triplet clock (x3, /3), a 16th
+one x4. `placed`: its trigs. False when no clock fits. */
+inline bool layoutRowForHits(const std::vector<long>& hits, long from, long frames, double seconds, int beats, int maxSteps,
+	int* clockIndex, int* steps, int* placed = nullptr) {
+	static const double SPB[9] = {1.0 / 8.0, 1.0 / 4.0, 1.0 / 3.0, 1.0 / 2.0, 1.0, 2.0, 3.0, 4.0, 8.0};
+	int bestOn = -1, bestCount = -1;
+	for (int i = 8; i >= 0; i--) {
+		double n = beats * SPB[i];
+		long whole = std::lround(n);
+		if (std::fabs(n - (double) whole) > 1e-9 || whole < 1 || whole > maxSteps)
+			continue;
+		int on = 0;
+		int count = (int) layoutTrigs(hits, from, frames, (int) whole, false, laySnapSteps(seconds / (double) whole), &on).size();
+		if (on > bestOn || (on == bestOn && count > bestCount)) {
+			bestOn = on;
+			bestCount = count;
+			*clockIndex = i - 4;
+			*steps = (int) whole;
+		}
+	}
+	if (placed)
+		*placed = std::max(bestCount, 0);
+	return bestCount >= 0;
 }
 
 } // namespace wa

@@ -1561,8 +1561,9 @@ static void testMixedPlayer() {
 	std::printf("  worst step around the switch: %.4f (limit %.4f)\n", worstStep1, bound);
 	CHECK(worstStep1 < bound, "the GRAIN -> SAMPLE switch clicks: step %.4f > %.4f", worstStep1, bound);
 }
-// LAY on a loop whose hits fall between the row's steps (16ths of a loop laid on 8th steps): only hits close to a step
-// start trigs, so every trig plays on time and the slice before an off-step hit plays it at its own place
+// LAY on a loop whose hits fall between the row's steps (16ths of a loop laid on 8th steps, a live break's early 16th):
+// every hit gets a trig on its nearest step; a slice starts on its hit only when the hit is close to the step, else on
+// the step's own place, so every trig plays on time and an off-step hit plays at its own place
 static void testLayOffGrid() {
 	std::printf("LAY: hits between the steps\n");
 	// 16 steps of 375 ms (an 8th at 80 bpm) at 44.1 kHz
@@ -1580,9 +1581,16 @@ static void testLayOffGrid() {
 		sum += x.length;
 	}
 	std::printf("; lengths sum %ld of %ld\n", sum, 16 * step);
-	CHECK(t.size() == 3 && t[0].step == 0 && t[1].step == 4 && t[2].step == 8, "only the hits on steps start trigs (%d trigs)", (int) t.size());
-	CHECK(t.size() == 3 && t[0].length == 4 * step + 300, "the first slice plays through the off-step hit at its own time (%ld)",
-		t.empty() ? -1L : t[0].length);
+	// Steps 1, 3, 5, 7, 9, 11: every hit has its trig
+	bool stepsOk = t.size() == 6;
+	for (size_t i = 0; stepsOk && i < t.size(); i++)
+		stepsOk = t[i].step == (int) (2 * i);
+	CHECK(stepsOk, "every hit gets a trig on its nearest step (%d trigs)", (int) t.size());
+	// The off-step hit at 1.52 steps (step 3's): its slice starts on step 3's place, so the first slice (to there)
+	// plays the hit at its own time; the on-step hit at step 5 starts its slice on itself
+	CHECK(t.size() == 6 && t[1].start == 2 * step && t[0].length == 2 * step && t[2].start == 4 * step + 300,
+		"off-step slices start on their step's place, on-step ones on their hit (%ld, %ld)", t.size() > 1 ? t[1].start : -1L,
+		t.size() > 2 ? t[2].start : -1L);
 	CHECK(sum == 16 * step, "the slices cover the loop: %ld", sum);
 	// Every trig is within the tolerance of its step: none is heard early or late by more than that
 	double worst = 0.0;
@@ -1600,7 +1608,53 @@ static void testLayOffGrid() {
 	// Short steps (x8 rows): the tolerance in steps grows to LAY_SNAP_STEPS, never more
 	CHECK(std::fabs(wa::laySnapSteps(0.05) - wa::LAY_SNAP_STEPS) < 1e-12, "short steps: %.3f", wa::laySnapSteps(0.05));
 }
+// A loop file's tempo: a sample-pack name that starts with it, and the tempo at which the whole file is whole beats
+static void testLoopFileBpm() {
+	std::printf("Loop file tempo (name prefix, whole beats)\n");
+	double a = wa::bpmFromName("90_Blok_01_SP.wav"), b = wa::bpmFromName("120 C White"), c = wa::bpmFromName("01_kick.wav"),
+		   d = wa::bpmFromName("808_Kick.wav"), e = wa::bpmFromName("RainShake-70bpm.wav");
+	std::printf("  names: 90_Blok %.0f, \"120 C White\" %.0f, 01_kick %.0f, 808_Kick %.0f, RainShake-70bpm %.0f\n", a, b, c, d, e);
+	CHECK(a == 90.0 && b == 120.0 && c == 0.0 && d == 0.0 && e == 70.0, "tempo from names");
+	// 10.667 s: 16 beats at 90, 21.3 at 120. The audio says 120 (its 16ths are 8th triplets there): the name wins
+	double f = wa::loopFileBpm(10.6667, 90.0, 120.0, 120.0);
+	// No name: the found 120 does not make whole beats, nor its octaves: none
+	double g = wa::loopFileBpm(10.6667, 0.0, 120.0, 120.0);
+	// No name, found 160 for a 6 s loop: 16 beats; the octave nearest 120 of 80 / 160
+	double h = wa::loopFileBpm(6.0, 0.0, 160.0, 120.0);
+	std::printf("  10.667 s, name 90, found 120: %.1f; no name: %.1f; 6 s, found 160: %.1f\n", f, g, h);
+	CHECK(f == 90.0, "the name's tempo makes whole beats: %.1f", f);
+	CHECK(g == 0.0, "no whole beats: %.1f", g);
+	CHECK(h == 160.0, "whole beats, octave nearest the module: %.1f", h);
+}
+// LAY's row clock: the one that puts the most of the hits on trigs (a triplet loop gets a triplet clock)
+static void testLayRowForHits() {
+	std::printf("LAY row clock from the hits\n");
+	// 2 beats at 120 bpm (1 s, 48000 frames): a hit on every 8th triplet (6), and on every 16th (8)
+	const long frames = 48000;
+	std::vector<long> triplets, sixteenths;
+	for (int k = 0; k < 6; k++)
+		triplets.push_back(k * frames / 6 + 50);
+	for (int k = 0; k < 8; k++)
+		sixteenths.push_back(k * frames / 8 + 50);
+	int ci = 0, st = 0, placed = 0;
+	bool ok = wa::layoutRowForHits(triplets, 0, frames, 1.0, 2, 16, &ci, &st, &placed);
+	std::printf("  8th triplets: clock %d, %d steps, %d of 6 hits on trigs\n", ci, st, placed);
+	CHECK(ok && ci == 2 && st == 6 && placed == 6, "triplets want x3 (clock 2, 6 steps): %d, %d, %d", ci, st, placed);
+	// The finest clock alone (what LAY did before) has most of them off their steps (their slices start on the steps)
+	int fc = 0, fs = 0, onFine = 0, onChosen = 0;
+	wa::layoutRow(2, 16, &fc, &fs);
+	wa::layoutTrigs(triplets, 0, frames, fs, false, wa::laySnapSteps(1.0 / fs), &onFine);
+	wa::layoutTrigs(triplets, 0, frames, st, false, wa::laySnapSteps(1.0 / st), &onChosen);
+	std::printf("  hits right on a step (after step 1): the finest clock (%d steps) %d, the chosen one %d\n", fs, onFine, onChosen);
+	CHECK(onFine < onChosen, "the check cannot fail");
+	ok = wa::layoutRowForHits(sixteenths, 0, frames, 1.0, 2, 16, &ci, &st, &placed);
+	std::printf("  16ths: clock %d, %d steps, %d of 8 on trigs (a tie goes to the finer clock)\n", ci, st, placed);
+	CHECK(ok && placed == 8 && st == 16, "16ths: all placed on the finest row that holds them (%d steps)", st);
+	CHECK(!wa::layoutRowForHits(sixteenths, 0, frames, 1.0, 256, 16, &ci, &st), "256 beats do not fit");
+}
 int main() {
+	testLayRowForHits();
+	testLoopFileBpm();
 	testLayOffGrid();
 	testMixedPlayer();
 	testLayVelocity();

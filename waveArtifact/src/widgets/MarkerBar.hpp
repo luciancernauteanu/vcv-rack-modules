@@ -472,7 +472,7 @@ struct MarkerBar : widget::Widget {
 				nvgFillColor(args.vg, nvgTransRGBAf(c, 1.f));
 			};
 			if (module && active && module->shownReturn[i].load(std::memory_order_relaxed))
-				tag(retTagRect(i), "RET", false);
+				tag(retTagRect(i), module->shownBus[i].load(std::memory_order_relaxed) ? "BUS" : "RET", false);
 			if (module && active && module->slots[1 + i].hasFile())
 				tag(wavTagRect(i), "WAV", false);
 			nvgTextAlign(args.vg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);

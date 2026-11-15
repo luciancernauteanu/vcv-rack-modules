@@ -168,6 +168,8 @@ struct ToExpanderMessage {
 	/** Each marker's expander LFO (-1..1, run by the main module: its settings are marker settings, lockable), for
 	the expanders' LFO jacks */
 	float modLfo[NUM_MARKERS] = {};
+	/** ... and its LFO 2, for the expanders' second LFO jack */
+	float modLfo2[NUM_MARKERS] = {};
 	/** Each artifact's SEND (what its filter gets, L and R, +-1 = 5 V), for the stereo SEND / RETURN module at the
 	end of the chain */
 	float sendL[NUM_MARKERS] = {}, sendR[NUM_MARKERS] = {};
@@ -192,7 +194,7 @@ struct FromSequencerMessage {
 	/** The latest played step's locks (see StepLocks.hpp), its slide (0 = off, else the share of a step it glides
 	over), and one step's length in beats */
 	float lockValue[NUM_MARKERS][NUM_LOCKABLE] = {};
-	uint64_t lockMask[NUM_MARKERS] = {};
+	LockMask lockMask[NUM_MARKERS];
 	float slide[NUM_MARKERS] = {};
 	double stepBeats[NUM_MARKERS] = {0.25, 0.25, 0.25, 0.25, 0.25};
 	/** The latest played step is tied to the one before: its note goes on (see PolyVoices legato) */
@@ -215,6 +217,8 @@ struct ToMainMessage {
 	bool modulated[NUM_MARKERS] = {};
 	/** An expander's LFO jack is patched for the artifact: its LFO must run even while it moves nothing */
 	bool lfoJack[NUM_MARKERS] = {};
+	/** ... and its LFO 2 jack */
+	bool lfoJack2[NUM_MARKERS] = {};
 	/** The CVs on the other knobs (CvDestInfo::fast = -1), from every linked expander */
 	CvKnobMod knobMods[MAX_CV_KNOB_MODS] = {};
 	int numKnobMods = 0;

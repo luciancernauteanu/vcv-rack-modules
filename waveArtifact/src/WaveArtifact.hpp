@@ -65,20 +65,6 @@ struct SampleSlot {
 	uint32_t storedHash = 0;
 	std::string storedPath;
 
-	// Hits (transients) for HIT, UI thread. Found again whenever the sample or the HITS slider changes, while the
-	// engine switch is on GRAIN or SAMPLE.
-	/** Frames of the slot's sample, sorted */
-	std::vector<long> transients;
-	/** Frames of the sample they were found in (to turn them into 0..1) */
-	long transientFrames = 0;
-	int transientsSerial = -1;
-	float transientsSens = -1.f;
-	double transientsTime = 0.0;
-	/** The hit list for HIT: the UI puts a new one in `hitsPending`, process() takes it into `hitsActive` and leaves
-	the old one in `hitsRetired`, which the UI frees (the bank swap's pattern: nothing is freed on the audio thread) */
-	std::atomic<std::vector<long>*> hitsPending{nullptr};
-	std::atomic<std::vector<long>*> hitsRetired{nullptr};
-	std::vector<long>* hitsActive = nullptr;
 	/** The sample's onset strength (wa::onsetStrength, UI thread), for the tempo; the bank it was worked out for */
 	std::vector<float> onset;
 	int onsetSerial = -1;
@@ -92,6 +78,26 @@ struct SampleSlot {
 	bool hasFile() const {
 		return !wavBytes.empty();
 	}
+};
+
+/** One artifact's hits (transients) in the file it plays, at its own HITS slider (MARKER_HIT_SENSITIVITY_PARAM): for
+HIT, LAY, the map's ticks and the hit arrows. Found again (UI thread, WaveArtifact::updateHits) when its file, that
+file's bank or its slider changes, while it is on GRAIN or SAMPLE (LAY: at once, whatever its engine). */
+struct ArtifactHits {
+	/** Frames of the file's sample, sorted */
+	std::vector<long> transients;
+	/** Frames of the sample they were found in (to turn them into 0..1) */
+	long transientFrames = 0;
+	/** The slot, its bank serial and the sensitivity they were found for, and when (the slider's drag throttle) */
+	int slot = -1;
+	int serial = -1;
+	float sens = -1.f;
+	double time = 0.0;
+	/** The list for HIT: the UI puts a new one in `pending`, process() takes it into `active` and leaves the old one in
+	`retired`, which the UI frees (the bank swap's pattern: nothing is freed on the audio thread) */
+	std::atomic<std::vector<long>*> pending{nullptr};
+	std::atomic<std::vector<long>*> retired{nullptr};
+	std::vector<long>* active = nullptr;
 };
 
 struct WaveArtifact : Module {
@@ -264,6 +270,29 @@ struct WaveArtifact : Module {
 		/** Each artifact's engine: 0 WAVE, 1 GRAIN, 2 SAMPLE (the ENGINE button sets the selected artifact's, Shift+click
 		every artifact's). A patch from before these existed copies ENGINE_MODE_PARAM into all five (dataFromJson). */
 		ENUMS(MARKER_ENGINE_PARAM, NUM_MARKERS),
+		/** Each artifact's HITS slider 0..1 (fewer .. more hits found in its file; Transients.hpp). A patch from before
+		these existed copies SAMPLE_HIT_SENSITIVITY_PARAM into all five (dataFromJson). */
+		ENUMS(MARKER_HIT_SENSITIVITY_PARAM, NUM_MARKERS),
+		/** Each artifact's SEND level 0..1 in BUS mode (default 0; lockable per trig, Elektron style: lock it up on the
+		trig that goes to the delay). Set on the stereo SEND / RETURN module's rows. */
+		ENUMS(MARKER_SEND_LEVEL_PARAM, NUM_MARKERS),
+		/** Each artifact's RETURN mode: 0 INSERT (the return replaces its filter, inside its note; the default, as before),
+		1 BUS (SEND = its finished sound x SEND level; the return joins the main mix ungated, so tails ring out) */
+		ENUMS(MARKER_RETURN_MODE_PARAM, NUM_MARKERS),
+		/** Each marker's second expander LFO (MarkerMod.hpp), as LFO 1: rate, shape, sync, destination, depth. Its synced
+		rate steps through every note value (straight, triplet, dotted), as LFO 1's does now. */
+		ENUMS(MARKER_MOD_LFO2_RATE_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO2_SHAPE_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO2_SYNC_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO2_DEST_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_LFO2_DEPTH_PARAM, NUM_MARKERS),
+		/** Each marker's second expander AD (MarkerMod.hpp), as AD 1: attack, decay, PERC, destination, depth. It starts on
+		the same notes, trigs and GATE as AD 1. */
+		ENUMS(MARKER_MOD_AD2_ATTACK_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD2_DECAY_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD2_PERC_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD2_DEST_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_MOD_AD2_DEPTH_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -280,7 +309,7 @@ struct WaveArtifact : Module {
 		RESET_INPUT,
 		/** Master GAIN CV (scaled by MASTER_GAIN_AMT_PARAM): a VCA on the main outputs */
 		MASTER_GAIN_INPUT,
-		/** Each artifact's RETURN: 2 channels (L, R) or 1 (both sides); replaces its filter while patched */
+		/** No longer used: each artifact's RETURN (on the stereo SEND / RETURN module now). IDs reserved. */
 		ENUMS(RETURN_INPUT, NUM_MARKERS),
 		INPUTS_LEN
 	};
@@ -293,8 +322,7 @@ struct WaveArtifact : Module {
 		ENUMS(OLD_ARTIFACT_R_OUTPUT, NUM_MARKERS),
 		/** Beat clock: a 10 V, 5 ms trigger per quarter note from the clock in use (internal or CLOCK) */
 		CLOCK_OUTPUT,
-		/** Each artifact's SEND: what its filter gets, 2 channels (L, R), or 1 (L + R) once a mono module answers on
-		its RETURN */
+		/** No longer used: each artifact's SEND (on the stereo SEND / RETURN module now). IDs reserved. */
 		ENUMS(SEND_OUTPUT, NUM_MARKERS),
 		OUTPUTS_LEN
 	};
@@ -339,14 +367,10 @@ struct WaveArtifact : Module {
 	std::atomic<bool> shownCv[NUM_MARKERS];
 	/** The artifact's RETURN replaces its filter (shown as a RET tag on the screen) */
 	std::atomic<bool> shownReturn[NUM_MARKERS];
-	/** SEND / RETURN (audio thread): a mono module answers on this artifact's RETURN (1 channel back while SEND sends
-	2, for MONO_SEND_SAMPLES in a row), so SEND carries L + R on one channel. Reset when either cable is unplugged. */
-	bool monoSend[NUM_MARKERS] = {};
-	int monoCount[NUM_MARKERS] = {};
+	/** ... in BUS mode (tagged BUS: the return joins the mix outside its notes) */
+	std::atomic<bool> shownBus[NUM_MARKERS];
 	/** Each artifact's send (L, R) of the last sample, for the stereo SEND / RETURN module along the expander chain */
 	float chainSendL[NUM_MARKERS] = {}, chainSendR[NUM_MARKERS] = {};
-	/** A poly module needs a few samples to answer with 2 channels after its input became stereo: about 5 ms */
-	static const int MONO_SEND_SAMPLES = 256;
 	/** Granular engine: where each cloud reads (0..1 of the sample), and a counter of its grain starts
 	with the latest start, so the display can flash a grain. */
 	std::atomic<float> shownGrainRead[NUM_MARKERS];
@@ -391,6 +415,9 @@ struct WaveArtifact : Module {
 	/** The wavetable engine starting to run again: samples left of its silent priming (MorphEngine EngineInput::prime),
 	4 ms, longer than its drive's latency */
 	int wavePrime = 0;
+	/** BUS mode, audio thread: the artifact's return goes into the mix (this sample), and its SEND level as slewed */
+	bool busRet[NUM_MARKERS] = {};
+	float sendLevelS[NUM_MARKERS] = {};
 	/** The engines have sent the master section something other than silence since the module was created */
 	bool mixSounded = false;
 	static constexpr float WAVE_PRIME_SECONDS = 0.004f;
@@ -412,7 +439,7 @@ struct WaveArtifact : Module {
 	/** For each param ID: its index in MARKER_SETTING_PARAMS when it is a setting's first ID, else -1 */
 	int8_t lockIndex[PARAMS_LEN];
 	/** Settings that never glide (switches and lists), bit k = MARKER_SETTING_PARAMS[k] */
-	uint64_t lockJumpMask = 0;
+	wa::LockMask lockJumpMask;
 	/** A marker setting as it plays now: the knob, or in SEQ the playing step's lock, plus an expander CV sent to it
 	(the knobs without an audio-rate path; see cvAdd). `base` is the setting's first ID. */
 	float mv(int base, int i) {
@@ -421,7 +448,7 @@ struct WaveArtifact : Module {
 		if (k < 0)
 			return knob;
 		float v = seqLocks[i].get(k, knob);
-		if ((cvMask[i] >> k) & 1u)
+		if (cvMask[i].test(k))
 			v = std::min(std::max(v + cvAdd[i][k], settingMin[k]), settingMax[k]);
 		return v;
 	}
@@ -431,7 +458,7 @@ struct WaveArtifact : Module {
 	/** Per marker, for the settings it is read with (refreshSettings): what the CVs add to each (in the setting's
 	units), bit k set for the settings that have one */
 	float cvAdd[NUM_MARKERS][wa::NUM_LOCKABLE];
-	uint64_t cvMask[NUM_MARKERS] = {};
+	wa::LockMask cvMask[NUM_MARKERS];
 	/** Each setting's range (its ParamQuantity's), for the CVs */
 	float settingMin[wa::NUM_LOCKABLE] = {}, settingMax[wa::NUM_LOCKABLE] = {};
 	bool polyRunning = false;
@@ -456,12 +483,23 @@ struct WaveArtifact : Module {
 		bool modLfoSync = false, modLfoTriplets = false, modLfoDotted = false, adPerc = false;
 		int modLfoShape = 0, modLfoDest = 0, adDest = 0;
 		float modLfoRate = 0.f, modLfoDepth = 0.f, adAttack = 0.f, adDecay = 0.f, adDepth = 0.f;
+		// The expander's LFO 2 (every note value when synced)
+		bool modLfo2Sync = false;
+		int modLfo2Shape = 0, modLfo2Dest = 0;
+		float modLfo2Rate = 0.f, modLfo2Depth = 0.f;
+		// The expander's AD 2
+		bool ad2Perc = false;
+		int ad2Dest = 0;
+		float ad2Attack = 0.f, ad2Decay = 0.f, ad2Depth = 0.f;
 		wa::AdsrSettings adsr;
 		// GRAIN / SAMPLE
 		float density = 0.f, size = 0.f, spray = 0.f, loopPoint = 0.f, beatLength = 1.f, pScatter = 0.f, scan = 0.f;
 		float spread = 0.f, scanFade = 0.f, scanLength = -1.f;
 		int window = 0, loopMode = 0, beatMode = 0, direction = 0;
 		bool hitSnap = false, grainSync = false, grainTriplets = false, grainDotted = false, keepSpeed = false, scanPing = false;
+		// SEND / RETURN: BUS mode, and its SEND level (the knob, or the playing trig's lock)
+		bool returnBus = false;
+		float sendLevel = 0.f;
 	};
 	static const int SETTINGS_INTERVAL = 32;
 	MarkerSettings settings[NUM_MARKERS];
@@ -476,7 +514,7 @@ struct WaveArtifact : Module {
 	int slotsSerial = 0;
 	int slotCheckCountdown = 0;
 	/** Per marker: the locks it read with, its locks were gliding then, a new step's locks arrived */
-	uint64_t settingsLockMask[NUM_MARKERS] = {};
+	wa::LockMask settingsLockMask[NUM_MARKERS];
 	bool settingsGliding[NUM_MARKERS] = {};
 	bool settingsDirty[NUM_MARKERS] = {};
 	void refreshSettings(int i);
@@ -485,7 +523,13 @@ struct WaveArtifact : Module {
 	int waveLfoLive[NUM_MARKERS] = {};
 	int modLfoLive[NUM_MARKERS] = {};
 	wa::Lfo modLfos[NUM_MARKERS];
+	/** LFO 2 of each marker: as LFO 1 (modLfoLive2, its value for the expanders' second LFO jack) */
+	wa::Lfo modLfos2[NUM_MARKERS];
+	int modLfoLive2[NUM_MARKERS] = {};
+	float modLfoOut2[NUM_MARKERS] = {};
 	wa::ModEnvelope modAds[NUM_MARKERS];
+	/** AD 2 of each marker (as AD 1, on the same notes) */
+	wa::ModEnvelope modAds2[NUM_MARKERS];
 	float modLfoOut[NUM_MARKERS] = {};
 	bool modAdNote[NUM_MARKERS] = {};
 	bool modGateWas[NUM_MARKERS] = {};
@@ -504,7 +548,7 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 54;
+	static const int NUM_MARKER_SETTINGS = 67;
 	/** UI thread: artifact i's engine as set (0 WAVE, 1 GRAIN, 2 SAMPLE) */
 	int engineOfMarker(int i) {
 		return clamp((int) std::round(params[MARKER_ENGINE_PARAM + clamp(i, 0, NUM_MARKERS - 1)].getValue()), 0, 2);
@@ -512,13 +556,6 @@ struct WaveArtifact : Module {
 	/** UI thread: the selected artifact's engine (what the panel's knobs mean now) */
 	int shownEngine() {
 		return engineOfMarker(selectedMarker);
-	}
-	/** UI thread: an artifact that plays this slot's file is on GRAIN or SAMPLE (they use its hits) */
-	bool slotHeardAsSample(int slot) {
-		for (int i = 0; i < NUM_MARKERS; i++)
-			if (slotOf(i) == slot && engineOfMarker(i) >= 1)
-				return true;
-		return false;
 	}
 	static const int MARKER_SETTING_PARAMS[NUM_MARKER_SETTINGS];
 	/** The settings copied last (not saved with the patch), and the marker they came from, or -1 */
@@ -673,9 +710,12 @@ struct WaveArtifact : Module {
 	/** A short name for a slot's file in the status line and menus ("Artifact 2: kick.wav") */
 	std::string slotLabel(int slot);
 
-	/** Finds a slot's hits again when its sample or the HITS slider changed (at most every 30 ms while it is
-	dragged) and hands the list to the audio thread */
-	void updateTransients(int slot);
+	/** Each artifact's hits in the file it plays, at its own HITS slider (see ArtifactHits) */
+	ArtifactHits artHits[NUM_MARKERS];
+	/** UI thread. Finds artifact i's hits again when its file, that file's bank or its HITS slider changed (at most every
+	30 ms while the slider is dragged; only while it is on GRAIN / SAMPLE) and hands the list to the audio thread.
+	`force` (LAY): now, whatever its engine. */
+	void updateHits(int i, bool force = false);
 	/** Moves a marker's START to the next (dir 1) or previous (dir -1) hit of its file. False when there is none. */
 	bool stepStartToTransient(int marker, int dir);
 	/** Puts the active markers' STARTs on hits spread over their files (the markers on one file share its hits) */
@@ -704,6 +744,13 @@ struct WaveArtifact : Module {
 	wa::FoundTempo fileTempoOf(int slot, bool* fromName = nullptr);
 	/** A slot's onset strength curve (one value per wa::ONSET_HOP frames), worked out once per sample */
 	const std::vector<float>& onsetOf(int slot);
+	/** UI thread. The hits LAY chops artifact `marker`'s file at: exactly its own HITS slider's (the map's ticks: fewer ..
+	more), all of them worked out first if the file or the slider changed (updateHits with `force`) */
+	const std::vector<long>& layHits(int marker);
+	/** UI thread. The tempo LAY and the map's Shift + drag both count beats in, for a slot's file: the loop's own grid
+	(wa::loopFileBpm: the name's or the found tempo at which the whole file is whole beats), else the tempo found in the
+	audio, else the name's; 0 when none. `from` says which (for the labels). */
+	double layGridBpm(int slot, std::string* from = nullptr);
 	/** Replaces the marker's sequencer row with its loop laid out over `beats` (on the hits, or `grid`: every step),
 	and sets the marker to play each slice up to the next trig. False when it cannot (see LoopLayoutInfo::why). */
 	bool layoutLoopOnRow(int marker, int beats, bool grid);
@@ -716,10 +763,9 @@ struct WaveArtifact : Module {
 	probability `amount`: START on one of the slices LAY makes, LENGTH up to the row's next trig. Step 1 stays. The
 	rhythm, velocities and conditions stay. False when nothing changed. */
 	bool randomizeSlices(int marker, const bool* marked, float amount);
-	/** Audio thread: each marker's hit list for HIT (its file's), or null */
+	/** Audio thread: each marker's hit list for HIT (in its file, at its own slider), or null */
 	const std::vector<long>* markerHits(int i) const {
-		int k = markerSlot[i];
-		return slots[k].hitsActive;
+		return artHits[i].active;
 	}
 
 	/** The file line of a slot (its last message: analyzing, the artifact count, an error) */

@@ -6,11 +6,12 @@
     <rect id="background" x="0" y="0" width="50.8" height="128.5" fill="#e9e7e2"/>
     <g id="sections" fill="#d9d6cf">
       <rect x="4" y="11" width="42.8" height="13.8" rx="2" ry="2"/>
-      <rect x="4" y="41.2" width="42.8" height="38" rx="2" ry="2"/>
-      <rect x="4" y="26" width="42.8" height="14" rx="2" ry="2"/>
+      <rect x="4" y="49.2" width="42.8" height="30" rx="2" ry="2"/>
+      <rect x="4" y="26" width="42.8" height="22" rx="2" ry="2"/>
       <rect x="4" y="80.4" width="42.8" height="40.3" rx="2" ry="2"/>
     </g>
     <rect id="lfo1-out" x="7.8" y="109.8" width="14" height="9.6" rx="1.5" ry="1.5" fill="#26282c"/>
+    <rect id="lfo2-out" x="29.1" y="109.8" width="14" height="9.6" rx="1.5" ry="1.5" fill="#26282c"/>
   </g>
   <g id="components" style="display:none">
     <rect id="MARKER_PARAM" x="5" y="13.25" width="16" height="6.5" fill="#ff0000"/>
