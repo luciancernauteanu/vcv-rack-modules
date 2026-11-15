@@ -152,7 +152,8 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 | Playing | `process()` -> `tickRow(r)` on each new step index (`beatPos` from the main module's `ToSequencerMessage`): trig conditions (`conditionPasses`), ties (long gates), lock conditions; sends `FromSequencerMessage` (`fireCount`, velocity, lock values / mask, slide, `stepBeats`, `legato`, `holdOpen`); GATE / MOD outputs per row |
 | Editing steps | `StepGrid` widget: click / drag velocity, ties (`toggleTie`), shift (`shiftRow`), copy / paste (`SeqClipboard`, `pasteRow`), delete (`deleteStep`), select a step (`select(r, s)`) |
 | Locks on a step | With a step selected, the main module's knobs edit its locks: `lockTarget`, `lockCaptureStep` (switches / wheel), `LinkedKnob` drags -> `setStepLock` / `clearStepLock`; tooltips `lockTooltip`, `stepValueFor`; map line `stepWaveShown` |
-| Lane | `LockLane`: one setting of a row as bars (`showLock(k)`, `laneSetting`), or the CONDITION view; `showInLane(paramId)` from a knob press |
+| Lane | `LockLane`: one setting of a row as bars (`showLock(k)`, `laneSetting`), or the CONDITION view; `showInLane(paramId)` from a knob press. Setting menu `openSettingMenu` (groups of setting indexes, incl. SEND, LFO 2, AD 2, PHASE) |
+| Phantom (trigless) locks | Locks on an unlit step (`isPhantom`, `hasStep`): drawn in the lane on an empty step (a drag begun there only makes phantoms, `dragPhantom`; one begun on a trig only edits trigs). Yellow (`PHANTOM_COLOR`): outline + lock dot on the grid, bars in the lane. `tickRow`: its locks (lock conditions applied) go on top of the row's last step (`mergeLocks`), `lockFires` -> `FromSequencerMessage::lockCount` -> main `seqLockSeen`: `seqLocks.apply` without a note, GATE or MOD. Lasts until the row's next trig. Selectable; knobs add locks to it (`lockTarget`); SLIDE strip works; a grid click makes it a trig keeping its locks. `tidyStep` clears it when its last lock goes. Grid drags delete only steps they touched (`touched`). Old patches (no `phantomLocks` key) drop locks on unlit steps |
 | REC | `recordStep()`: knob moves go into the step playing now |
 | RND / CLR | `randomizeLocks`, `clearConditions` |
 | In the main module | `process()`: `seqFired`, `seqLocks[i].apply(...)` (glides with slide), `refreshSettings` at once for that marker |
@@ -206,6 +207,10 @@ line), `WavetableMap` (tables or waveform, hits, scan loops, loop point, preview
 
 ## Change log
 
+- 2026-11-15: phantom (trigless) locks: draw a lock in the lane on a step with no trig; it changes the playing note's
+  settings from that step (on top of the trig's locks) without a note; yellow on the grid and lane. The lane menu now
+  offers SEND, LFO 2, AD 2 and both PHASEs. A grid drag no longer cleans up untouched empty steps. Checks:
+  `tests/test_seq.cpp` (`testMergeLocks`), `build/probe_phantom.cpp` (section 9).
 - 2026-11-15: SEND / RETURN (INSERT) keeps the artifact's DRIVE and filter (type, CUTOFF, RES) in the flow: SEND is
   taken after the filter (it was before it) and the RETURN comes back there, then GAIN, note level and PAN (it used to
   replace the filter). `MorphEngine` `renderPoly` / `renderChains`, `GrainEngine` cloud loop: the filter always runs.

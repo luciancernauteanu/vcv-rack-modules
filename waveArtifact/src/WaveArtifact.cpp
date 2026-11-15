@@ -906,9 +906,22 @@ void WaveArtifact::process(const ProcessArgs& args) {
 				seqHoldOpen[i] = now && sq->holdOpen[i];
 				if (now && !seqLinkedBefore) {
 					seqSeen[i] = sq->fireCount[i]; // just snapped on: do not play what it played before
+					seqLockSeen[i] = sq->lockCount[i];
+				}
+				else if (sq->fireCount[i] == seqSeen[i] && sq->lockCount[i] != seqLockSeen[i]) {
+					// A phantom (trigless) lock: the row's locks change, no note starts
+					seqLockSeen[i] = sq->lockCount[i];
+					if (seqLocksOn) {
+						float knobs[NUM_MARKER_SETTINGS];
+						for (int k = 0; k < NUM_MARKER_SETTINGS; k++)
+							knobs[k] = params[MARKER_SETTING_PARAMS[k] + i].getValue();
+						seqLocks[i].apply(sq->lockValue[i], sq->lockMask[i], sq->slide[i], sq->stepBeats[i], knobs, lockJumpMask);
+						settingsDirty[i] = true;
+					}
 				}
 				else if (sq->fireCount[i] != seqSeen[i]) {
 					seqSeen[i] = sq->fireCount[i];
+					seqLockSeen[i] = sq->lockCount[i];
 					seqFired[i] = true;
 					// A tied step whose note is still on: same note, same level (the group's first trig's velocity).
 					seqLegato[i] = sq->legato[i] && voices.gate[i];
@@ -2475,7 +2488,8 @@ WaveArtifactSequencer* WaveArtifact::sequencerOnLeft() {
 
 bool WaveArtifact::lockTarget(int* row, int* step) {
 	WaveArtifactSequencer* seq = sequencerOnLeft();
-	if (!seq || !seq->hasSelection() || seq->selRow != selectedMarker || seq->velocity[seq->selRow][seq->selStep] <= 0.f)
+	// A trig, or a phantom lock (turning a knob adds a lock to it)
+	if (!seq || !seq->hasSelection() || seq->selRow != selectedMarker || !seq->hasStep(seq->selRow, seq->selStep))
 		return false;
 	*row = seq->selRow;
 	*step = seq->selStep;
@@ -2574,7 +2588,7 @@ int WaveArtifact::stepsLockingInRow(int paramId) {
 		return 0;
 	int n = 0;
 	for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
-		if (seq->velocity[selectedMarker][s] > 0.f && seq->stepData[selectedMarker][s].locked(k))
+		if (seq->hasStep(selectedMarker, s) && seq->stepData[selectedMarker][s].locked(k))
 			n++;
 	return n;
 }
@@ -2615,8 +2629,10 @@ int WaveArtifact::rowLocks(int marker, int k, bool clear) {
 		if (!d.locked(k))
 			continue;
 		n++;
-		if (clear)
+		if (clear) {
 			d.clearLock(k);
+			seq->tidyStep(marker, s);
+		}
 	}
 	return n;
 }
@@ -2715,6 +2731,8 @@ bool WaveArtifact::clearStepLock(int paramId) {
 	if (k < 0)
 		return false;
 	sequencerOnLeft()->stepData[r][s].clearLock(k);
+	// A phantom lock whose last lock went is gone
+	sequencerOnLeft()->tidyStep(r, s);
 	sequencerOnLeft()->showLock(k);
 	return true;
 }

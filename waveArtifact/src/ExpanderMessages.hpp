@@ -190,6 +190,8 @@ struct ToSequencerMessage {
 struct FromSequencerMessage {
 	bool linked = false;
 	uint32_t fireCount[NUM_MARKERS] = {};
+	/** A phantom (trigless) lock played: the locks below changed without a note */
+	uint32_t lockCount[NUM_MARKERS] = {};
 	float velocity[NUM_MARKERS] = {1.f, 1.f, 1.f, 1.f, 1.f};
 	/** The latest played step's locks (see StepLocks.hpp), its slide (0 = off, else the share of a step it glides
 	over), and one step's length in beats */

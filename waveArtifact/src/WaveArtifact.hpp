@@ -431,6 +431,8 @@ struct WaveArtifact : Module {
 	bool stepRunning = false;
 	// SEQ: the step sequencer on the left of this module
 	uint32_t seqResetCount = 0, seqSeen[NUM_MARKERS] = {};
+	/** The sequencer's phantom-lock count seen last, per marker */
+	uint32_t seqLockSeen[NUM_MARKERS] = {};
 	bool seqLinkedBefore = false;
 	/** The beat position the sequencer follows: this module's clock (CLOCK input or internal tempo), locked to it */
 	wa::GrainClock seqClock;

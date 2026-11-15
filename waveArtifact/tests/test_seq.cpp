@@ -328,8 +328,28 @@ static void testLockConditions() {
 	wa::applyLockConditions(out, plain, 0, [&]() { draws++; return 0.f; });
 	CHECK(out.mask == plain.mask && draws == 0, "no lock conditions: mask %llx, draws %d", (unsigned long long) out.mask.w[0], draws);
 }
+/** A phantom (trigless) lock's locks go on top of what plays: the trig's other locks stay, the phantom's slide counts */
+static void testMergeLocks() {
+	std::printf("phantom locks: merged on top of the playing trig's\n");
+	wa::StepData trig, phantom;
+	trig.setLock(9, 0.8f);  // CUTOFF
+	trig.setLock(16, 0.5f); // PAN
+	trig.slide = 0.3f;
+	phantom.setLock(9, 0.1f);
+	phantom.setLock(10, 0.6f); // RES
+	phantom.slide = 0.7f;
+	wa::StepData out = wa::mergeLocks(trig, phantom);
+	std::printf("  CUTOFF %.2f (want 0.10), RES %.2f (0.60), PAN %.2f (0.50, the trig's), slide %.2f (0.70), tie %d (0)\n", out.value[9],
+		out.value[10], out.value[16], out.slide, (int) out.tie);
+	CHECK(out.locked(9) && out.value[9] == 0.1f, "the phantom's CUTOFF wins");
+	CHECK(out.locked(10) && out.value[10] == 0.6f, "the phantom's RES is added");
+	CHECK(out.locked(16) && out.value[16] == 0.5f, "the trig's PAN stays");
+	CHECK(out.slide == 0.7f && !out.tie, "the phantom's slide, no tie");
+	CHECK(wa::mergeTied(trig, phantom).tie, "mergeTied still ties");
+}
 
 int main() {
+	testMergeLocks();
 	testLockConditions();
 	testGlideValue();
 	testSlideAmountAndTie();

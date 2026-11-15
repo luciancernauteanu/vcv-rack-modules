@@ -265,10 +265,9 @@ struct StepData {
 	}
 };
 
-/** What a tied step plays: the locks of the group so far with its own on top (a step without locks keeps the
-group's), and its own slide. */
-inline StepData mergeTied(const StepData& group, const StepData& step) {
-	StepData out = group;
+/** The locks playing so far with `step`'s on top (a setting it does not lock keeps what plays), and its slide. */
+inline StepData mergeLocks(const StepData& playing, const StepData& step) {
+	StepData out = playing;
 	for (int k = 0; k < NUM_LOCKABLE; k++) {
 		if (step.locked(k)) {
 			out.value[k] = step.value[k];
@@ -276,6 +275,13 @@ inline StepData mergeTied(const StepData& group, const StepData& step) {
 		}
 	}
 	out.slide = step.slide;
+	return out;
+}
+
+/** What a tied step plays: the locks of the group so far with its own on top (a step without locks keeps the
+group's), and its own slide. */
+inline StepData mergeTied(const StepData& group, const StepData& step) {
+	StepData out = mergeLocks(group, step);
 	out.tie = true;
 	return out;
 }
