@@ -1410,9 +1410,11 @@ static void testRestartOverNote() {
 		double l6, b6, l20, b20;
 		restartBump(c.window, c.density, c.size, c.pitch, 0.006, &l6, &b6);
 		restartBump(c.window, c.density, c.size, c.pitch, 0.02, &l20, &b20);
-		// A sparse cloud's trig is a grain starting with a 5 ms fade in (a note onset, louder and brighter than the note's
-		// gaps): its limit only rules out a click (a grain starting at full level, as before the fade in: +31 dB)
-		double brightLimit = c.sparse ? 8.0 : 3.0;
+		// A sparse cloud's trig is a grain starting with the note's fade-in (1 ms, on the audio just before START, as a
+		// SAMPLE note: a note onset, louder and brighter than the note's gaps): its limit only rules out a click (a grain
+		// starting at full level, as before any fade in: +31 dB). Measured +12.2 (with the 5 ms fade from START it had
+		// before: +4.9, a softened attack; the dense clouds dipped -1.1 .. -2.3 dB at each trig then, now within 0.2).
+		double brightLimit = c.sparse ? 16.0 : 3.0;
 		std::printf("  %-26s against the note: first 6 ms level %+.1f dB, brightness %+.1f; first 20 ms %+.1f, %+.1f (limits %s, %.0f)\n",
 			c.name, l6, b6, l20, b20, c.sparse ? "-" : "+-4", brightLimit);
 		if (!c.sparse)

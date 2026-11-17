@@ -46,10 +46,26 @@ static const Vec LFO_TRIP_BUTTON = Vec(50.7f, ROW2_Y);
 static const Vec LFO_DOT_BUTTON = Vec(55.5f, ROW2_Y);  // SYNC / T / D centered under the shape screen
 static const Vec LFO_AMT_KNOB = Vec(71.5f, ROW2_Y);
 static const Vec GAIN_KNOB = Vec(90.5f, ROW1_Y);
-static const Vec CUTOFF_KNOB = Vec(108.5f, ROW1_Y);
-static const Vec DRIVE_KNOB = Vec(124.5f, ROW1_Y);
-static const Vec RES_KNOB = Vec(108.5f, ROW2_Y);
-static const Vec FILTER_MODE_BUTTON = Vec(124.5f, ROW2_Y);
+// FILTER section (98.5..134.5): the page buttons in a full-height column on the left, then CUT 1|2 over RES 1|2, then
+// DRIVE over TYPE 1|2.
+//   | [1 LP ] | CUT    DRIVE |
+//   |   v     |              |
+//   | [2 OFF] | RES    TYPE  |
+/** The filter page buttons: "1" over "2" (which filter CUT / RES / TYPE edit), each showing its filter's type, with a
+chevron between them (filter 1 feeds filter 2). They fill the section's height with the clock-out box's 1.2 mm inset. */
+static const Vec FILTER_PAGE_POS = Vec(99.7f, TOP_Y0 + 1.2f);
+static const Vec FILTER_PAGE_SIZE = Vec(5.8f, TOP_Y1 - TOP_Y0 - 2.4f);
+/** Gap between the two page buttons (it holds the chevron) */
+static const float FILTER_PAGE_GAP = 2.8f;
+// The knob columns: CUT / RES 1.3 mm clear of the page column with their value rings, DRIVE / TYPE ~1.7 mm from the
+// section's right edge.
+static const Vec CUTOFF_KNOB = Vec(111.8f, ROW1_Y);
+static const Vec DRIVE_KNOB = Vec(127.4f, ROW1_Y);
+static const Vec RES_KNOB = Vec(111.8f, ROW2_Y);
+static const Vec FILTER_MODE_BUTTON = Vec(127.4f, ROW2_Y);
+/** The selected artifact's ENGINE button, in the header above the WAVE section */
+static const Vec ENGINE_BUTTON = Vec(21.f, 5.8f);
+static const Vec ENGINE_BUTTON_SIZE = Vec(14.f, 5.4f);
 // PITCH steps in semitones; the FREE button next to FINE switches it to continuous.
 static const Vec PITCH_KNOB = Vec(145.5f, ROW1_Y);
 static const Vec FINE_KNOB = Vec(140.7f, ROW2_Y);
@@ -213,6 +229,9 @@ static const Vec SAMPLE_BUTTON_SIZE = Vec(7.4f, 4.4f);
 /** HITS: how many hits are found (0 .. 100 %), a slider under ◀ HIT ▶ (top-left corner, size) */
 static const Vec SAMPLE_HITS_SLIDER_POS = Vec(19.2f, 38.3f);
 static const Vec SAMPLE_HITS_SLIDER_SIZE = Vec(15.8f, 3.2f);
+/** SLICE, right of the HITS slider: AUTO (the hits found) or a note value (equal slices); the slider hides on a note */
+static const Vec SAMPLE_SLICE_BUTTON = Vec(40.6f, SAMPLE_HITS_SLIDER_POS.y + SAMPLE_HITS_SLIDER_SIZE.y / 2.f);
+static const Vec SAMPLE_SLICE_SIZE = Vec(8.4f, 3.2f);
 
 // GRAIN's two extra columns at the right end of its section (WAVE's LFO RATE / AMT are there in WAVE): LENGTH and
 // P.SPRD (pitch scatter) on top, SPREAD and a small WINDOW screen (no title: click it for the list) below.

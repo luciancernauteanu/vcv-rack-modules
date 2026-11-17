@@ -11,7 +11,11 @@ Elektron style, each step can also carry parameter locks (its own value for any 
 condition (chance, A:B) and slide (see StepLocks.hpp). */
 struct WaveArtifactSequencer : Module {
 	static const int ROWS = wa::NUM_MARKERS;
-	static const int STEPS = 16;
+	/** Each row holds 64 steps (4 pages of 16); its LENGTH says how many play (default 16, as before) */
+	static const int STEPS = 64;
+	/** The grid and the lock lane show one page of 16 steps at a time */
+	static const int PAGE_STEPS = 16;
+	static const int PAGES = STEPS / PAGE_STEPS;
 
 	enum ParamId {
 		/** Per row: -4..4 (whole steps). Right of the middle multiplies the clock, left divides it. */
@@ -85,6 +89,16 @@ struct WaveArtifactSequencer : Module {
 	int laneRow = 0, laneSetting = 9;
 	/** The lane shows the row's trig conditions instead of a setting's locks */
 	bool laneCondition = false;
+	/** Each row's page on the grid (0..PAGES-1): its steps page * 16 .. page * 16 + 15 (its PAGE button). The lane
+	shows the lane row's. UI thread, saved. */
+	int rowPage[ROWS] = {};
+	int pageFirst(int r) const {
+		return std::min(std::max(rowPage[std::min(std::max(r, 0), ROWS - 1)], 0), PAGES - 1) * PAGE_STEPS;
+	}
+	/** The page a step is on */
+	static int pageOf(int s) {
+		return std::min(std::max(s, 0), STEPS - 1) / PAGE_STEPS;
+	}
 	/** The lane shows setting k's locks (what is being locked) */
 	void showLock(int k) {
 		laneSetting = k;

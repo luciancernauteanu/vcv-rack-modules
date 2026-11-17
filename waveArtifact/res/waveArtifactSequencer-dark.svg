@@ -5,8 +5,8 @@
   <g id="panel">
     <rect id="background" x="0" y="0" width="162.56" height="128.5" fill="#23262b"/>
     <g id="sections" fill="#2d3137">
-      <rect x="4" y="11" width="154.56" height="104" rx="2" ry="2"/>
+      <rect x="2" y="8.6" width="158.56" height="112" rx="2" ry="2"/>
     </g>
-    <rect id="gate-out-box" x="140.2" y="11.8" width="18.2" height="92.4" rx="1.5" ry="1.5" fill="#e6e6e6"/>
+    <rect id="gate-out-box" x="140.2" y="14.2" width="18.2" height="94.4" rx="1.5" ry="1.5" fill="#e6e6e6"/>
   </g>
 </svg>

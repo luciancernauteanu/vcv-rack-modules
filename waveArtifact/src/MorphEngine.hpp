@@ -69,6 +69,12 @@ struct MarkerInput {
 	float voct = 0.f;
 	/** -1 (left) .. 1 (right) */
 	float pan = 0.f;
+	/** Filter 2, in series after the filter: -1 OFF (skipped, the default), else a FilterMode; its own CUTOFF / RES */
+	int filter2Mode = -1;
+	/** How the two filters combine: 0 SER (filter 1 then filter 2), 1 PAR (both on the same input, mixed) */
+	int filterRoute = 0;
+	float cutoff2 = 0.5f;
+	float res2 = 0.f;
 };
 
 struct EngineInput {
@@ -253,6 +259,7 @@ public:
 				polyApplied = in.poly;
 				drive.reset();
 				markerSvf.reset();
+				markerF2.reset();
 				// The chains start clean in the other mode.
 				for (int m = 0; m < NUM_MARKERS; m++)
 					direct[m].running = false;
@@ -267,6 +274,7 @@ public:
 					tables[i].fade = 1.f;
 				}
 				markerSvf.reset();
+				markerF2.reset();
 				master.reset();
 			}
 			structureApplied = true;
@@ -590,12 +598,26 @@ private:
 		float driven = drive.process(dry, driveS < 1e-5f ? 0.f : driveS);
 		float q;
 		float fc = markerParams.get(cutoffS, resS, &q);
-		float out = markerSvf.process(driven, fc, q, sampleRate, mixS) * gain;
+		float filtered = markerSvf.process(driven, fc, q, sampleRate, mixS);
+		// Filter 2, blended between the two markers like filter 1 (OFF counts as dry); skipped while both are OFF
+		if (A.filter2Mode >= 0 || B.filter2Mode >= 0 || markerF2.active()) {
+			float m2a[NUM_MIX], m2b[NUM_MIX], m2[NUM_MIX];
+			modeWeights(A.filter2Mode >= 0, A.filter2Mode, m2a);
+			modeWeights(B.filter2Mode >= 0, B.filter2Mode, m2b);
+			for (int k = 0; k < NUM_MIX; k++)
+				m2[k] = m2a[k] + (m2b[k] - m2a[k]) * w;
+			float cut2 = std::min(std::max(A.cutoff2 + (B.cutoff2 - A.cutoff2) * w, 0.f), 1.f);
+			float res2 = std::min(std::max(A.res2 + (B.res2 - A.res2) * w, 0.f), 1.f);
+			markerF2.step(m2, A.filter2Mode >= 0 || B.filter2Mode >= 0, cut2, res2, smoothCoef, w < 0.5f ? A.filterRoute : B.filterRoute);
+			filtered = markerF2.apply(0, driven, filtered, sampleRate);
+		}
+		float out = filtered * gain;
 		if (cross)
 			out *= crossLevel;
 
 		if (!std::isfinite(out)) {
 			markerSvf.reset();
+			markerF2.reset();
 			return;
 		}
 
@@ -644,6 +666,10 @@ private:
 					d.panS = panT;
 					d.drive.reset();
 					d.svf.reset();
+					if (d.f2.needed(M.filter2Mode)) {
+						d.f2.reset();
+						d.f2.snap(M.filter2Mode, M.cutoff2, M.res2, M.filterRoute);
+					}
 					d.running = true;
 				}
 				for (int k = 0; k < NUM_MIX; k++)
@@ -675,6 +701,11 @@ private:
 				if (!std::isfinite(y)) {
 					d.svf.reset();
 					y = 0.f;
+				}
+				// Filter 2 in series (skipped while OFF)
+				if (d.f2.needed(M.filter2Mode)) {
+					d.f2.step(M.filter2Mode, M.cutoff2, M.res2, smoothCoef, M.filterRoute);
+					y = d.f2.apply(0, driven, y, sampleRate);
 				}
 				sendL[m] = sendR[m] = y;
 				y *= env * gain;
@@ -762,6 +793,10 @@ private:
 				d.env = 0.f;
 				d.drive.reset();
 				d.svf.reset();
+				if (d.f2.needed(M.filter2Mode)) {
+					d.f2.reset();
+					d.f2.snap(M.filter2Mode, M.cutoff2, M.res2, M.filterRoute);
+				}
 				d.limiter.reset();
 				d.running = true;
 			}
@@ -784,7 +819,12 @@ private:
 				d.svf.reset();
 				y = 0.f;
 			}
-			// SEND: after DRIVE and the filter, at its position share; the RETURN comes back in there
+			// Filter 2 in series (skipped while OFF)
+			if (d.f2.needed(M.filter2Mode)) {
+				d.f2.step(M.filter2Mode, M.cutoff2, M.res2, smoothCoef, M.filterRoute);
+				y = d.f2.apply(0, driven, y, sampleRate);
+			}
+			// SEND: after DRIVE and the filters, at its position share; the RETURN comes back in there
 			sendL[m] = sendR[m] = y * share;
 			y *= share * gain;
 			float angle = (d.panS + 1.f) * (float) (M_PI_4_F);
@@ -906,6 +946,8 @@ private:
 	float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};
 	WarmDrive drive;
 	Svf markerSvf;
+	/** The morph voice's filter 2 (the two markers' blended) */
+	Filter2 markerF2;
 	/** CUTOFF / RES as Hz and Q, worked out again only when they move */
 	FilterParams markerParams;
 	MasterFilter master;
@@ -917,6 +959,8 @@ private:
 	struct DirectChain {
 		WarmDrive drive;
 		Svf svf;
+		/** Filter 2, in series after svf (skipped while OFF) */
+		Filter2 f2;
 		FilterParams params;
 		SafetyLimiter limiter;
 		float mixS[NUM_MIX] = {0.f, 1.f, 0.f, 0.f, 0.f};

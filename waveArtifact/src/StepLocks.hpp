@@ -11,7 +11,7 @@
 
 namespace wa {
 
-static const int NUM_LOCKABLE = 69;
+static const int NUM_LOCKABLE = 74;
 
 /** Saved in the patch (JSON keys): never rename one. Same order as WaveArtifact::MARKER_SETTING_PARAMS. */
 static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
@@ -31,13 +31,16 @@ static const char* const LOCK_NAMES[NUM_LOCKABLE] = {
 	"modLfo2Rate", "modLfo2Shape", "modLfo2Sync", "modLfo2Dest", "modLfo2Depth",
 	"modAd2Attack", "modAd2Decay", "modAd2Perc", "modAd2Dest", "modAd2Depth",
 	"modLfoPhase", "modLfo2Phase",
+	"filter2Mode", "cutoff2", "res2",
+	"filterRoute",
+	"hitMode",
 };
 
 /** Shown in the lane's setting menu and on the panel */
 static const char* const LOCK_LABELS[NUM_LOCKABLE] = {
 	"WAVE / START", "SMOOTH",
 	"LFO RATE", "LFO AMT", "LFO SYNC", "LFO T", "LFO D", "LFO SHAPE",
-	"GAIN", "CUTOFF", "RES", "FILTER TYPE", "DRIVE",
+	"GAIN", "CUT 1", "RES 1", "TYPE 1", "DRIVE",
 	"PITCH", "PITCH FREE", "FINE", "PAN",
 	"DENSITY", "SIZE", "SPRAY", "WINDOW",
 	"GRAIN SYNC", "GRAIN T", "GRAIN D",
@@ -51,6 +54,9 @@ static const char* const LOCK_LABELS[NUM_LOCKABLE] = {
 	"EXP LFO2 RATE", "EXP LFO2 SHAPE", "EXP LFO2 SYNC", "EXP LFO2 DEST", "EXP LFO2 DEPTH",
 	"EXP AD2 ATTACK", "EXP AD2 DECAY", "EXP AD2 PERC", "EXP AD2 DEST", "EXP AD2 DEPTH",
 	"EXP LFO PHASE", "EXP LFO2 PHASE",
+	"TYPE 2", "CUT 2", "RES 2",
+	"ROUTE",
+	"SLICE",
 };
 
 /** Settings a step cannot lock: switches that only change how another control is read (SYNC / T / D, PITCH FREE)
@@ -69,6 +75,7 @@ static const int NOT_LOCKABLE[] = {
 	56,         // RETURN mode (SEND level is lockable)
 	59,         // EXP LFO 2 SYNC
 	64,         // EXP AD 2 PERC
+	73,         // SLICE (per artifact, like HITS)
 };
 
 inline bool isLockable(int k) {

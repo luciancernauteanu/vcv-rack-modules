@@ -36,10 +36,11 @@
     <rect id="MARKER_LFO_TRIPLET_PARAM" x="48.6" y="31.8" width="4.2" height="4.4" fill="#ff0000"/>
     <rect id="MARKER_LFO_DOTTED_PARAM" x="53.4" y="31.8" width="4.2" height="4.4" fill="#ff0000"/>
     <circle id="MARKER_GAIN_PARAM" cx="90.5" cy="19" r="4" fill="#ff0000"/>
-    <circle id="MARKER_CUTOFF_PARAM" cx="108.5" cy="19" r="4" fill="#ff0000"/>
-    <circle id="MARKER_DRIVE_PARAM" cx="124.5" cy="19" r="4" fill="#ff0000"/>
-    <circle id="MARKER_RES_PARAM" cx="108.5" cy="34" r="3" fill="#ff0000"/>
-    <rect id="MARKER_FILTER_MODE_PARAM" x="119.5" y="31.5" width="10" height="5" fill="#ff0000"/>
+    <circle id="MARKER_CUTOFF_PARAM" cx="111.8" cy="19" r="4" fill="#ff0000"/>
+    <circle id="MARKER_DRIVE_PARAM" cx="127.4" cy="19" r="4" fill="#ff0000"/>
+    <circle id="MARKER_RES_PARAM" cx="111.8" cy="34" r="3" fill="#ff0000"/>
+    <rect id="MARKER_FILTER_MODE_PARAM" x="122.4" y="31.5" width="10" height="5" fill="#ff0000"/>
+    <rect id="FILTER_PAGE_PARAM" x="99.7" y="12.2" width="5.8" height="30.1" fill="#ff0000"/>
     <circle id="MARKER_PITCH_PARAM" cx="145.5" cy="19" r="4" fill="#ff0000"/>
     <rect id="MARKER_PITCH_FREE_PARAM" x="146" y="31.8" width="6.8" height="4.4" fill="#ff0000"/>
     <circle id="MARKER_FINE_PARAM" cx="140.7" cy="34" r="3" fill="#ff0000"/>

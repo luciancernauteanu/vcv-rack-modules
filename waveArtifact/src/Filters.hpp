@@ -209,6 +209,126 @@ private:
 	float lastCutoff = -1.f, lastRes = -1.f, hz = 20.f, qValue = FILTER_Q_MIN;
 };
 
+/** An artifact's filter 2, in series after filter 1: OFF, or LP / BP / HP / notch with its own CUTOFF and RES (one or
+two channels with the same settings). Off and settled it is skipped: no cost and the signal untouched, so a patch
+that does not use it plays exactly as before. Turning it on fades in from dry (the mode mix glides from dry, ~20 ms
+with the engines' smoothing), turning it off fades back to dry and then stops. Per sample: step() with the targets,
+then process() per channel while active(). */
+// The work is kept out of line (WA_NOINLINE): inlined, it made the compiler regroup the float math of the engine code
+// around it, and the output changed by ~-125 dB even with filter 2 OFF. Callers test needed() inline first.
+#if defined(__GNUC__)
+#define WA_NOINLINE __attribute__((noinline))
+#else
+#define WA_NOINLINE
+#endif
+struct Filter2 {
+	Svf svf[2];
+	FilterParams params;
+	float mixS[NUM_MIX] = {1.f, 0.f, 0.f, 0.f, 0.f};
+	float cutS = 1.f, resS = 0.f;
+	bool running = false;
+	float fc = 20000.f, q = FILTER_Q_MIN;
+	/** How it joins filter 1: SER (it filters filter 1's output) or PAR (it filters filter 1's input; the two are mixed).
+	A change fades filter 2 out, switches, and fades it back in, so it never clicks. */
+	enum Route { SER, PAR };
+	int route = SER;
+
+	/** Anything to do this sample: asked for (`mode` >= 0) or still fading out */
+	bool needed(int mode) const {
+		return mode >= 0 || running;
+	}
+
+	/** One sample's targets: `mixT` the mode mix (dry = all in mixT[0]), `wanted` any filtering asked for (off: the
+	mix goes back to dry, then the filter stops). `coef` the engine's smoothing coefficient. `wantRoute` (-1: keep): a
+	new route is taken once the filter has faded out. */
+	WA_NOINLINE void step(const float mixT[NUM_MIX], bool wanted, float cutT, float resT, float coef, int wantRoute = -1) {
+		// A new route: fade out first (as if off), switch while stopped, then start again
+		if (wantRoute >= 0 && wantRoute != route) {
+			if (!running)
+				route = wantRoute;
+			else
+				wanted = false;
+		}
+		if (!running) {
+			if (!wanted)
+				return;
+			// Starts from dry, with clean state, on its new settings
+			running = true;
+			mixS[0] = 1.f;
+			for (int k = 1; k < NUM_MIX; k++)
+				mixS[k] = 0.f;
+			cutS = cutT;
+			resS = resT;
+			svf[0].reset();
+			svf[1].reset();
+		}
+		for (int k = 0; k < NUM_MIX; k++)
+			mixS[k] += (mixT[k] - mixS[k]) * coef;
+		cutS += (cutT - cutS) * coef;
+		resS += (resT - resS) * coef;
+		if (!wanted && mixS[0] > 0.9999f) {
+			running = false;
+			return;
+		}
+		fc = params.get(cutS, resS, &q);
+	}
+	/** The same, for one artifact's own settings: `mode` -1 = OFF */
+	WA_NOINLINE void step(int mode, float cutoff, float res, float coef, int wantRoute = -1) {
+		// Off and stopped (the default): nothing to do
+		if (mode < 0 && !running)
+			return;
+		float mixT[NUM_MIX];
+		modeWeights(mode >= 0, mode, mixT);
+		step(mixT, mode >= 0, std::min(std::max(cutoff, 0.f), 1.f), std::min(std::max(res, 0.f), 1.f), coef, wantRoute);
+	}
+	/** A silent voice: straight to its settings (a new note does not start with a glide); off, it stops */
+	WA_NOINLINE void snap(int mode, float cutoff, float res, int wantRoute = -1) {
+		// Silent: a new route applies at once
+		if (wantRoute >= 0)
+			route = wantRoute;
+		if (mode < 0) {
+			running = false;
+			return;
+		}
+		running = true;
+		modeWeights(true, mode, mixS);
+		cutS = std::min(std::max(cutoff, 0.f), 1.f);
+		resS = std::min(std::max(res, 0.f), 1.f);
+		fc = params.get(cutS, resS, &q);
+	}
+	bool active() const {
+		return running;
+	}
+	/** Channel `ch` (0 / 1) through it; untouched when not active */
+	WA_NOINLINE float process(int ch, float x, float sampleRate) {
+		if (!running)
+			return x;
+		float y = svf[ch].process(x, fc, q, sampleRate, mixS);
+		if (!std::isfinite(y)) {
+			svf[ch].reset();
+			return 0.f;
+		}
+		return y;
+	}
+	/** Channel `ch` with both filters: `in` is what filter 1 got, `y1` what it gave. SER: filter 2 on y1. PAR: filter 2 on
+	`in`, half and half with y1 (two LPs at one cutoff sound as one; LP + HP a wide band). Its fade (the dry share
+	mixS[0]) leads to exactly y1 in both routes, so OFF is filter 1 alone. */
+	WA_NOINLINE float apply(int ch, float in, float y1, float sampleRate) {
+		if (!running)
+			return y1;
+		if (route == SER)
+			return process(ch, y1, sampleRate);
+		float f = process(ch, in, sampleRate);
+		float on = 1.f - mixS[0];
+		return y1 * (1.f - 0.5f * on) + 0.5f * (f - mixS[0] * in);
+	}
+	WA_NOINLINE void reset() {
+		running = false;
+		svf[0].reset();
+		svf[1].reset();
+	}
+};
+
 /** 63-tap halfband low-pass (Blackman-windowed sinc) at the 2x rate, for 2x oversampling. */
 struct Halfband {
 	static const int TAPS = 63;

@@ -92,6 +92,9 @@ struct ArtifactHits {
 	int slot = -1;
 	int serial = -1;
 	float sens = -1.f;
+	/** SLICE they were made for (0 AUTO: found; else a note value) and, for the note values, the tempo used */
+	int mode = -1;
+	double gridBpm = -1.0;
 	double time = 0.0;
 	/** The list for HIT: the UI puts a new one in `pending`, process() takes it into `active` and leaves the old one in
 	`retired`, which the UI frees (the bank swap's pattern: nothing is freed on the audio thread) */
@@ -297,6 +300,20 @@ struct WaveArtifact : Module {
 		shapes start after a RESET, and how far after the beat they run when synced (wa::Lfo, phaseOffset). Lockable. */
 		ENUMS(MARKER_MOD_LFO_PHASE_PARAM, NUM_MARKERS),
 		ENUMS(MARKER_MOD_LFO2_PHASE_PARAM, NUM_MARKERS),
+		/** Each artifact's filter 2, in series after its filter (wa::Filter2): TYPE 0 OFF (default: skipped, no cost),
+		1..4 LP / BP / HP / NOTCH; its own CUTOFF (0..1 as the filter's, default 0.5) and RES. Lockable. */
+		ENUMS(MARKER_FILTER2_MODE_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_CUTOFF2_PARAM, NUM_MARKERS),
+		ENUMS(MARKER_RES2_PARAM, NUM_MARKERS),
+		/** The panel's F2 page: 0 the CUTOFF / RES / TYPE spots edit filter 1, 1 filter 2 (UI only, saved) */
+		FILTER_PAGE_PARAM,
+		/** Each artifact's filter ROUTE: 0 SER (filter 1 then filter 2, the default), 1 PAR (both on the same input,
+		mixed). Lockable. */
+		ENUMS(MARKER_FILTER_ROUTE_PARAM, NUM_MARKERS),
+		/** Each artifact's SLICE: 0 AUTO (the hits found in the file, at its HITS slider), 1..6 equal slices of 1/1, 1/2,
+		1/4, 1/8, 1/16, 1/32 notes at the file's tempo (no tempo: the file as one bar). Its hits are then those cuts: the
+		map's ticks, HIT, the arrows, LAY and RND follow them. Per artifact, not lockable. */
+		ENUMS(MARKER_HIT_MODE_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -495,6 +512,10 @@ struct WaveArtifact : Module {
 		float modLfo2Rate = 0.f, modLfo2Depth = 0.f;
 		// PHASE of LFO 1 / LFO 2 (0..1 of a cycle)
 		float modLfoPhase = 0.f, modLfo2Phase = 0.f;
+		// Filter 2: -1 OFF, else a FilterMode; its CUTOFF and RES
+		int filter2Mode = -1;
+		float cutoff2 = 0.5f, res2 = 0.f;
+		int filterRoute = 0;
 		// The expander's AD 2
 		bool ad2Perc = false;
 		int ad2Dest = 0;
@@ -556,7 +577,7 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 69;
+	static const int NUM_MARKER_SETTINGS = 74;
 	/** UI thread: artifact i's engine as set (0 WAVE, 1 GRAIN, 2 SAMPLE) */
 	int engineOfMarker(int i) {
 		return clamp((int) std::round(params[MARKER_ENGINE_PARAM + clamp(i, 0, NUM_MARKERS - 1)].getValue()), 0, 2);
@@ -661,8 +682,9 @@ struct WaveArtifact : Module {
 	/** A press on one of the selected marker's controls: the sequencer's lane shows that setting for the marker's row
 	(its locks as bars, the other steps at the knob's value). Nothing for a setting that cannot be locked. */
 	void showInLane(int paramId);
-	/** How many lit steps of the selected marker's row lock the setting behind `paramId` (0 without a sequencer) */
-	int stepsLockingInRow(int paramId);
+	/** How many steps (trigs and phantom locks) of `marker`'s row lock the setting behind `paramId`, a control of that
+	marker (-1: the selected marker). 0 without a sequencer. */
+	int stepsLockingInRow(int paramId, int marker = -1);
 	/** A sequencer step of `marker` is selected: the WAVE / START it plays (its lock, or the knob where it has none),
 	for the wavetable map to show and edit instead of the live position. UI thread. */
 	bool stepWaveShown(int marker, float* wave, bool* locked = nullptr);
@@ -762,8 +784,11 @@ struct WaveArtifact : Module {
 	/** Replaces the marker's sequencer row with its loop laid out over `beats` (on the hits, or `grid`: every step),
 	and sets the marker to play each slice up to the next trig. False when it cannot (see LoopLayoutInfo::why). */
 	bool layoutLoopOnRow(int marker, int beats, bool grid);
-	/** layoutLoopOnRow with one undo entry for both modules; `beats` <= 0: the guessed length */
+	/** layoutLoopOnRow with one undo entry for both modules; `beats` <= 0: at the loop's own speed */
 	bool layoutLoopWithUndo(int marker, int beats, bool grid);
+	/** LAY's row clock and step count for the marker's part. `beats` > 0: on that many of the module's beats (a length
+	picked in the menu). 0: at the loop's own speed (its tempo kept, whatever the module's: wa::layoutRowAtOwnTempo). */
+	bool layLayout(const LoopLayoutInfo& info, int marker, int beats, bool grid, int* clockIndex, int* steps, int* placed = nullptr);
 	/** The layout's menu entries (the slice, on the hits / every step, other lengths), and them as a submenu */
 	void appendLoopLayoutItems(ui::Menu* menu, int marker);
 	void appendLoopLayoutMenu(ui::Menu* menu, int marker);

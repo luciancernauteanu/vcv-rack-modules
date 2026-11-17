@@ -129,6 +129,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
   / PING with loop point, BEAT (CUT / FIT, `sampleBeatDivision`), HIT snap (`nearestHit`), zero-crossing snap, note fade
   in (`SAMPLE_FADE_IN_PARAM`), DRIVE (`sampleDrive`, latency-aligned).
 - **All:** filter per artifact (`Svf` via `FilterParams`), GAIN (`MAX_GAIN` 4), PAN, RETURN (INSERT) comes back after DRIVE and the filter
+- **Filter 2 (all engines):** `wa::Filter2` in series after the filter (`MARKER_FILTER2_MODE_PARAM` 0 OFF / LP / BP / HP / NOTCH, `MARKER_CUTOFF2_PARAM`, `MARKER_RES2_PARAM`; `s.filter2Mode` -1 = OFF). MorphEngine: the morph voice (`markerF2`, blended between the two markers, OFF = dry), `renderPoly` / `renderChains` (`DirectChain::f2`); GrainEngine: each cloud's `f2` (stereo). Skipped while OFF (`needed()`, its work out of line: inlined it changed the engines' rounding); on / off fades from / to dry (~20 ms). Panel: the filter page buttons, "1" over "2" in a full-height column on the filter section's left (`FILTER_PAGE_PARAM`, `FilterPageSelector`, `layout::FILTER_PAGE_POS` / `FILTER_PAGE_SIZE` / `FILTER_PAGE_GAP`; CUT / RES and DRIVE / TYPE moved right for it; each button shows its filter's type under its number, OFF dim; the page shown filled in the artifact's color, the hovered one outlined; a chevron between them, filter 1 feeds filter 2, dim while filter 2 is OFF) shows filter 2's CUT / RES / TYPE at filter 1's spots (`editKnobPage`); their labels follow the page (`PanelLabels::addPaged`, `pageParam`: CUT 1 / CUT 2, RES 1 / RES 2, TYPE 1 / TYPE 2). Naming everywhere: CUT 1, CUT 2, RES 1, RES 2, TYPE 1, TYPE 2, DRIVE (one drive, before filter 1); lists offer them in that order without changing saved numbers (`MOD_DEST_ORDER` via `ModeButton::order`, `CV_DEST_ORDER`, the lane menu's group)
   (`insertS` 20 ms); then the master section (section 11).
 
 ## 8. Modulation, clock, transport
@@ -148,10 +149,11 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 
 | Step | Code |
 |---|---|
-| Rows and steps | `WaveArtifactSequencer`: one row per artifact, 16 steps (`STEPS`), `velocity[r][s]` (0 = no trig), `length[r]`, row clock `CLOCK_MULT_PARAM + r` (-4..4: /8 /4 /3 /2 x1 x2 x3 x4 x8 steps per beat, `stepsPerBeat`) |
+| Pages | 64 steps per row (`STEPS`), shown 16 at a time, each row on its own page (`PAGE_STEPS`, `rowPage[r]`, `pageFirst(r)`; saved as "rowPages"). Each row's PAGE column (`PAGE_COL_X0`, between the shift arrows and the steps, titled PAGE; drawn in `StepRowLabels`, `pageButtonAt` / `onButton` in `StepGrid`): 4 stacked tabs 1..4 (`pageTabY`): shown = filled in the row's color, inside the length = dark, past it = outline, playing = white edge; click a tab = that page, Shift + click = every row, right-click = menu; it makes that row the lane row. A row on page 2..4 shows its first step's number in its first cell. `StepNumbers` under the grid: the lane row's page numbers with "PAGE n" (the lane shows that page). Grid / lane hit-tests return the step on the row's page (`seqlayout::columnAt` + `pageFirst(r)`), drawing maps step -> column; drags stop at the page's edges; a tie can be made across a page's left edge. LENGTH 1..64 (row menu: whole pages, then exact lengths by page; Ctrl+click on any page); default and old patches 16. LAY still lays out at most 16 steps (`PAGE_STEPS`) |
+| Rows and steps | `WaveArtifactSequencer`: one row per artifact, up to 64 steps (`STEPS`), `velocity[r][s]` (0 = no trig), `length[r]`, row clock `CLOCK_MULT_PARAM + r` (-4..4: /8 /4 /3 /2 x1 x2 x3 x4 x8 steps per beat, `stepsPerBeat`) |
 | Playing | `process()` -> `tickRow(r)` on each new step index (`beatPos` from the main module's `ToSequencerMessage`): trig conditions (`conditionPasses`), ties (long gates), lock conditions; sends `FromSequencerMessage` (`fireCount`, velocity, lock values / mask, slide, `stepBeats`, `legato`, `holdOpen`); GATE / MOD outputs per row |
 | Editing steps | `StepGrid` widget: click / drag velocity, ties (`toggleTie`), shift (`shiftRow`), copy / paste (`SeqClipboard`, `pasteRow`), delete (`deleteStep`), select a step (`select(r, s)`) |
-| Locks on a step | With a step selected, the main module's knobs edit its locks: `lockTarget`, `lockCaptureStep` (switches / wheel), `LinkedKnob` drags -> `setStepLock` / `clearStepLock`; tooltips `lockTooltip`, `stepValueFor`; map line `stepWaveShown` |
+| Locks on a step | With a step selected, the main module's knobs edit its locks: `lockTarget`, `lockCaptureStep` (switches / wheel), `LinkedKnob` drags -> `setStepLock` / `clearStepLock`; tooltips `lockTooltip`, `stepValueFor`; map line `stepWaveShown`. Lock dots + value bars: `StepValueBars` (main panel: the selected marker; an expander: its own marker, `stepBars->marker` in `rebind`; the SEND / RETURN module: each row's SEND knob is its own artifact's, `controlMarkers`; off the main panel `stripVertical` = false, bars always under the control), counted by `stepsLockingInRow(paramId, marker)`: a dot in the middle of a knob (outlined), above a screen / button (DEST, filter type, shape, toggles); white when the selected step locks it |
 | Lane | `LockLane`: one setting of a row as bars (`showLock(k)`, `laneSetting`), or the CONDITION view; `showInLane(paramId)` from a knob press. Setting menu `openSettingMenu` (groups of setting indexes, incl. SEND, LFO 2, AD 2, PHASE) |
 | Phantom (trigless) locks | Locks on an unlit step (`isPhantom`, `hasStep`): drawn in the lane on an empty step (a drag begun there only makes phantoms, `dragPhantom`; one begun on a trig only edits trigs). Yellow (`PHANTOM_COLOR`): outline + lock dot on the grid, bars in the lane. `tickRow`: its locks (lock conditions applied) go on top of the row's last step (`mergeLocks`), `lockFires` -> `FromSequencerMessage::lockCount` -> main `seqLockSeen`: `seqLocks.apply` without a note, GATE or MOD. Lasts until the row's next trig. Selectable; knobs add locks to it (`lockTarget`); SLIDE strip works; a grid click makes it a trig keeping its locks. `tidyStep` clears it when its last lock goes. Grid drags delete only steps they touched (`touched`). Old patches (no `phantomLocks` key) drop locks on unlit steps |
 | REC | `recordStep()`: knob moves go into the step playing now |
@@ -162,7 +164,7 @@ main one (`slotOf(i)` UI side, `markerSlot[i]` audio side).
 
 Entry: the row's LAY button (`WaveArtifactSequencer.cpp pressHeadButton`), the marker / map menus ("Lay out the loop on
 the row", `appendLoopLayoutMenu` / `appendLoopLayoutItems`), Shift + drag on the map to pick a part (`WavetableMap`,
-`wa::laySelection`, snaps to a hit and to 1, 2, 4... beats). The drag and LAY count beats in **one** tempo,
+`wa::laySelection`, snaps to a hit or the sample's edge and to 1, 2, 4... beats, or all the beats up to the edge). The drag and LAY count beats in **one** tempo,
 `layGridBpm(slot)` (the loop's own grid, else the audio's, else the name's): with the audio's alone a 120 bpm loop of
 16ths read as 160 (4 / 3), so a "4 beats" drag was 3 beats to LAY and gave 12 steps.
 
@@ -207,6 +209,81 @@ line), `WavetableMap` (tables or waveform, hits, scan loops, loop point, preview
 
 ## Change log
 
+- 2026-11-18: a GRAIN note starts as a SAMPLE note does (`GrainEngine::schedule`, `Cloud::notePre` / `noteAttack`):
+  its first grains fade in over the note fade-in (`SAMPLE_FADE_IN_PARAM`, 1 ms default, now for both engines; menu
+  and tooltip say so), reading that far before START (forward), so the hit from START on plays untouched; the old
+  note still fades out over 5 ms. Before, the new grains faded in over 5 ms from START over a sounding note (every
+  trig's attack softened under the old note's fade) and not at all from silence. On the user's LAY row: per-slice
+  match with the file 0.88-1.00 -> 0.98-1.00 (as SAMPLE), level wobble 3.2 -> 1.3 dB, the 10 ms after a trig 5.3 ->
+  19 dB under SAMPLE's difference; dense clouds no longer dip 1-2 dB at a trig (`testRestartOverNote`,
+  `build/probe_userlay.cpp`, `build/eng_transparent.cpp`: a held LAY cloud nulls as well as SAMPLE).
+
+- 2026-11-18: a loop's tempo from a number in the middle of its name (`wa::bpmFromLoopName`): "ARSS_120_A_Bouzuki_String"
+  is 120 when the file lasts whole beats of it within 5 ms (2+ beats, the number on its own, 60..200), else nothing, as
+  before. Used by `layGridBpm`, `loopLayoutInfo` and `fileTempoOf` (the drag's beats, LAY's grid). A soft string loop
+  had no tempo at all (the audio shows no clear beat): the drag could not snap and LAY guessed. Also found on that
+  patch: LAY's grains need WINDOW TUKEY (set by LAY); on HANN at LAY's spacing (100 ms, one per 75 ms) every trig dips
+  7-10 dB for 25 ms; and a row twice the slices' length leaves each slice silent half its step (both engines). Check:
+  `build/probe_userlay.cpp` (the autosave patch, GRAIN vs SAMPLE per 5 ms).
+
+- 2026-11-17: the map's Shift + drag can pick the whole sample again (`wa::laySelection`): the press snaps to the
+  sample's start / end like a hit, a beat count up to 1 % short of the room still fits (the part ends at the edge), and
+  dragged to the edge it can take all the beats up to it (12, 24 ...) when LAY has a row for them, not only 1, 2, 4 ...
+  A 16-beat loop a hair short, or pressed a few pixels in, halved to 8 beats: half the sample, 2 pages. LAY's own
+  whole-beats check (`loopLayoutInfo`) takes the same 1 % (`testLaySelection`).
+
+- 2026-11-16: LAY: a loop within 8 % of the module's tempo (octaves too) goes on whole module beats, regular step counts,
+  following the module by those few percent (`wa::layNearTempoBeats`: a 100 bpm loop at 103 is 64 steps x4 at 1/16, not
+  33 steps); only a tempo clearly apart keeps its own speed with an exact count (`testLayNearTempo`).
+- 2026-11-16: SLICE per artifact (`MARKER_HIT_MODE_PARAM`, a button right of the HITS slider on GRAIN / SAMPLE; settings
+  list 74, not lockable): AUTO = the hits found (as before), or equal slices of 1/1 .. 1/32 at the file's tempo
+  (`wa::sliceGrid`; no tempo: the file as one bar); the HITS slider hides then. Its hits feed the map's ticks, HIT, the
+  arrows, LAY and RND. LAY lays one slice per step when a straight clock plays them at their own speed
+  (`wa::layOneSlicePerStep`), else its own-tempo layout. LAY never picks a triplet clock (x3, /3:
+  `wa::layClockAllowed`). A tempo in the file name counts the beats at its own value when the file is whole beats of
+  it (`loopFileBpm`, and `loopLayoutInfo` when the audio agrees): a 174 loop is 32 beats at 174, not 16 at 87.
+  Checks: `testLayRowForHits`, `build/probe_slice.cpp`.
+- 2026-11-16: LAY keeps the loop's own tempo (`layLayout` with beats 0, `wa::layoutRowAtOwnTempo`): the row's cycle lasts
+  as long as the part at the module's tempo (`layModuleBeats`), any step count up to 64 within 2 % of its speed (a 174 bpm
+  loop at 120: 44 steps x2, speed 1.003; it played 1.38x laid on its beats). A part lasting whole module beats is laid
+  out exactly as before. The menu's "on a number of the module's beats" lengths still fit to those beats; RND slices
+  use LAY's layout (`testLayOwnTempo`, `build/probe_laytempo.cpp`).
+- 2026-11-16: LAY lays a long part over pages: `wa::layMaxSteps(beats)` = one page up to 4 beats (as before), then 16th
+  notes onto pages 2-4 (8 beats: 32 steps, 16 beats: 64), coarser only past 16 beats; the row shows page 1 after LAY
+  (`testLayPages`). GRAIN has DRIVE (`GrainEngine::grainDrive`, before the filter, skipped at 0, fades in over the
+  drive's latency; the expander's DEST DRIVE stays P.SPRD on GRAIN, its CV DRIVE reaches it); old patches set a GRAIN
+  artifact's leftover DRIVE to 0 (no "grainDrive" key). Filter ROUTE per artifact (`MARKER_FILTER_ROUTE_PARAM`, lockable,
+  settings list 73): SER (filter 1 then 2) or PAR (both on the same input, mixed; `Filter2::apply`; a change fades
+  filter 2 out and in); on the filter 2 page at the DRIVE spot (`testFilterRoute`, `build/probe_graindrive.cpp`).
+- 2026-11-16: main panel: the selected artifact's color as a soft wash (15 % light / 12 % dark, `ArtifactTint`, under the
+  labels and controls) on everything that follows the selection: WAVE / START, GAIN / PAN, FILTER, PITCH, the envelope
+  strip (POLY), KEEP (GRAIN) and a halo behind the ENGINE button; global sections stay plain. The filter page
+  buttons: two tall buttons "1" / "2" in a column filling the filter section's height on its left, each with its
+  filter's type (LP / BP / HP / NOTCH, OFF dim) and a chevron between them (series); CUT / RES and DRIVE / TYPE moved
+  right by ~3 mm for it. The SAMPLE / GRAIN HITS slider reads "HITS 46%" (`MiniSlider::prefix`). UI only, no audio change.
+- 2026-11-16: sequencer panel laid out again: one frame (2 mm margin, nothing outside it), one toolbar line (REC, COND
+  CLR ending at the grid; LOCKS RND and the amount ending at its end; a round "!" with all the help in its tooltip,
+  `HelpBadge`, instead of three lines of text), one line of column titles (LEN, CLOCK, PAGE, GATE, MOD), two-line row
+  headers (chip + LEN over LAY + RND), rows 13.4 mm (were 12.6), the lane lower with its name left-aligned and CLR on
+  its right. All in `seqlayout` (section 9).
+- 2026-11-16: 64 steps per sequencer row in 4 pages of 16, each row with its own PAGE button (click: next page,
+  Shift: every row; the grid narrowed by 4.8 mm for it), LENGTH up to 64; old patches and new rows stay 16 steps;
+  LAY still 16. Check `build/probe_64steps.cpp` (section 9).
+- 2026-11-15: filter naming and order made one: CUT 1 / CUT 2, RES 1 / RES 2, TYPE 1 / TYPE 2, DRIVE on the panel
+  labels (following the page), the expander's DEST buttons and CV menus, the lane's lock labels and menu, and the
+  tooltips; the lists offer them side by side (display order only, saved values unchanged). The F2 toggle became a
+  1 / 2 page selector left of CUT / RES (section 7).
+- 2026-11-15: filter 2 per artifact, in series after the filter (OFF / LP / BP / HP / NOTCH, CUTOFF 2, RES 2; lockable;
+  settings list 72): OFF by default and skipped (bit-identical, no cost); on: +7..40 ns settled, +44..96 ns moving
+  (GRAIN / SAMPLE, user patch, 5 artifacts). F2 toggle on the panel swaps CUTOFF / RES / TYPE to filter 2. Checks:
+  `tests/test_engine.cpp` (`testFilter2`), `build/probe_filter2.cpp` (3 engines x MORPH / POLY), golden IDENTICAL (section 7).
+  The expander reaches it too: LFO / AD DEST `MOD_DEST_CUTOFF2`, `MOD_DEST_RES2` ("CUT 2", "RES 2", appended to
+  `ModDest`) and CV destinations `CV_CUTOFF2`, `CV_RES2` (appended to `CvDest`, through the settings like RES); checks
+  `build/probe_f2dest.cpp`, `build/probe_f2cv.cpp`.
+- 2026-11-15: lock dots: in the middle of each knob (larger, outlined) instead of above it, where it sat on the label;
+  screens and buttons keep theirs above. Fix: an expander's dots counted the main panel's selected marker's row, so
+  they showed only when that marker was the expander's own (`stepsLockingInRow(paramId, marker)`; section 9). The
+  SEND / RETURN module's SEND knobs get them too (they had none).
 - 2026-11-15: phantom (trigless) locks: draw a lock in the lane on a step with no trig; it changes the playing note's
   settings from that step (on top of the trig's locks) without a note; yellow on the grid and lane. The lane menu now
   offers SEND, LFO 2, AD 2 and both PHASEs. A grid drag no longer cleans up untouched empty steps. Checks:
