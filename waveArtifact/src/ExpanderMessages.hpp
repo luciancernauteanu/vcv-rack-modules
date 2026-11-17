@@ -97,7 +97,7 @@ static const CvDestInfo CV_DESTS[NUM_CV_DESTS] = {
 	{8, "GAIN", "GAIN", 7, MOD_GAIN},
 	{9, "CUT 1", "CUT 1", 7, MOD_CUTOFF},
 	{10, "RES 1", "RES 1", 7, -1},
-	{12, "DRIVE", "DRIVE", 5, MOD_DRIVE},
+	{12, "DRIVE", "DRIVE", 7, MOD_DRIVE}, // GRAIN too (its drive before the filter)
 	{13, "PITCH", "PITCH", 7, -1},
 	{15, "FINE", "FINE", 5, MOD_FINE},
 	{16, "PAN", "PAN", 7, MOD_PAN},

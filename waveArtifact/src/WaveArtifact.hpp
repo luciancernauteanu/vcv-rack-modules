@@ -92,6 +92,9 @@ struct ArtifactHits {
 	int slot = -1;
 	int serial = -1;
 	float sens = -1.f;
+	/** SLICE they were made for (0 AUTO: found; else a note value) and, for the note values, the tempo used */
+	int mode = -1;
+	double gridBpm = -1.0;
 	double time = 0.0;
 	/** The list for HIT: the UI puts a new one in `pending`, process() takes it into `active` and leaves the old one in
 	`retired`, which the UI frees (the bank swap's pattern: nothing is freed on the audio thread) */
@@ -304,6 +307,13 @@ struct WaveArtifact : Module {
 		ENUMS(MARKER_RES2_PARAM, NUM_MARKERS),
 		/** The panel's F2 page: 0 the CUTOFF / RES / TYPE spots edit filter 1, 1 filter 2 (UI only, saved) */
 		FILTER_PAGE_PARAM,
+		/** Each artifact's filter ROUTE: 0 SER (filter 1 then filter 2, the default), 1 PAR (both on the same input,
+		mixed). Lockable. */
+		ENUMS(MARKER_FILTER_ROUTE_PARAM, NUM_MARKERS),
+		/** Each artifact's SLICE: 0 AUTO (the hits found in the file, at its HITS slider), 1..6 equal slices of 1/1, 1/2,
+		1/4, 1/8, 1/16, 1/32 notes at the file's tempo (no tempo: the file as one bar). Its hits are then those cuts: the
+		map's ticks, HIT, the arrows, LAY and RND follow them. Per artifact, not lockable. */
+		ENUMS(MARKER_HIT_MODE_PARAM, NUM_MARKERS),
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -505,6 +515,7 @@ struct WaveArtifact : Module {
 		// Filter 2: -1 OFF, else a FilterMode; its CUTOFF and RES
 		int filter2Mode = -1;
 		float cutoff2 = 0.5f, res2 = 0.f;
+		int filterRoute = 0;
 		// The expander's AD 2
 		bool ad2Perc = false;
 		int ad2Dest = 0;
@@ -566,7 +577,7 @@ struct WaveArtifact : Module {
 	wa::TableTone tableTone = wa::TONE_SMOOTH;
 	int selectedMarker = 0;
 	/** First param ID of every setting a marker copy carries: everything per marker except on/off and bar position */
-	static const int NUM_MARKER_SETTINGS = 72;
+	static const int NUM_MARKER_SETTINGS = 74;
 	/** UI thread: artifact i's engine as set (0 WAVE, 1 GRAIN, 2 SAMPLE) */
 	int engineOfMarker(int i) {
 		return clamp((int) std::round(params[MARKER_ENGINE_PARAM + clamp(i, 0, NUM_MARKERS - 1)].getValue()), 0, 2);
@@ -773,8 +784,11 @@ struct WaveArtifact : Module {
 	/** Replaces the marker's sequencer row with its loop laid out over `beats` (on the hits, or `grid`: every step),
 	and sets the marker to play each slice up to the next trig. False when it cannot (see LoopLayoutInfo::why). */
 	bool layoutLoopOnRow(int marker, int beats, bool grid);
-	/** layoutLoopOnRow with one undo entry for both modules; `beats` <= 0: the guessed length */
+	/** layoutLoopOnRow with one undo entry for both modules; `beats` <= 0: at the loop's own speed */
 	bool layoutLoopWithUndo(int marker, int beats, bool grid);
+	/** LAY's row clock and step count for the marker's part. `beats` > 0: on that many of the module's beats (a length
+	picked in the menu). 0: at the loop's own speed (its tempo kept, whatever the module's: wa::layoutRowAtOwnTempo). */
+	bool layLayout(const LoopLayoutInfo& info, int marker, int beats, bool grid, int* clockIndex, int* steps, int* placed = nullptr);
 	/** The layout's menu entries (the slice, on the hits / every step, other lengths), and them as a submenu */
 	void appendLoopLayoutItems(ui::Menu* menu, int marker);
 	void appendLoopLayoutMenu(ui::Menu* menu, int marker);

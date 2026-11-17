@@ -72,6 +72,50 @@ TKnob* withArc(TKnob* knob, NVGcolor color, bool bipolar = false) {
 	return knob;
 }
 
+/** A soft wash of the selected artifact's color under everything that follows the selection: the per-artifact
+sections of the top band, the envelope strip (POLY) and KEEP (GRAIN), and a halo behind the ENGINE button. Global
+controls (tempo, PLAY, POSITION, MASTER, outputs) stay plain, so the artifact's zone reads at a glance. Drawn on the
+panel layer before the labels and the controls, so it sits under both. Strength 15 % (light) / 12 % (dark),
+chosen from a rendered test of 10 / 16 / 22 %. */
+struct ArtifactTint : widget::Widget {
+	WaveArtifact* module = nullptr;
+
+	void draw(const DrawArgs& args) override {
+		int m = module ? clamp(module->selectedMarker, 0, WaveArtifact::NUM_MARKERS - 1) : 1;
+		NVGcolor c = nvgTransRGBAf(layout::MARKER_COLORS[m], settings::preferDarkPanels ? 0.12f : 0.15f);
+		auto wash = [&](Vec mmPos, Vec mmSize) {
+			Vec p = mm2px(mmPos), size = mm2px(mmSize);
+			nvgBeginPath(args.vg);
+			nvgRoundedRect(args.vg, p.x, p.y, size.x, size.y, mm2px(2.f));
+			nvgFillColor(args.vg, c);
+			nvgFill(args.vg);
+		};
+		// The top band's per-artifact sections (not the badge, which is solid, nor the last: tempo)
+		const int count = (int) (sizeof(layout::TOP_SECTIONS) / sizeof(layout::TOP_SECTIONS[0])) - 1;
+		for (int i = 1; i < count; i++) {
+			const layout::Section& s = layout::TOP_SECTIONS[i];
+			wash(Vec(s.x0, layout::TOP_Y0), Vec(s.x1 - s.x0, layout::TOP_Y1 - layout::TOP_Y0));
+		}
+		if (!module || module->params[WaveArtifact::PLAY_MODE_PARAM].getValue() > 0.5f)
+			wash(layout::ADSR_BOX_POS, layout::ADSR_BOX_SIZE);
+		if (module && (int) std::round(module->params[WaveArtifact::ENGINE_MODE_PARAM].getValue()) == 1)
+			wash(layout::SPREAD_BOX_POS, layout::SPREAD_BOX_SIZE);
+		// The ENGINE button is the selected artifact's too: a halo in its color behind it
+		{
+			Vec p = mm2px(layout::ENGINE_BUTTON.minus(layout::ENGINE_BUTTON_SIZE.div(2.f)).minus(Vec(0.8f, 0.8f)));
+			Vec size = mm2px(layout::ENGINE_BUTTON_SIZE.plus(Vec(1.6f, 1.6f)));
+			nvgBeginPath(args.vg);
+			nvgRoundedRect(args.vg, p.x, p.y, size.x, size.y, mm2px(1.6f));
+			nvgFillColor(args.vg, nvgTransRGBAf(layout::MARKER_COLORS[m], 0.3f));
+			nvgFill(args.vg);
+			nvgStrokeColor(args.vg, nvgTransRGBAf(layout::MARKER_COLORS[m], 0.7f));
+			nvgStrokeWidth(args.vg, 1.f);
+			nvgStroke(args.vg);
+		}
+		Widget::draw(args);
+	}
+};
+
 /** Outlines the per-artifact sections of the top band in the selected artifact's color, so it is
 clear which controls follow the selection. Global sections (tempo, clock, reset) stay uncolored. */
 struct ArtifactSections : widget::Widget {

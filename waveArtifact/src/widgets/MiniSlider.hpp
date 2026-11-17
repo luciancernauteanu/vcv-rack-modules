@@ -7,6 +7,8 @@ usual param menu. The fill and the percentage are drawn inside. Used for the seq
 SAMPLE engine's HITS. One undo entry per drag. */
 struct MiniSlider : app::ParamWidget {
 	NVGcolor color = layout::SCREEN_TEXT;
+	/** Drawn before the percentage ("HITS " reads "HITS 46%"), so the slider names itself */
+	std::string prefix;
 	float dragX = 0.f, oldValue = 0.f;
 
 	void setFromX(float x) {
@@ -70,6 +72,6 @@ struct MiniSlider : app::ParamWidget {
 		nvgFontSize(vg, box.size.y * 0.72f);
 		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
 		nvgFillColor(vg, nvgRGB(0xf0, 0xf2, 0xff));
-		nvgText(vg, box.size.x / 2.f, box.size.y / 2.f + 0.4f, string::f("%d%%", (int) std::round(f * 100.f)).c_str(), NULL);
+		nvgText(vg, box.size.x / 2.f, box.size.y / 2.f + 0.4f, (prefix + string::f("%d%%", (int) std::round(f * 100.f))).c_str(), NULL);
 	}
 };

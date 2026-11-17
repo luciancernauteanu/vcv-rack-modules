@@ -86,15 +86,18 @@ void WaveArtifactSequencer::clearAll() {
 
 void WaveArtifactSequencer::loadDefault() {
 	clearAll();
-	for (int r = 0; r < ROWS; r++)
-		length[r] = STEPS;
+	// One page long, as before (a row can be made up to 64 steps)
+	for (int r = 0; r < ROWS; r++) {
+		length[r] = PAGE_STEPS;
+		rowPage[r] = 0;
+	}
 	for (int s : {0, 4, 8, 12})
 		velocity[0][s] = 0.9f;
 	for (int s : {4, 12})
 		velocity[1][s] = 0.8f;
-	for (int s = 2; s < STEPS; s += 4)
+	for (int s = 2; s < PAGE_STEPS; s += 4)
 		velocity[2][s] = 0.6f;
-	for (int s = 0; s < STEPS; s += 4)
+	for (int s = 0; s < PAGE_STEPS; s += 4)
 		velocity[2][s] = 0.4f;
 }
 
@@ -334,6 +337,10 @@ json_t* WaveArtifactSequencer::dataToJson() {
 	json_object_set_new(root, "laneRow", json_integer(laneRow));
 	json_object_set_new(root, "laneSetting", json_string(wa::LOCK_NAMES[clamp(laneSetting, 0, wa::NUM_LOCKABLE - 1)]));
 	json_object_set_new(root, "laneCondition", json_boolean(laneCondition));
+	json_t* pages = json_array();
+	for (int r = 0; r < ROWS; r++)
+		json_array_append_new(pages, json_integer(rowPage[r]));
+	json_object_set_new(root, "rowPages", pages);
 	// Locks on an unlit step are phantom locks (they play) from here on; older patches never meant them to
 	json_object_set_new(root, "phantomLocks", json_true());
 	return root;
@@ -361,7 +368,7 @@ void WaveArtifactSequencer::dataFromJson(json_t* root) {
 	if (lens) {
 		for (int r = 0; r < ROWS; r++) {
 			json_t* l = json_array_get(lens, r);
-			length[r] = l ? clamp((int) json_integer_value(l), 1, STEPS) : STEPS;
+			length[r] = l ? clamp((int) json_integer_value(l), 1, STEPS) : PAGE_STEPS;
 		}
 	}
 	// Older patches have no stepData: every step plain.
@@ -428,6 +435,11 @@ void WaveArtifactSequencer::dataFromJson(json_t* root) {
 			laneSetting = k;
 	}
 	laneCondition = json_is_true(json_object_get(root, "laneCondition"));
+	json_t* pages = json_object_get(root, "rowPages");
+	for (int r = 0; r < ROWS; r++) {
+		json_t* pg = pages ? json_array_get(pages, r) : NULL;
+		rowPage[r] = pg ? clamp((int) json_integer_value(pg), 0, PAGES - 1) : 0;
+	}
 	// A patch from before phantom locks: any locks left on an unlit step were not meant to play
 	if (!json_object_get(root, "phantomLocks")) {
 		for (int r = 0; r < ROWS; r++)
@@ -442,8 +454,10 @@ namespace seqlayout {
 static const float W = 162.56f;
 /** Left of each row, packed tight: the marker badge with LEN under it, the row clock knob, the shift arrows */
 static const float BADGE_X = 8.5f;
-static const float CLOCK_KNOB_X = 15.6f;
-static const float GRID_X0 = 23.8f;
+static const float CLOCK_KNOB_X = 18.4f;
+/** Each row's PAGE button, between its shift arrows and its steps, as tall as the row */
+static const float PAGE_COL_X0 = 26.0f, PAGE_COL_W = 4.0f;
+static const float GRID_X0 = 30.6f;
 static const float GRID_X1 = 139.8f;
 /** GATE output of each row, right of the grid, in an output box (both SVGs) */
 static const float GATE_X = 144.4f;
@@ -451,45 +465,54 @@ static const float GATE_X = 144.4f;
 static const float MOD_X = 154.2f;
 /** Each row's MOD level trimpot, under its MOD jack (in the gap before the next row's jack) */
 static const float MOD_LEVEL_DY = 8.4f;
-static const float GATE_LABEL_Y = 14.5f;
-static const float ROW_Y0 = 19.f;
+/** The column titles (LEN, CLOCK, PAGE, GATE, MOD): one line under the toolbar */
+static const float GATE_LABEL_Y = 16.7f;
+static const float ROW_Y0 = 19.4f;
 /** A row's cells; under them, in the gap, the SLIDE strips of the lit trigs (same row pitch as before: 16.6 mm) */
-static const float ROW_H = 12.6f;
+static const float ROW_H = 13.4f;
 static const float ROW_GAP = 4.0f;
 static const float CELL_GAP = 0.8f;
 /** The lock lane under the grid (below the step numbers), and its name on the left */
-static const float LANE_Y0 = 104.6f;
-static const float LANE_H = 9.4f;
-static const float LANE_LABEL_X = 15.7f;
+static const float LANE_Y0 = 109.4f;
+static const float LANE_H = 9.6f;
+/** The lane's name and setting, left-aligned on two lines; its CLR on the right of them */
+static const float LANE_LABEL_X = 3.2f;
 /** CLR, left of the lane's name: clears the lane's setting in its row */
-static const float CLR_X0 = 2.4f, CLR_W = 5.2f;
-static const float CLR_Y0 = LANE_Y0 + 2.2f, CLR_H = 5.0f;
+static const float CLR_X0 = 23.8f, CLR_W = 6.0f;
+static const float CLR_Y0 = LANE_Y0 + 2.6f, CLR_H = 4.4f;
 /** REC (live record) in the top-left corner, under the screw, with its label to the right */
-static const Vec REC_BUTTON = Vec(14.f, 9.6f);
-static const Vec REC_LABEL = Vec(22.f, 10.6f);
+static const float TOOLBAR_Y = 11.4f;
+static const Vec REC_BUTTON = Vec(5.8f, TOOLBAR_Y);
+static const Vec REC_LABEL = Vec(9.6f, TOOLBAR_Y + 0.1f); // right of the 6.1 mm button
 /** RND (random locks) and its amount slider in the top-right corner, level with REC, left of the screw */
-static const Vec RND_LABEL = Vec(112.f, 10.6f);
-static const Vec RND_BUTTON = Vec(121.5f, 9.6f);
+static const Vec RND_LABEL = Vec(115.4f, TOOLBAR_Y + 0.1f);
+static const Vec RND_BUTTON = Vec(120.4f, TOOLBAR_Y);
 static const Vec RND_BUTTON_SIZE = Vec(8.f, 4.f);
-static const Vec RND_SLIDER = Vec(138.f, 9.6f);
-static const Vec RND_SLIDER_SIZE = Vec(21.f, 3.6f);
+static const Vec RND_SLIDER = Vec(132.4f, TOOLBAR_Y);
+static const Vec RND_SLIDER_SIZE = Vec(14.8f, 3.6f);
+/** The help: a round "!" with every gesture in its tooltip (the help text no longer takes the panel's bottom) */
+static const Vec HELP_BUTTON = Vec(149.3f, TOOLBAR_Y);
+static const float HELP_R = 2.4f;
 /** COND CLR (every trig condition of the lane's row back to Always), in the top bar right of REC */
-static const Vec COND_LABEL = Vec(30.5f, 10.6f);
-static const Vec COND_CLR_BUTTON = Vec(38.f, 9.6f);
-static const Vec COND_CLR_SIZE = Vec(7.f, 4.f);
-static const float TITLE_X = 84.f;
+static const Vec COND_LABEL = Vec(15.6f, TOOLBAR_Y + 0.1f);
+static const Vec COND_CLR_BUTTON = Vec(27.4f, TOOLBAR_Y);
+static const Vec COND_CLR_SIZE = Vec(6.4f, 4.f);
+/** The title, centred over the grid */
+static const float TITLE_X = 85.2f, TITLE_Y = 4.9f;
 /** Accent of the COND controls (warm, apart from the locks' blue) */
 static const NVGcolor COND_COLOR = nvgRGB(0xff, 0xc4, 0x6b);
 /** Phantom (trigless) locks: a clear yellow, apart from COND's warm orange */
 static const NVGcolor PHANTOM_COLOR = nvgRGB(0xf5, 0xe6, 0x2a);
 /** Shift arrows of each row, stacked between the CLOCK knob and the first step: ◀ on top, ▶ below */
-static const float SHIFT_X0 = 19.2f, SHIFT_W = 4.0f, SHIFT_H = 5.0f;
-static const float SHIFT_LEFT_DY = 1.0f, SHIFT_RIGHT_DY = 6.8f;
+static const float SHIFT_X0 = 22.2f, SHIFT_W = 3.4f, SHIFT_H = 6.2f;
+static const float SHIFT_LEFT_DY = 0.2f, SHIFT_RIGHT_DY = 7.0f;
 /** Row header, left of the CLOCK knob: the marker's number on a small chip with the row length beside it, and
 under them LAY (lay out the loop on the row) and RND (random slices) */
-static const float CHIP_X = 3.6f, CHIP_DY = 2.8f, CHIP_R = 2.0f;
-static const float LEN_X = 9.2f;
-static const float HEAD_BTN_X0 = 1.3f, HEAD_BTN_W = 5.1f, HEAD_BTN_GAP = 0.6f, HEAD_BTN_DY = 6.5f, HEAD_BTN_H = 4.6f;
+static const float CHIP_X = 5.8f, CHIP_DY = 3.3f, CHIP_R = 2.3f;
+static const float LEN_X = 11.8f;
+static const float HEAD_BTN_X0 = 3.0f, HEAD_BTN_W = 5.6f, HEAD_BTN_GAP = 0.4f, HEAD_BTN_DY = 7.8f, HEAD_BTN_H = 4.6f;
+/** The CLOCK knob's centre and its multiplier's, below the row's top */
+static const float CLOCK_KNOB_DY = 4.6f, CLOCK_TEXT_DY = 10.4f;
 inline float headButtonX(int b) {
 	return HEAD_BTN_X0 + b * (HEAD_BTN_W + HEAD_BTN_GAP);
 }
@@ -497,8 +520,25 @@ inline float headButtonX(int b) {
 off). The cell above stays all velocity. */
 static const float SLIDE_DY = 0.5f, SLIDE_H = 2.0f;
 inline float slideTop(int r);
+/** One page's column width (16 columns; step s shows in column s - pageFirst()) */
 inline float cellW() {
-	return (GRID_X1 - GRID_X0) / WaveArtifactSequencer::STEPS;
+	return (GRID_X1 - GRID_X0) / WaveArtifactSequencer::PAGE_STEPS;
+}
+/** The column under x (mm), or -1 outside the page's 16 */
+inline int columnAt(float x) {
+	int c = (int) std::floor((x - GRID_X0) / cellW());
+	return (c >= 0 && c < WaveArtifactSequencer::PAGE_STEPS) ? c : -1;
+}
+/** The strip of step numbers under the grid (the lane row's page) */
+static const float PAGE_BTN_H = 3.8f;
+/** Each row's 4 page tabs, stacked 1 (top) .. 4 in its PAGE column, filling the row's height */
+static const float PAGE_TAB_GAP = 0.5f;
+inline float pageTabH() {
+	return (ROW_H - (WaveArtifactSequencer::PAGES - 1) * PAGE_TAB_GAP) / WaveArtifactSequencer::PAGES;
+}
+/** Top of row r's tab b (rowTop(r) + b tabs; rowTop is defined below) */
+inline float pageTabY(int r, int b) {
+	return ROW_Y0 + r * (ROW_H + ROW_GAP) + b * (pageTabH() + PAGE_TAB_GAP);
 }
 inline float rowTop(int r) {
 	return ROW_Y0 + r * (ROW_H + ROW_GAP);
@@ -617,22 +657,34 @@ static void appendRowMenu(ui::Menu* menu, WaveArtifactSequencer* m, int r) {
 	menu->addChild(createMenuItem("Paste row here", RACK_MOD_CTRL_NAME "+V", [=]() { pasteRowFromClipboard(m, r); },
 		seqClipboard().kind != SeqClipboard::ROW));
 	menu->addChild(new MenuSeparator);
+	// Whole pages first (16 / 32 / 48 / 64), then any length, grouped by page
 	menu->addChild(createSubmenuItem("Length", string::f("%d steps", m->length[r]), [=](ui::Menu* sub) {
-		for (int n = 1; n <= WaveArtifactSequencer::STEPS; n++)
-			sub->addChild(createCheckMenuItem(string::f("%d", n), "", [=]() { return m->length[r] == n; }, [=]() { m->length[r] = n; }));
+		for (int p = 1; p <= WaveArtifactSequencer::PAGES; p++) {
+			int n = p * WaveArtifactSequencer::PAGE_STEPS;
+			sub->addChild(createCheckMenuItem(string::f("%d steps (%d page%s)", n, p, p > 1 ? "s" : ""), "", [=]() { return m->length[r] == n; },
+				[=]() { m->length[r] = n; }));
+		}
+		sub->addChild(new MenuSeparator);
+		for (int p = 0; p < WaveArtifactSequencer::PAGES; p++) {
+			int lo = p * WaveArtifactSequencer::PAGE_STEPS + 1, hi = lo + WaveArtifactSequencer::PAGE_STEPS - 1;
+			sub->addChild(createSubmenuItem(string::f("%d .. %d", lo, hi), "", [=](ui::Menu* exact) {
+				for (int n = lo; n <= hi; n++)
+					exact->addChild(createCheckMenuItem(string::f("%d", n), "", [=]() { return m->length[r] == n; }, [=]() { m->length[r] = n; }));
+			}));
+		}
 	}));
 	menu->addChild(createMenuItem("Every 4th step", "", [=]() {
 		m->clearRow(r);
-		for (int s = 0; s < WaveArtifactSequencer::STEPS; s += 4)
+		for (int s = 0; s < m->length[r]; s += 4) // over the row's length (up to 64)
 			m->velocity[r][s] = 0.8f;
 	}));
 	menu->addChild(createMenuItem("Every 2nd step", "", [=]() {
 		m->clearRow(r);
-		for (int s = 0; s < WaveArtifactSequencer::STEPS; s += 2)
+		for (int s = 0; s < m->length[r]; s += 2)
 			m->velocity[r][s] = 0.8f;
 	}));
 	menu->addChild(createMenuItem("Random", "", [=]() {
-		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++) {
+		for (int s = 0; s < m->length[r]; s++) {
 			bool on = random::uniform() < 0.35f;
 			m->velocity[r][s] = on ? 0.4f + 0.6f * random::uniform() : 0.f;
 			if (!on)
@@ -745,14 +797,19 @@ struct StepGrid : widget::OpaqueWidget {
 			float top = seqlayout::rowTop(r);
 			if (y < top || y > top + seqlayout::ROW_H)
 				continue;
-			int c = (int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW());
-			if (c < 0 || c >= WaveArtifactSequencer::STEPS)
+			// The column on the page shown: the step is that page's
+			int c = seqlayout::columnAt(x);
+			if (c < 0)
 				return false;
 			*row = r;
-			*col = c;
+			*col = first(r) + c;
 			return true;
 		}
 		return false;
+	}
+	/** The first step of the page shown */
+	int first(int r) const {
+		return module ? module->pageFirst(r) : 0;
 	}
 
 	/** Velocity for a mouse height inside a row: the top of the cell is 100% */
@@ -767,7 +824,8 @@ struct StepGrid : widget::OpaqueWidget {
 
 	/** TIE handle: a small round button on the line between two steps, in the middle of the row's height. It shows
 	while the mouse is near that line (HOVER_MM either side) and both steps are lit. */
-	static constexpr float TIE_DY = 6.3f, TIE_R = 1.8f, TIE_HOVER_MM = 2.6f; // TIE_DY: ROW_H / 2
+	static constexpr float TIE_R = 1.8f, TIE_HOVER_MM = 2.6f;
+	const float TIE_DY = seqlayout::ROW_H / 2.f; // the middle of the row
 	/** The row and the gap (s = between steps s - 1 and s) the mouse is near, and whether it is on the handle */
 	int hoverRow = -1, hoverGap = -1;
 	bool hoverOnHandle = false;
@@ -784,9 +842,11 @@ struct StepGrid : widget::OpaqueWidget {
 			float top = seqlayout::rowTop(r);
 			if (y < top || y > top + seqlayout::ROW_H)
 				continue;
-			int s = (int) std::round((x - seqlayout::GRID_X0) / seqlayout::cellW());
-			float gx = seqlayout::GRID_X0 + s * seqlayout::cellW();
-			if (std::fabs(x - gx) > reach || !tieHandleUsable(r, s))
+			// The gap before column c of the page shown; on pages 2..4 the left edge too (a tie from the page before)
+			int c = (int) std::round((x - seqlayout::GRID_X0) / seqlayout::cellW());
+			float gx = seqlayout::GRID_X0 + c * seqlayout::cellW();
+			int s = first(r) + c;
+			if (c < (first(r) > 0 ? 0 : 1) || c >= WaveArtifactSequencer::PAGE_STEPS || std::fabs(x - gx) > reach || !tieHandleUsable(r, s))
 				return false;
 			*row = r;
 			*gap = s;
@@ -826,9 +886,12 @@ struct StepGrid : widget::OpaqueWidget {
 			float top = seqlayout::rowTop(r) + seqlayout::ROW_H;
 			if (y <= top || y > seqlayout::slideTop(r) + seqlayout::SLIDE_H + 0.7f)
 				continue;
-			int c = (int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW());
+			int c = seqlayout::columnAt(x);
+			if (c < 0)
+				return false;
+			c += first(r);
 			// A trig, or a phantom lock (its slide glides its locks in)
-			if (c < 0 || c >= WaveArtifactSequencer::STEPS || !module->hasStep(r, c))
+			if (!module->hasStep(r, c))
 				return false;
 			*row = r;
 			*col = c;
@@ -838,9 +901,9 @@ struct StepGrid : widget::OpaqueWidget {
 	}
 	/** SLIDE for a mouse x (panel pixels) over step c: the strip's left end is off, its right end 100%. A few
 	percent of dead zone at the left, so off is easy to reach. */
-	float slideAt(int c, float xPx) {
+	float slideAt(int r, int c, float xPx) {
 		float x = xPx / SVG_DPI * MM_PER_IN;
-		float x0 = seqlayout::cellX(c) + seqlayout::CELL_GAP / 2.f + 0.4f, w = seqlayout::cellW() - seqlayout::CELL_GAP - 0.8f;
+		float x0 = seqlayout::cellX(c - first(r)) + seqlayout::CELL_GAP / 2.f + 0.4f, w = seqlayout::cellW() - seqlayout::CELL_GAP - 0.8f;
 		float f = (x - x0) / w;
 		const float DEAD = 0.04f;
 		if (f <= DEAD)
@@ -860,6 +923,41 @@ struct StepGrid : widget::OpaqueWidget {
 		int hr, hb;
 		if ((e.button == GLFW_MOUSE_BUTTON_LEFT || e.button == GLFW_MOUSE_BUTTON_RIGHT) && headButtonAt(e.pos, &hr, &hb)) {
 			pressHeadButton(hr, hb, e.button);
+			pressRow = pressCol = -1;
+			e.consume(this);
+			return;
+		}
+		// A row's page tab: click = that page, Shift + click = every row to it, right-click = the page menu. The lane
+		// (and the numbers under the grid) follow that row.
+		int pr, ptab;
+		if ((e.button == GLFW_MOUSE_BUTTON_LEFT || e.button == GLFW_MOUSE_BUTTON_RIGHT) && pageButtonAt(e.pos, &pr, &ptab)) {
+			WaveArtifactSequencer* m = module;
+			if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
+				bool all = (e.mods & RACK_MOD_MASK) == GLFW_MOD_SHIFT;
+				for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
+					if (all || r == pr)
+						m->rowPage[r] = ptab;
+				m->laneRow = pr;
+			}
+			else {
+				ui::Menu* menu = createMenu();
+				menu->addChild(createMenuLabel(string::f("Row %d: page on the grid (row length %d steps)", pr + 1, m->length[pr])));
+				for (int p = 0; p < WaveArtifactSequencer::PAGES; p++) {
+					int lo = p * WaveArtifactSequencer::PAGE_STEPS + 1;
+					menu->addChild(createCheckMenuItem(string::f("Page %d: steps %d .. %d%s", p + 1, lo, lo + WaveArtifactSequencer::PAGE_STEPS - 1,
+						lo > m->length[pr] ? " (past the row's end)" : ""), "", [=]() { return m->rowPage[pr] == p; },
+						[=]() {
+							m->rowPage[pr] = p;
+							m->laneRow = pr;
+						}));
+				}
+				menu->addChild(new MenuSeparator);
+				for (int p = 0; p < WaveArtifactSequencer::PAGES; p++)
+					menu->addChild(createMenuItem(string::f("Every row to page %d", p + 1), "", [=]() {
+						for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
+							m->rowPage[r] = p;
+					}));
+			}
 			pressRow = pressCol = -1;
 			e.consume(this);
 			return;
@@ -906,7 +1004,7 @@ struct StepGrid : widget::OpaqueWidget {
 				slideRow = sr;
 				slideCol = sc;
 				pressOnSlide = true;
-				module->stepData[sr][sc].slide = slideAt(sc, e.pos.x);
+				module->stepData[sr][sc].slide = slideAt(sr, sc, e.pos.x);
 				selectStep(module, sr, sc);
 				e.consume(this);
 				return;
@@ -985,6 +1083,24 @@ struct StepGrid : widget::OpaqueWidget {
 	int markRow = -1, markCol = -1;
 	bool markValue = false;
 
+	/** The press (panel pixels) is on a row's PAGE column: the row, and the tab (page 0..3) under it */
+	bool pageButtonAt(Vec p, int* row, int* tab = nullptr) {
+		float x = p.x / SVG_DPI * MM_PER_IN, y = p.y / SVG_DPI * MM_PER_IN;
+		if (!module || x < seqlayout::PAGE_COL_X0 || x > seqlayout::PAGE_COL_X0 + seqlayout::PAGE_COL_W)
+			return false;
+		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
+			float top = seqlayout::rowTop(r);
+			if (y >= top && y <= top + seqlayout::ROW_H) {
+				*row = r;
+				// The gaps between tabs count for the tab above
+				if (tab)
+					*tab = clamp((int) ((y - top) / (seqlayout::pageTabH() + seqlayout::PAGE_TAB_GAP)), 0, WaveArtifactSequencer::PAGES - 1);
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** The press (panel pixels) is on a row's LAY (b = 0) or RND (b = 1) */
 	bool headButtonAt(Vec p, int* row, int* b) {
 		float x = p.x / SVG_DPI * MM_PER_IN, y = p.y / SVG_DPI * MM_PER_IN;
@@ -1050,6 +1166,11 @@ struct StepGrid : widget::OpaqueWidget {
 	void updateHeadTip(Vec pos) {
 		int r, b;
 		int key = headButtonAt(pos, &r, &b) ? r * 2 + b : -1;
+		// The PAGE buttons: their own keys (100 + row)
+		if (key < 0 && pageButtonAt(pos, &r)) {
+			key = 100 + r;
+			b = 2;
+		}
 		if (key == headTipKey)
 			return;
 		hideHeadTip();
@@ -1057,6 +1178,12 @@ struct StepGrid : widget::OpaqueWidget {
 		if (key < 0 || !settings::tooltips)
 			return;
 		headTip = new ui::Tooltip;
+		if (b == 2) {
+			headTip->text = "PAGE 1-4: which 16 of the row's 64 steps the grid shows\nFilled: shown   White edge: playing   Outline only: past the row's length\n"
+							"Click: show that page   Shift + click: every row\nThe row's length: right-click the row, Length (up to 64)";
+			APP->scene->addChild(headTip);
+			return;
+		}
 		headTip->text = (b == 0)
 			? "LAY: lay out the marker's loop on this row, a trig on each hit\n(the loop: START to LENGTH, or to the next marker;\nShift + drag on the map picks a part, in whole bars)\nRight-click: on every step, other lengths"
 			: "RND: a random slice on each trig of the row (step 1 stays)\nHow many: the RND amount slider, top right\nCtrl + Shift + click / drag: mark steps, then RND changes only them";
@@ -1148,7 +1275,7 @@ struct StepGrid : widget::OpaqueWidget {
 		// Ctrl + Shift drag: the steps passed in the row get the first one's mark
 		if (markRow >= 0) {
 			float mx = local.x / SVG_DPI * MM_PER_IN;
-			int col = clamp((int) std::floor((mx - seqlayout::GRID_X0) / seqlayout::cellW()), 0, WaveArtifactSequencer::STEPS - 1);
+			int col = first(markRow) + clamp((int) std::floor((mx - seqlayout::GRID_X0) / seqlayout::cellW()), 0, WaveArtifactSequencer::PAGE_STEPS - 1);
 			int dir = (col > markCol) ? 1 : -1;
 			while (markCol != col) {
 				markCol += dir;
@@ -1157,7 +1284,7 @@ struct StepGrid : widget::OpaqueWidget {
 			return;
 		}
 		if (slideRow >= 0) {
-			module->stepData[slideRow][slideCol].slide = slideAt(slideCol, local.x);
+			module->stepData[slideRow][slideCol].slide = slideAt(slideRow, slideCol, local.x);
 			return;
 		}
 		if (dragRow < 0)
@@ -1166,7 +1293,8 @@ struct StepGrid : widget::OpaqueWidget {
 			moved = true;
 		// The step under the mouse, in the row the drag began in; every step passed on the way gets the same.
 		float x = local.x / SVG_DPI * MM_PER_IN;
-		int col = clamp((int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW()), 0, WaveArtifactSequencer::STEPS - 1);
+		// The page shown: the drag stops at its edges
+		int col = first(dragRow) + clamp((int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW()), 0, WaveArtifactSequencer::PAGE_STEPS - 1);
 		int step = (col > dragCol) ? 1 : -1;
 		while (dragCol != col) {
 			dragCol += step;
@@ -1210,8 +1338,10 @@ struct StepGrid : widget::OpaqueWidget {
 			float top = seqlayout::rowTop(r);
 			int len = module ? module->length[r] : 16;
 			int playing = module ? module->playing[r].load() : (r == 0 ? 3 : -1);
-			for (int s = 0; s < WaveArtifactSequencer::STEPS; s++) {
-				float x = seqlayout::cellX(s);
+			// The page shown: its 16 steps in the 16 columns
+			int p0 = first(r);
+			for (int s = p0; s < p0 + WaveArtifactSequencer::PAGE_STEPS; s++) {
+				float x = seqlayout::cellX(s - p0);
 				float v = module ? module->velocity[r][s] : ((s % 4 == 0 && r < 3) ? 0.8f : 0.f);
 				bool inside = s < len;
 				float cx = (x + seqlayout::CELL_GAP / 2.f) * mm, cy = top * mm, cwPx = (cw - seqlayout::CELL_GAP) * mm, chPx = seqlayout::ROW_H * mm;
@@ -1233,6 +1363,23 @@ struct StepGrid : widget::OpaqueWidget {
 					nvgRoundedRect(vg, cx, cy, cwPx, chPx, 1.5f);
 					nvgFillColor(vg, nvgRGBAf(0.f, 0.f, 0.f, dark ? 0.45f : 0.3f));
 					nvgFill(vg);
+				}
+				// A row shown on page 2..4: its first step's number in the corner of its first cell (17, 33, 49), so a
+				// row away from page 1 is seen at a glance
+				if (s == p0 && p0 > 0 && font) {
+					std::string n = string::f("%d", s + 1);
+					nvgFontFaceId(vg, font->handle);
+					nvgFontSize(vg, 6.f);
+					float bounds[4];
+					nvgTextBounds(vg, 0.f, 0.f, n.c_str(), NULL, bounds);
+					float tw = bounds[2] - bounds[0] + 2.4f, th = 6.4f;
+					nvgBeginPath(vg);
+					nvgRoundedRect(vg, cx + 1.f, cy + 1.f, tw, th, 1.4f);
+					nvgFillColor(vg, nvgRGBA(0x16, 0x18, 0x22, 0xc8));
+					nvgFill(vg);
+					nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+					nvgFillColor(vg, col);
+					nvgText(vg, cx + 1.f + tw / 2.f, cy + 1.f + th / 2.f + 0.3f, n.c_str(), NULL);
 				}
 				// A phantom (trigless) lock: no trig, only locks: a yellow outline (and a yellow lock dot below)
 				bool phantom = module && v <= 0.f && module->isPhantom(r, s);
@@ -1319,7 +1466,7 @@ struct StepGrid : widget::OpaqueWidget {
 					nvgStrokeWidth(vg, 1.6f);
 					nvgStroke(vg);
 				}
-				if (module && module->rowSel == r && s == 0) {
+				if (module && module->rowSel == r && s == p0) {
 					// Whole row selected (Ctrl + A): one frame around every step of it
 					float x0 = (seqlayout::GRID_X0 + seqlayout::CELL_GAP / 2.f) * mm, x1 = (seqlayout::GRID_X1 - seqlayout::CELL_GAP / 2.f) * mm;
 					nvgBeginPath(vg);
@@ -1359,7 +1506,7 @@ struct StepGrid : widget::OpaqueWidget {
 			// TIE handle, on hover between two lit trigs of this row: + ties them, − unties them
 			if (module && hoverRow == r && tieHandleUsable(r, hoverGap)) {
 				bool tied = module->isTied(r, hoverGap);
-				float hx = (seqlayout::GRID_X0 + hoverGap * cw) * mm, hy = (top + TIE_DY) * mm, hr = TIE_R * mm;
+				float hx = (seqlayout::GRID_X0 + (hoverGap - first(r)) * cw) * mm, hy = (top + TIE_DY) * mm, hr = TIE_R * mm;
 				nvgBeginPath(vg);
 				nvgCircle(vg, hx, hy, hr);
 				nvgFillColor(vg, hoverOnHandle ? nvgRGB(0xff, 0xff, 0xff) : nvgRGB(0x16, 0x18, 0x22));
@@ -1409,9 +1556,17 @@ struct LockLane : widget::OpaqueWidget {
 		return main ? main->getParamQuantity(settingBase() + module->laneRow) : nullptr;
 	}
 
+	/** The step under x (panel pixels) on the page shown, or -1 outside its 16 columns */
 	int colAt(float xPx) {
+		int c = seqlayout::columnAt(xPx / SVG_DPI * MM_PER_IN);
+		return c < 0 ? -1 : module->pageFirst(module->laneRow) + c;
+	}
+	/** A drag's step: on the page shown and inside the row's length (the drag stops at either edge) */
+	int dragStepAt(float xPx) {
 		float x = xPx / SVG_DPI * MM_PER_IN;
-		return (int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW());
+		int p0 = module->pageFirst(module->laneRow);
+		int c = clamp((int) std::floor((x - seqlayout::GRID_X0) / seqlayout::cellW()), 0, WaveArtifactSequencer::PAGE_STEPS - 1);
+		return std::max(p0, std::min(p0 + c, laneLen() - 1));
 	}
 
 	float valueAt(ParamQuantity* q, float yPx) {
@@ -1445,7 +1600,7 @@ struct LockLane : widget::OpaqueWidget {
 		for (int k : range(57, 68))
 			expander.push_back(k);
 		// GAIN, the two filters side by side (CUT 1, CUT 2, RES 1, RES 2, TYPE 1, TYPE 2), DRIVE, SEND
-		const std::vector<int> level = {8, 9, 70, 10, 71, 11, 69, 12, 55};
+		const std::vector<int> level = {8, 9, 70, 10, 71, 11, 69, 72, 12, 55}; // ... TYPE 2, ROUTE, DRIVE, SEND
 		const Group groups[] = {
 			{"Wave", range(0, 1)},
 			{"Level / filters / drive / send", level},
@@ -1636,7 +1791,7 @@ struct LockLane : widget::OpaqueWidget {
 			Vec local = mouseOverride ? mouseAt : APP->scene->getMousePos().minus(getAbsoluteOffset(Vec(0, 0))).div(getAbsoluteZoom());
 			if (std::fabs(local.y - pressY) > 2.f)
 				moved = true;
-			int col = clamp(colAt(local.x + box.pos.x), 0, laneLen() - 1);
+			int col = dragStepAt(local.x + box.pos.x);
 			int dir = (col > dragCol) ? 1 : -1;
 			auto touch = [&](int s) {
 				if (!conditionStep(s))
@@ -1662,8 +1817,8 @@ struct LockLane : widget::OpaqueWidget {
 		Vec local = mouseOverride ? mouseAt : APP->scene->getMousePos().minus(getAbsoluteOffset(Vec(0, 0))).div(getAbsoluteZoom());
 		if (std::fabs(local.y - pressY) > 2.f)
 			moved = true;
-		// The drag stops at the row's last step
-		int col = clamp(colAt(local.x + box.pos.x), 0, laneLen() - 1);
+		// The drag stops at the row's last step and at the page's edges
+		int col = dragStepAt(local.x + box.pos.x);
 		int step = (col > dragCol) ? 1 : -1;
 		auto touch = [&](int s) {
 			if (!dragTakes(s))
@@ -1768,15 +1923,15 @@ struct LockLane : widget::OpaqueWidget {
 		// The lane's name: the row (in its color) and the setting, with a menu arrow
 		if (font) {
 			nvgFontFaceId(vg, font->handle);
-			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+			nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
 			nvgFontSize(vg, 7.f);
 			nvgFillColor(vg, col);
 			float lx = (seqlayout::LANE_LABEL_X - box.pos.x / mm) * mm;
-			nvgText(vg, lx, 0.4f * mm, string::f("ROW %d LOCK", row + 1).c_str(), NULL);
+			nvgText(vg, lx, 1.0f * mm, string::f("ROW %d LOCK", row + 1).c_str(), NULL);
 			nvgFillColor(vg, dark ? nvgRGB(0xe6, 0xe8, 0xee) : nvgRGB(0x22, 0x24, 0x2c));
 			// Sized for the longest name ("WAVE / START") in the space left of the steps
 			nvgFontSize(vg, 6.4f);
-			nvgText(vg, lx, 4.6f * mm, (std::string(condView ? "CONDITION" : wa::LOCK_LABELS[k]) + " \xe2\x96\xbe").c_str(), NULL);
+			nvgText(vg, lx, 5.4f * mm, (std::string(condView ? "CONDITION" : wa::LOCK_LABELS[k]) + " \xe2\x96\xbe").c_str(), NULL);
 		}
 		// CLR button: lit while the row has locks of the lane's setting (dim when there is nothing to clear)
 		{
@@ -1806,11 +1961,13 @@ struct LockLane : widget::OpaqueWidget {
 		float cw = seqlayout::cellW();
 		float h = seqlayout::LANE_H * mm;
 		// Steps past the row's length do not play and cannot be edited: dimmed, as on the grid
-		int len = module ? laneLen() : WaveArtifactSequencer::STEPS;
+		int len = module ? laneLen() : WaveArtifactSequencer::PAGE_STEPS;
+		// The page shown (as on the grid)
+		int p0 = module ? module->pageFirst(row) : 0;
 		nvgSave(vg);
-		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++) {
+		for (int s = p0; s < p0 + WaveArtifactSequencer::PAGE_STEPS; s++) {
 			nvgGlobalAlpha(vg, s < len ? 1.f : 0.3f);
-			float x = (seqlayout::cellX(s) - box.pos.x / mm + seqlayout::CELL_GAP / 2.f) * mm, w = (cw - seqlayout::CELL_GAP) * mm;
+			float x = (seqlayout::cellX(s - p0) - box.pos.x / mm + seqlayout::CELL_GAP / 2.f) * mm, w = (cw - seqlayout::CELL_GAP) * mm;
 			bool on = module ? module->velocity[row][s] > 0.f : (s % 4 == 0);
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, x, 0.f, w, h, 1.2f);
@@ -1878,8 +2035,8 @@ struct LockLane : widget::OpaqueWidget {
 		// The playing step of the lane's row, framed like on the grid, so the lock that plays now is seen
 		{
 			int playing = module ? module->playing[row].load() : 3;
-			if (playing >= 0 && playing < WaveArtifactSequencer::STEPS) {
-				float x = (seqlayout::cellX(playing) - box.pos.x / mm + seqlayout::CELL_GAP / 2.f) * mm, w = (cw - seqlayout::CELL_GAP) * mm;
+			if (playing >= p0 && playing < p0 + WaveArtifactSequencer::PAGE_STEPS) {
+				float x = (seqlayout::cellX(playing - p0) - box.pos.x / mm + seqlayout::CELL_GAP / 2.f) * mm, w = (cw - seqlayout::CELL_GAP) * mm;
 				nvgBeginPath(vg);
 				nvgRoundedRect(vg, x, 0.f, w, h, 1.2f);
 				nvgStrokeColor(vg, dark ? nvgRGB(0xff, 0xff, 0xff) : nvgRGB(0x22, 0x24, 0x2c));
@@ -1916,7 +2073,6 @@ struct StepRowLabels : widget::TransparentWidget {
 		nvgFontFaceId(vg, font->handle);
 		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++) {
 			NVGcolor col = layout::MARKER_COLORS[r];
-			float cy = (seqlayout::rowTop(r) + seqlayout::ROW_H / 2.f) * mm;
 			// The marker's number on a small chip, the row length beside it
 			float chipY = (seqlayout::rowTop(r) + seqlayout::CHIP_DY) * mm;
 			nvgBeginPath(vg);
@@ -1951,12 +2107,51 @@ struct StepRowLabels : widget::TransparentWidget {
 				nvgFillColor(vg, live ? col : nvgTransRGBAf(col, 0.35f));
 				nvgText(vg, bx + bw / 2.f, by + bh / 2.f + 0.4f, b == 0 ? "LAY" : "RND", NULL);
 			}
+			// PAGE: four tabs, 1 (top) .. 4, each a page of 16 steps. The page shown is filled in the row's color; pages
+			// inside the row's length are dark with the number in its color; pages past its end are only an outline.
+			// The page the row is playing has a white edge, so the playhead is seen whatever page is shown.
+			{
+				int pg = module ? std::min(std::max(module->rowPage[r], 0), WaveArtifactSequencer::PAGES - 1) : 0;
+				int len = module ? module->length[r] : WaveArtifactSequencer::PAGE_STEPS;
+				int playing = module ? module->playing[r].load() : -1;
+				bool dark = settings::preferDarkPanels;
+				float px = seqlayout::PAGE_COL_X0 * mm, pw = seqlayout::PAGE_COL_W * mm, th = seqlayout::pageTabH() * mm;
+				nvgFontSize(vg, 7.f);
+				for (int b = 0; b < WaveArtifactSequencer::PAGES; b++) {
+					float ty = seqlayout::pageTabY(r, b) * mm;
+					bool shown = b == pg;
+					bool used = b * WaveArtifactSequencer::PAGE_STEPS < len;
+					bool plays = playing >= 0 && WaveArtifactSequencer::pageOf(playing) == b;
+					nvgBeginPath(vg);
+					nvgRoundedRect(vg, px, ty, pw, th, 1.2f);
+					if (shown)
+						nvgFillColor(vg, col);
+					else if (used)
+						nvgFillColor(vg, nvgRGBA(0x16, 0x18, 0x22, 0xd8));
+					else
+						nvgFillColor(vg, dark ? nvgRGBA(0x16, 0x18, 0x22, 0x50) : nvgRGBA(0x16, 0x18, 0x22, 0x18));
+					nvgFill(vg);
+					if (plays) {
+						nvgStrokeColor(vg, nvgRGB(0xff, 0xff, 0xff));
+						nvgStrokeWidth(vg, 1.3f);
+					}
+					else {
+						nvgStrokeColor(vg, nvgTransRGBAf(col, used ? 0.55f : 0.3f));
+						nvgStrokeWidth(vg, 0.7f);
+					}
+					nvgStroke(vg);
+					nvgFillColor(vg, shown ? nvgRGB(0x16, 0x18, 0x22) : nvgTransRGBAf(col, used ? 1.f : 0.45f));
+					nvgText(vg, px + pw / 2.f, ty + th / 2.f + 0.4f, string::f("%d", b + 1).c_str(), NULL);
+				}
+			}
 			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BASELINE);
 			nvgFontSize(vg, 8.f);
 			nvgFillColor(vg, col);
 			// The row's clock, under its knob
 			std::string mult = module ? WaveArtifactSequencer::multiplierText((int) std::round(module->params[WaveArtifactSequencer::CLOCK_MULT_PARAM + r].getValue())) : "x4";
-			nvgText(vg, seqlayout::CLOCK_KNOB_X * mm, cy + 5.5f * mm, mult.c_str(), NULL);
+			nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+			nvgFontSize(vg, 7.f);
+			nvgText(vg, seqlayout::CLOCK_KNOB_X * mm, (seqlayout::rowTop(r) + seqlayout::CLOCK_TEXT_DY) * mm, mult.c_str(), NULL);
 			// Shift arrows: ◀ on top, ▶ below, in the row's color
 			float top = seqlayout::rowTop(r);
 			for (int a = 0; a < 2; a++) {
@@ -2010,6 +2205,109 @@ static ActionButton* createActionButton(Vec mmCenter, Module* module, int paramI
 	return b;
 }
 
+/** Under the grid, over the lock lane: the step numbers of the lane row's page (the lane below shows that page; each
+row's own page is on its PAGE button). Dimmed past the row's length. Not clickable. */
+struct StepNumbers : widget::TransparentWidget {
+	WaveArtifactSequencer* module = nullptr;
+
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		float mm = SVG_DPI / MM_PER_IN;
+		bool dark = settings::preferDarkPanels;
+		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/Nunito-Bold.ttf"));
+		if (!font)
+			return;
+		int row = module ? clamp(module->laneRow, 0, WaveArtifactSequencer::ROWS - 1) : 0;
+		int p0 = module ? module->pageFirst(row) : 0;
+		int len = module ? module->length[row] : WaveArtifactSequencer::PAGE_STEPS;
+		NVGcolor text = dark ? nvgRGB(0xe6, 0xe8, 0xee) : nvgRGB(0x22, 0x24, 0x2c);
+		nvgFontFaceId(vg, font->handle);
+		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFontSize(vg, 5.f);
+		float y = seqlayout::PAGE_BTN_H * mm / 2.f + 0.2f;
+		// Which page they are: "PAGE n", in the lane row's color (the lane under them names the row), left of them
+		nvgFontSize(vg, 5.5f);
+		nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+		nvgFillColor(vg, layout::MARKER_COLORS[row]);
+		nvgText(vg, (seqlayout::GRID_X0 - 1.2f) * mm, y, string::f("PAGE %d", p0 / WaveArtifactSequencer::PAGE_STEPS + 1).c_str(), NULL);
+		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFontSize(vg, 5.f);
+		for (int c = 0; c < WaveArtifactSequencer::PAGE_STEPS; c++) {
+			float x = (seqlayout::GRID_X0 + (c + 0.5f) * seqlayout::cellW()) * mm;
+			nvgFillColor(vg, nvgTransRGBAf(text, p0 + c < len ? 1.f : 0.4f));
+			nvgText(vg, x, y, string::f("%d", p0 + c + 1).c_str(), NULL);
+		}
+	}
+};
+
+/** A round "!": hover it for every gesture of the sequencer (the help used to be three lines of text at the bottom) */
+struct HelpBadge : widget::OpaqueWidget {
+	ui::Tooltip* tip = nullptr;
+	bool hovered = false;
+
+	static const char* text() {
+		return "wA SEQUENCER: snap it to the LEFT of Wave Artifacts, PLAY on SEQ. Clock: the CLOCK input or the internal tempo.\n"
+			   "\n"
+			   "Steps:   drag = draw (height = velocity)   click = select   double-click = delete   Shift + drag = erase\n"
+			   "Under a trig: its SLIDE strip (drag right)   + between two trigs: TIE (a long note)\n"
+			   "Ctrl + click: the row's end (LENGTH)   right-click a step: its menu   right-click a row: copy, length, patterns\n"
+			   "Ctrl + Shift + drag: mark steps for RND   Ctrl + A / C / V over a row: select / copy / paste it\n"
+			   "\n"
+			   "Locks: select a step, then turn the marker's knobs on Wave Artifacts (or its expander) to lock them on it.\n"
+			   "The lane under the grid draws one setting's locks; draw on an empty step for a PHANTOM lock (yellow: no note).\n"
+			   "\n"
+			   "PAGE 1-4: which 16 of the row's 64 steps the grid shows (Shift + click: every row).\n"
+			   "CLOCK: the row's steps per beat.   LAY: the marker's loop onto the row.   RND: random slices.";
+	}
+
+	void onEnter(const EnterEvent& e) override {
+		hovered = true;
+		if (!tip && settings::tooltips) {
+			tip = new ui::Tooltip;
+			tip->text = text();
+			APP->scene->addChild(tip);
+		}
+	}
+	void onLeave(const LeaveEvent& e) override {
+		hovered = false;
+		hide();
+	}
+	void onHide(const HideEvent& e) override {
+		hide();
+		OpaqueWidget::onHide(e);
+	}
+	void hide() {
+		if (tip) {
+			APP->scene->removeChild(tip);
+			delete tip;
+			tip = nullptr;
+		}
+	}
+	~HelpBadge() {
+		hide();
+	}
+
+	void draw(const DrawArgs& args) override {
+		NVGcontext* vg = args.vg;
+		float r = box.size.x / 2.f;
+		nvgBeginPath(vg);
+		nvgCircle(vg, r, r, r - 0.4f);
+		nvgFillColor(vg, hovered ? layout::SCREEN_TEXT : nvgRGB(0x16, 0x18, 0x22));
+		nvgFill(vg);
+		nvgStrokeColor(vg, layout::SCREEN_TEXT);
+		nvgStrokeWidth(vg, 0.8f);
+		nvgStroke(vg);
+		std::shared_ptr<window::Font> font = APP->window->loadFont(asset::system("res/fonts/Nunito-Bold.ttf"));
+		if (!font)
+			return;
+		nvgFontFaceId(vg, font->handle);
+		nvgFontSize(vg, 9.f);
+		nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+		nvgFillColor(vg, hovered ? nvgRGB(0x16, 0x18, 0x22) : layout::SCREEN_TEXT);
+		nvgText(vg, r, r + 0.6f, "!", NULL);
+	}
+};
+
 struct WaveArtifactSequencerWidget : ModuleWidget {
 	StepGrid* grid = nullptr;
 	LockLane* lane = nullptr;
@@ -2028,21 +2326,17 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 
 		PanelLabels* labels = createWidget<PanelLabels>(Vec(0, 0));
 		labels->box.size = box.size;
-		labels->add(Vec(TITLE_X, 6.f), "wA SEQUENCER", 9.f);
-		for (int s = 0; s < WaveArtifactSequencer::STEPS; s++)
-			labels->add(Vec(GRID_X0 + (s + 0.5f) * cellW(), slideTop(WaveArtifactSequencer::ROWS - 1) + SLIDE_H + 1.9f), string::f("%d", s + 1), 5.f);
-		// Help, bottom
-		const float helpX = 89.f;
-		labels->add(Vec(helpX, 117.6f), "drag: draw (height = velocity)  click: select  double-click: delete  Shift+drag: erase  strip under a trig: slide", 5.5f);
-		labels->add(Vec(helpX, 121.1f), "selected step: turn the marker's knobs to lock  Ctrl+click: row end  + between trigs: tie  Ctrl+Shift+drag: mark for RND  right-click: step", 5.5f);
-		labels->add(Vec(W / 2.f, 125.2f), "left of Wave Artifacts   |   PLAY: SEQ   |   clock: CLOCK input or internal tempo", 5.5f);
-		labels->add(Vec(CLOCK_KNOB_X, 14.5f), "CLOCK", 5.f);
-		labels->add(Vec(LEN_X, 14.5f), "LEN", 5.f);
+		labels->add(Vec(TITLE_X, TITLE_Y), "wA SEQUENCER", 9.f);
+		// The column titles, one line (GATE / MOD on the output box)
+		labels->add(Vec(LEN_X, GATE_LABEL_Y), "LEN", 5.f);
+		labels->add(Vec(CLOCK_KNOB_X, GATE_LABEL_Y), "CLOCK", 5.f);
+		labels->add(Vec(PAGE_COL_X0 + PAGE_COL_W / 2.f, GATE_LABEL_Y), "PAGE", 5.f);
 		labels->add(Vec(GATE_X, GATE_LABEL_Y), "GATE", 5.f, true);
 		labels->add(Vec(MOD_X, GATE_LABEL_Y), "MOD", 5.f, true);
-		labels->add(REC_LABEL, "REC", 6.f);
-		labels->add(RND_LABEL, "LOCKS", 6.f);
-		labels->add(COND_LABEL, "COND", 6.f);
+		// The toolbar's names: left of their buttons (REC, COND), right-aligned before RND (LOCKS)
+		labels->add(REC_LABEL, "REC", 6.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+		labels->add(COND_LABEL, "COND", 6.f, false, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+		labels->add(RND_LABEL, "LOCKS", 6.f, false, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
 		addChild(labels);
 
 		StepRowLabels* rows = createWidget<StepRowLabels>(Vec(0, 0));
@@ -2055,6 +2349,15 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 		grid->module = module;
 		addChild(grid);
 
+		// The lane row's step numbers, centred where they always were
+		{
+			float numY = slideTop(WaveArtifactSequencer::ROWS - 1) + SLIDE_H + 1.9f;
+			StepNumbers* nums = createWidget<StepNumbers>(mm2px(Vec(0.f, numY - PAGE_BTN_H / 2.f)));
+			nums->box.size = mm2px(Vec(GRID_X1, PAGE_BTN_H));
+			nums->module = module;
+			addChild(nums);
+		}
+
 		// The lane covers its name on the left and the step columns; on top of the grid.
 		lane = createWidget<LockLane>(mm2px(Vec(2.f, LANE_Y0)));
 		lane->box.size = mm2px(Vec(GRID_X1 - 2.f, LANE_H));
@@ -2063,7 +2366,7 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 
 		// The row clock knobs go on top of the grid, which covers the whole panel.
 		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
-			addParam(createParamCentered<Trimpot>(mm2px(Vec(CLOCK_KNOB_X, rowTop(r) + 4.8f)), module, WaveArtifactSequencer::CLOCK_MULT_PARAM + r));
+			addParam(createParamCentered<Trimpot>(mm2px(Vec(CLOCK_KNOB_X, rowTop(r) + CLOCK_KNOB_DY)), module, WaveArtifactSequencer::CLOCK_MULT_PARAM + r));
 		addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<RedLight>>>(mm2px(REC_BUTTON), module, WaveArtifactSequencer::REC_PARAM, WaveArtifactSequencer::REC_LIGHT));
 		addParam(createActionButton(RND_BUTTON, module, WaveArtifactSequencer::RND_PARAM, "RND", layout::SCREEN_TEXT, RND_BUTTON_SIZE, "random locks",
 			[](WaveArtifactSequencer* m, bool all) { return m->randomizeLocks(all); }));
@@ -2084,6 +2387,14 @@ struct WaveArtifactSequencerWidget : ModuleWidget {
 			addOutput(createOutputCentered<ThemedPJ301MPort>(mm2px(Vec(MOD_X, rowTop(r) + ROW_H / 2.f)), module, WaveArtifactSequencer::MOD_OUTPUT + r));
 		for (int r = 0; r < WaveArtifactSequencer::ROWS; r++)
 			addParam(createParamCentered<Trimpot>(mm2px(Vec(MOD_X, rowTop(r) + ROW_H / 2.f + MOD_LEVEL_DY)), module, WaveArtifactSequencer::MOD_LEVEL_PARAM + r));
+
+		// The help: every gesture in the tooltip of a round "!" (last, so it is on top of the grid for the mouse)
+		{
+			HelpBadge* help = createWidget<HelpBadge>(Vec(0, 0));
+			help->box.size = mm2px(Vec(2.f * HELP_R, 2.f * HELP_R));
+			help->box.pos = mm2px(HELP_BUTTON).minus(help->box.size.div(2.f));
+			addChild(help);
+		}
 	}
 
 	void step() override {

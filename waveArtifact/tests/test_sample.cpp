@@ -1373,10 +1373,31 @@ static void testLaySelection() {
 	wa::LaySelection b = wa::laySelection(hits, total, sr, bpm, 899000, 899000 - 125000, 20000);
 	CHECK(b.from == 900000 - 4 * 24000 && b.frames == 4 * 24000 && b.beats == 4, "left: 4 beats ending at the hit (%ld, %ld, %d)", b.from,
 		b.frames, b.beats);
-	// Far from any hit: the press stays; near the end the beats halve until they fit
+	// Far from any hit: the press stays; dragged to the end, all the beats up to it (3, not halved to 2)
 	long press = total - 3 * 24000;
 	wa::LaySelection c = wa::laySelection(hits, total, sr, bpm, press, total, 20000);
-	CHECK(c.from == press && c.beats == 2 && c.frames == 2 * 24000, "fits before the end: %d beats", c.beats);
+	CHECK(c.from == press && c.beats == 3 && c.frames == 3 * 24000, "up to the end: %d beats", c.beats);
+	// The whole sample: a 16-beat loop 0.4 % short, pressed 1 % in (snaps to the start), dragged to the end: all 16
+	// beats, not 8 (it gave half the sample on 2 pages)
+	{
+		long loop = (long) (16 * 24000 * 0.996);
+		std::vector<long> none;
+		wa::LaySelection w = wa::laySelection(none, loop, sr, bpm, loop / 100, loop, loop * 3 / 100);
+		CHECK(w.from == 0 && w.beats == 16 && w.frames == loop, "whole 16-beat loop: from %ld, %d beats, %ld of %ld frames", w.from,
+			w.beats, w.frames, loop);
+		// Dragged left from the end to the start: the same
+		wa::LaySelection l = wa::laySelection(none, loop, sr, bpm, loop - loop / 100, 0, loop * 3 / 100);
+		CHECK(l.from == 0 && l.beats == 16 && l.frames == loop, "whole loop dragged left: from %ld, %d beats", l.from, l.beats);
+		// A 12-beat loop (not a power of two): all 12
+		long loop12 = 12 * 24000;
+		wa::LaySelection t = wa::laySelection(none, loop12, sr, bpm, 0, loop12, loop12 * 3 / 100);
+		CHECK(t.from == 0 && t.beats == 12 && t.frames == loop12, "whole 12-beat loop: %d beats", t.beats);
+		// A 69-beat stretch to the end has no row (64 steps at most): the nearest power of two, 64
+		wa::LaySelection o = wa::laySelection(none, 69 * 24000, sr, bpm, 0, 69 * 24000, 1000);
+		CHECK(o.beats == 64, "69 beats to the end: %d (no row for 69)", o.beats);
+		std::printf("  whole loop: %d beats (%ld / %ld frames); left: %d; 12-beat loop: %d; 69 to the end: %d\n", w.beats, w.frames,
+			loop, l.beats, t.beats, o.beats);
+	}
 	// No tempo: the drag as it is
 	wa::LaySelection d = wa::laySelection(hits, total, sr, 0.0, 200000, 250000, 20000);
 	CHECK(d.from == 200000 && d.frames == 50000 && d.beats == 0, "no tempo: the drag (%ld, %ld)", d.from, d.frames);
@@ -1625,8 +1646,21 @@ static void testLoopFileBpm() {
 	CHECK(f == 90.0, "the name's tempo makes whole beats: %.1f", f);
 	CHECK(g == 0.0, "no whole beats: %.1f", g);
 	CHECK(h == 160.0, "whole beats, octave nearest the module: %.1f", h);
+	// A tempo in the middle of the name counts when the file's length agrees (within 5 ms of whole beats)
+	double i = wa::bpmFromLoopName("ARSS_120_A_Bouzuki_String.wav", 4.0);          // 8 beats at 120
+	double j = wa::bpmFromLoopName("ARSS_120_A_Bouzuki_String.wav", 4.1);          // not whole beats: no
+	double k = wa::bpmFromLoopName("15 AT Tone Control Pad - Dreamy 130 Cm.wav", 7.3846); // 16 beats at 130
+	double l = wa::bpmFromLoopName("Kick_101.wav", 0.6);                           // 1 beat only: no
+	double n = wa::bpmFromLoopName("Pad A120 take 3.wav", 4.0);                     // "A120" is not on its own: no
+	double o = wa::bpmFromLoopName("RainShake-70bpm.wav", 3.33);                   // bpm in the name: as before
+	std::printf("  in the name: Bouzuki 4 s %.0f, 4.1 s %.0f; Dreamy 130 %.0f; Kick_101 %.0f; A120 %.0f; 70bpm %.0f\n", i, j, k, l, n, o);
+	CHECK(i == 120.0 && j == 0.0 && k == 130.0 && l == 0.0 && n == 0.0 && o == 70.0, "tempo in the middle of a name, checked by the length");
+	// And the loop's grid then comes from it
+	double p = wa::loopFileBpm(4.0, i, 0.0, 142.0);
+	CHECK(p == 120.0, "Bouzuki grid at 142: %.1f", p);
 }
-// LAY's row clock: the one that puts the most of the hits on trigs (a triplet loop gets a triplet clock)
+// LAY's row clock: the one that puts the most of the hits on trigs, never a triplet clock (x3, /3: laid on them a loop
+// sounds off the beat, the user's call 2026-11-16): a triplet loop goes on the finest straight row that holds its hits
 static void testLayRowForHits() {
 	std::printf("LAY row clock from the hits\n");
 	// 2 beats at 120 bpm (1 s, 48000 frames): a hit on every 8th triplet (6), and on every 16th (8)
@@ -1638,21 +1672,116 @@ static void testLayRowForHits() {
 		sixteenths.push_back(k * frames / 8 + 50);
 	int ci = 0, st = 0, placed = 0;
 	bool ok = wa::layoutRowForHits(triplets, 0, frames, 1.0, 2, 16, &ci, &st, &placed);
-	std::printf("  8th triplets: clock %d, %d steps, %d of 6 hits on trigs\n", ci, st, placed);
-	CHECK(ok && ci == 2 && st == 6 && placed == 6, "triplets want x3 (clock 2, 6 steps): %d, %d, %d", ci, st, placed);
-	// The finest clock alone (what LAY did before) has most of them off their steps (their slices start on the steps)
-	int fc = 0, fs = 0, onFine = 0, onChosen = 0;
-	wa::layoutRow(2, 16, &fc, &fs);
-	wa::layoutTrigs(triplets, 0, frames, fs, false, wa::laySnapSteps(1.0 / fs), &onFine);
-	wa::layoutTrigs(triplets, 0, frames, st, false, wa::laySnapSteps(1.0 / st), &onChosen);
-	std::printf("  hits right on a step (after step 1): the finest clock (%d steps) %d, the chosen one %d\n", fs, onFine, onChosen);
-	CHECK(onFine < onChosen, "the check cannot fail");
+	std::printf("  8th triplets: clock %d, %d steps, %d of 6 hits on trigs (want no triplet clock: not 2 / -2)\n", ci, st, placed);
+	CHECK(ok && ci != 2 && ci != -2 && placed == 6, "triplets: no x3 or /3, all hits on trigs (%d, %d, %d)", ci, st, placed);
+	// Every clock LAY may choose is straight
+	int straight = 0;
+	for (int beats = 1; beats <= 64; beats++) {
+		int c = 0, n = 0;
+		if (wa::layoutRow(beats, wa::layMaxSteps(beats), &c, &n))
+			straight += (c != 2 && c != -2);
+		else
+			straight++;
+	}
+	std::printf("  layoutRow, 1 .. 64 beats: %d of 64 on a straight clock (want 64)\n", straight);
+	CHECK(straight == 64, "a triplet clock was chosen");
 	ok = wa::layoutRowForHits(sixteenths, 0, frames, 1.0, 2, 16, &ci, &st, &placed);
 	std::printf("  16ths: clock %d, %d steps, %d of 8 on trigs (a tie goes to the finer clock)\n", ci, st, placed);
 	CHECK(ok && placed == 8 && st == 16, "16ths: all placed on the finest row that holds them (%d steps)", st);
 	CHECK(!wa::layoutRowForHits(sixteenths, 0, frames, 1.0, 256, 16, &ci, &st), "256 beats do not fit");
 }
+/** LAY over pages: up to 4 beats it stays one page as before; a longer part keeps 16th-note steps and runs onto pages
+2-4 (8 beats: 32 steps, 16 beats: 64); past 16 beats the steps grow coarser, never past 64 */
+static void testLayPages() {
+	std::printf("LAY over pages: one page up to 4 beats, then 16ths onto pages 2-4\n");
+	struct Case {
+		int beats, wantSteps, wantClock;
+	};
+	// clock index: 0 = x1 (quarters), 1 = x2 (8ths), 3 = x4 (16ths), 4 = x8
+	const Case cases[] = {{1, 8, 4}, {2, 16, 4}, {4, 16, 3}, {8, 32, 3}, {16, 64, 3}, {32, 64, 1}, {64, 64, 0}};
+	for (const Case& c : cases) {
+		int clock = -99, steps = -1;
+		bool ok = wa::layoutRow(c.beats, wa::layMaxSteps(c.beats), &clock, &steps);
+		std::printf("  %2d beats: up to %2d steps -> %2d steps, clock %d (want %d, %d)\n", c.beats, wa::layMaxSteps(c.beats), steps, clock,
+			c.wantSteps, c.wantClock);
+		CHECK(ok && steps == c.wantSteps && clock == c.wantClock, "%d beats laid on %d steps, clock %d", c.beats, steps, clock);
+	}
+}
+
+/** LAY at the loop's own tempo: a part lasting whole module beats is laid out exactly as on those beats (same clock and
+steps); a 174 bpm loop at 120 (5.52 module beats per 8 of its own) gets a step count that keeps its speed within 2 %,
+where laying it on its 4 / 8 beats would play it 1.38x / 0.69x */
+static void testLayOwnTempo() {
+	std::printf("LAY at the loop's own tempo\n");
+	const double sr = 48000.0;
+	// Hits on the 16ths of a loop at `bpm`, `beats` long
+	auto loop = [&](double bpm, int beats, long* frames, double* seconds) {
+		std::vector<long> h;
+		double beatFrames = sr * 60.0 / bpm;
+		for (int i = 0; i < beats * 4; i++)
+			h.push_back(std::lround(i * beatFrames / 4.0));
+		*frames = std::lround(beats * beatFrames);
+		*seconds = *frames / sr;
+		return h;
+	};
+	// 1. Whole beats: the same as before
+	{
+		long frames;
+		double seconds;
+		std::vector<long> h = loop(120.0, 4, &frames, &seconds);
+		int ciA = 0, nA = 0, ciB = 0, nB = 0;
+		bool a = wa::layoutRowAtOwnTempo(h, 0, frames, seconds, wa::layModuleBeats(seconds, 120.0), false, &ciA, &nA);
+		bool b = wa::layoutRowForHits(h, 0, frames, seconds, 4, wa::layMaxSteps(4), &ciB, &nB);
+		std::printf("  120 bpm loop at 120: %d steps clock %d (on its beats: %d steps clock %d, want the same)\n", nA, ciA, nB, ciB);
+		CHECK(a && b && nA == nB && ciA == ciB, "a loop at the module's tempo is laid out differently");
+	}
+	// 2. 174 bpm, 8 beats, module at 120: its own speed
+	{
+		long frames;
+		double seconds;
+		std::vector<long> h = loop(174.0, 8, &frames, &seconds);
+		static const double SPB[9] = {1.0 / 8.0, 1.0 / 4.0, 1.0 / 3.0, 1.0 / 2.0, 1.0, 2.0, 3.0, 4.0, 8.0};
+		int ci, n;
+		bool ok = wa::layoutRowAtOwnTempo(h, 0, frames, seconds, wa::layModuleBeats(seconds, 120.0), false, &ci, &n);
+		double cycle = ok ? (double) n / SPB[ci + 4] * 60.0 / 120.0 : 0.0;
+		double speed = cycle > 0.0 ? seconds / cycle : 0.0;
+		std::printf("  174 bpm loop (%.2f s) at 120: %d steps clock %d, a cycle %.3f s: speed %.3f (want 1 +- 0.02)\n", seconds, n, ci, cycle, speed);
+		CHECK(ok && std::fabs(speed - 1.0) <= 0.02, "the loop's speed is not kept: %.3f", speed);
+	}
+}
+
+/** A loop near the module's tempo (within 8 %, octaves too) goes on whole module beats (a regular step count); one
+clearly apart keeps its own speed */
+static void testLayNearTempo() {
+	std::printf("LAY: near tempos on the grid, far ones at their own speed\n");
+	struct Case {
+		double fileBpm, moduleBpm;
+		int beats;
+		double want; // 0: its own speed (the exact module beats)
+	};
+	const Case cases[] = {
+		{100.0, 103.0, 32, 32.0}, // 3 %: 32 beats, 64 steps of 16ths - not 33 steps
+		{100.0, 97.0, 16, 16.0},  // -3 %
+		{120.0, 126.0, 8, 8.0},   // 5 %
+		{87.0, 174.0, 8, 16.0},   // an octave: double
+		{174.0, 120.0, 8, 0.0},   // 31 % from 174, 38 % from 87: its own speed
+		{107.0, 120.0, 16, 0.0},  // 12 %: its own speed
+	};
+	for (const Case& c : cases) {
+		double seconds = c.beats * 60.0 / c.fileBpm;
+		double exact = wa::layModuleBeats(seconds, c.moduleBpm);
+		double got = wa::layNearTempoBeats(exact, c.beats);
+		double want = c.want > 0.0 ? c.want : exact;
+		std::printf("  %3.0f bpm loop, %2d beats, module %3.0f: %.2f module beats -> %.2f (want %.2f)\n", c.fileBpm, c.beats, c.moduleBpm, exact, got,
+			want);
+		CHECK(std::fabs(got - want) < 1e-9, "%.0f bpm at %.0f: %.2f, want %.2f", c.fileBpm, c.moduleBpm, got, want);
+	}
+}
+
 int main() {
+	testLayNearTempo();
+	testLayOwnTempo();
+	testLayPages();
 	testLayRowForHits();
 	testLoopFileBpm();
 	testLayOffGrid();

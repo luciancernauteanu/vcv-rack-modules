@@ -344,6 +344,8 @@ struct GrainMarkerInput {
 	float res = 0.f;
 	/** Filter 2, in series after the filter: -1 OFF (skipped, the default), else a FilterMode; its own CUTOFF / RES */
 	int filter2Mode = -1;
+	/** How the two filters combine: 0 SER (filter 1 then filter 2), 1 PAR (both on the same input, mixed) */
+	int filterRoute = 0;
 	float cutoff2 = 0.5f;
 	float res2 = 0.f;
 	/** Linear gain 0..4 */
@@ -406,7 +408,7 @@ struct GrainInput {
 	bool rawOut = false;
 	/** SAMPLE engine SNAP: START, the slice end and the loop point move to the nearest zero crossing */
 	bool zeroSnap = false;
-	/** SAMPLE engine: seconds a note fades in over (PLAYER_ATTACK_SECONDS by default) */
+	/** SAMPLE and GRAIN: seconds a note fades in over (PLAYER_ATTACK_SECONDS by default), read from that far before START */
 	float noteFade = (float) PLAYER_ATTACK_SECONDS;
 	/** HIT: each cloud's hits to snap to (frames of its sample, sorted; the HITS slider), or null */
 	const std::vector<long>* hits[NUM_MARKERS] = {};
@@ -806,7 +808,7 @@ public:
 				c.cutS = std::min(std::max(M.cutoff, 0.f), 1.f);
 				c.resS = std::min(std::max(M.res, 0.f), 1.f);
 				if (M.filter2Mode >= 0 || c.f2.active())
-					c.f2.snap(M.filter2Mode, M.cutoff2, M.res2);
+					c.f2.snap(M.filter2Mode, M.cutoff2, M.res2, M.filterRoute);
 			}
 			bool live = c.running || c.active > 0;
 			if (live) {
@@ -836,6 +838,8 @@ public:
 				}
 				if (isPlayer(m))
 					sampleDrive(c, M, &xl, &xr);
+				else if (M.drive > 1e-4f || c.driveWet > 0.f)
+					grainDrive(c, M, &xl, &xr);
 				float wetT = (!isPlayer(m) && M.window == GRAIN_SMEAR) ? 1.f : 0.f;
 				if (wetT > 0.f || c.smearWet > 0.f) {
 					c.smearWet += (wetT - c.smearWet) * smoothCoef;
@@ -862,10 +866,10 @@ public:
 				}
 				// Filter 2 in series, both sides on its settings (skipped while OFF)
 				if (c.f2.needed(M.filter2Mode)) {
-					c.f2.step(M.filter2Mode, M.cutoff2, M.res2, smoothCoef);
+					c.f2.step(M.filter2Mode, M.cutoff2, M.res2, smoothCoef, M.filterRoute);
 					if (c.f2.active()) {
-						yl = c.f2.process(0, yl, sampleRate);
-						yr = c.f2.process(1, yr, sampleRate);
+						yl = c.f2.apply(0, xl, yl, sampleRate);
+						yr = c.f2.apply(1, xr, yr, sampleRate);
 					}
 				}
 				sendL[m] = yl;
@@ -1047,6 +1051,12 @@ private:
 		double anchor = 0.0;
 		/** The grain started last (it may have ended since) */
 		int lastGrain = -1;
+		/** The note's grains read this far (frames of level 0) before where they would, forward: its first grains fade in
+		over the note's fade-in (GrainInput::noteFade) on the audio just before START, so from START on the hit plays
+		untouched, as a SAMPLE note does. Every grain of the note keeps it, so they stay in step. */
+		double notePre = 0.0;
+		/** Output samples a note's first grains fade in over (0: none) */
+		float noteAttack = 0.f;
 		float smearWet = 0.f;
 		GrainDiffuser diffL, diffR;
 		/** SAMPLE engine: the cloud's read heads, and the direction of the note playing */
@@ -1108,6 +1118,8 @@ private:
 		c.scanAccum = 0.0;
 		c.lastCycle = LONG_MIN;
 		c.lastGrain = -1;
+		c.notePre = 0.0;
+		c.noteAttack = 0.f;
 		c.triggerFire = false;
 		c.triggerRestart = false;
 		c.anchored = false;
@@ -1331,6 +1343,38 @@ private:
 		*r = cr + (dr - cr) * c.driveWet;
 	}
 
+	/** GRAIN's DRIVE, before the filter (the same warm drive as SAMPLE's). Only while DRIVE is up or fading: at 0 the
+	cloud is untouched (GRAIN patches play as before, with no delay). Turning it up fades from the dry sound to the
+	driven one over ~20 ms (the drive's 31-sample latency is crossed inside that fade), and back. Out of line, like
+	filter 2 (WA_NOINLINE): the caller tests `drive > 0 || driveWet > 0` first. */
+	WA_NOINLINE void grainDrive(Cloud& c, const GrainMarkerInput& M, float* l, float* r) {
+		float dT = std::min(std::max(M.drive, 0.f), 1.f);
+		bool want = dT > 1e-4f;
+		if (!want && c.driveWet <= 0.f) {
+			c.drivePrimed = 0;
+			c.driveS = 0.f;
+			return;
+		}
+		if (c.drivePrimed == 0) {
+			c.driveL.reset();
+			c.driveR.reset();
+			c.driveS = dT;
+		}
+		c.driveS += (dT - c.driveS) * smoothCoef;
+		float dl = c.driveL.process(*l, c.driveS), dr = c.driveR.process(*r, c.driveS);
+		bool primed = c.drivePrimed > DRIVE_LATENCY;
+		if (!primed)
+			c.drivePrimed++;
+		float wetT = (want && primed) ? 1.f : 0.f;
+		// A silent cloud goes straight to its setting (a step's DRIVE lock)
+		if (c.w < 1e-4f)
+			c.driveWet = wetT;
+		else
+			c.driveWet = wetT > c.driveWet ? std::min(1.f, c.driveWet + fadeStep) : std::max(0.f, c.driveWet - fadeStep);
+		*l += (dl - *l) * c.driveWet;
+		*r += (dr - *r) * c.driveWet;
+	}
+
 	/** Decides, for this sample, whether a cloud starts a grain. */
 	void schedule(int m, const GrainInput& in, const SampleBuffer& S, bool canSync) {
 		Cloud& c = clouds[m];
@@ -1374,6 +1418,8 @@ private:
 		if (!wasRunning) {
 			c.syncState = -1;
 			c.gph = 1.0; // a free cloud starts with a grain at once
+			c.notePre = 0.0;
+			c.noteAttack = 0.f;
 		}
 
 		if (c.rng == 1u)
@@ -1515,6 +1561,11 @@ private:
 				gridBeat = beat;
 			else
 				c.gph = 0.0;
+			// The note fades in as a SAMPLE note does: over the note's fade-in, on the audio just before START (forward),
+			// so the hit itself starts untouched. (It faded in over 5 ms from START over a sounding note, softening every
+			// trig's attack while the old note's fade lay over it, and not at all from silence.)
+			c.noteAttack = std::round(std::max(in.noteFade, 0.f) * sampleRate);
+			c.notePre = (c.noteAttack >= 1.f && M.direction == GRAIN_FORWARD) ? (double) c.noteAttack * srcStep * c.liveMul : 0.0;
 		}
 		if (!fire || c.active >= MAX_PER_CLOUD)
 			return;
@@ -1554,7 +1605,7 @@ private:
 		}
 		// Always draw four numbers, so the seeded sequence stays aligned whatever the knobs are.
 		float rSpray = random(c), rPitch = random(c), rPan = random(c), rDir = random(c);
-		double startF = startFrames + offset;
+		double startF = startFrames + offset - c.notePre;
 		startF += rSpray * grainSpraySeconds(M.spray) * (double) S.sampleRate;
 		startF = std::min(std::max(startF, 0.0), (double) S.frames - 1.0);
 		bool reverse = M.direction == GRAIN_REVERSE || (M.direction == GRAIN_RANDOM_DIR && rDir < 0.f);
@@ -1588,8 +1639,10 @@ private:
 		g->fadeOut = 0.f;
 		// RESTART over a sounding note: fade in while the last note's grains fade out (fadeCloudGrains, the same time)
 		bool crossfade = restart && !fromSilence;
-		g->fadeInLevel = crossfade ? 0.f : 1.f;
-		g->fadeIn = crossfade ? 1.f / (DECLICK_TIME * sampleRate) : 0.f;
+		// A note's first grains fade in over its fade-in (see Cloud::notePre); the old note's fade out over DECLICK_TIME
+		bool attack = startNote && c.noteAttack >= 1.f;
+		g->fadeInLevel = (attack || crossfade) ? 0.f : 1.f;
+		g->fadeIn = attack ? 1.f / c.noteAttack : crossfade ? 1.f / (DECLICK_TIME * sampleRate) : 0.f;
 		g->level = level;
 		g->len = len;
 		g->age = 0;
