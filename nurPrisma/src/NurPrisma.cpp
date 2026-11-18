@@ -9,6 +9,8 @@
 using namespace np::layout;
 
 static const char* const SHAPE_NAMES[NurPrisma::NUM_SHAPES] = {"Even", "Harmonic", "Scale", "Random", "Chord"};
+static const char* const SWEEP_SHAPE_NAMES[NurPrisma::NUM_SWEEP_SHAPES] = {"Sine", "Triangle", "Saw", "Reverse saw",
+	"Square", "Smooth random", "Drunk"};
 
 NurPrisma::NurPrisma() {
 	config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -27,6 +29,16 @@ NurPrisma::NurPrisma() {
 	configParam(COLOR_PARAM, 0.f, 1.f, 0.3333f, "Noise colour (white > pink > brown > crackle)");
 	configParam(ANALOG_PARAM, 0.f, 1.f, 0.5f, "Analog character", "%", 0.f, 100.f);
 	configParam(DIGITAL_PARAM, 0.f, 1.f, 0.f, "Digital character", "%", 0.f, 100.f);
+	configParam(DRIFT_PARAM, 0.f, 1.f, 0.1f, "Drift depth", "%", 0.f, 100.f);
+	configParam(DRIFT_RATE_PARAM, 0.f, 1.f, 0.4f, "Drift rate");
+	configParam(ORBIT_PARAM, -1.f, 1.f, 0.f, "Orbit depth (negative = reverse)", "%", 0.f, 100.f);
+	configParam(ORBIT_RATE_PARAM, 0.f, 1.f, 0.4f, "Orbit rate");
+	configParam(SWEEP_RATE_PARAM, 0.f, 1.f, 0.4f, "Sweep rate");
+	configSwitch(SWEEP_SHAPE_PARAM, 0.f, NUM_SWEEP_SHAPES - 1, 0.f, "Sweep shape",
+		{SWEEP_SHAPE_NAMES[0], SWEEP_SHAPE_NAMES[1], SWEEP_SHAPE_NAMES[2], SWEEP_SHAPE_NAMES[3], SWEEP_SHAPE_NAMES[4],
+			SWEEP_SHAPE_NAMES[5], SWEEP_SHAPE_NAMES[6]});
+	configParam(SWEEP_CUT_PARAM, -1.f, 1.f, 0.f, "Sweep to cutoff", "%", 0.f, 100.f);
+	configParam(SWEEP_FAN_PARAM, -1.f, 1.f, 0.f, "Sweep to spread", "%", 0.f, 100.f);
 	configParam(STRUM_PARAM, -1.f, 1.f, 0.f, "Strum (negative = downward)", "%", 0.f, 100.f);
 	configParam(STRIKE_PARAM, 0.f, 1.f, 0.35f, "Strike (click > mallet > breath)", "%", 0.f, 100.f);
 	configParam(BAND_PARAM, 0.f, 1.f, 0.f, "Band (narrow each core to a steep band: 3 > 1/24 octave)", "%", 0.f, 100.f);
@@ -55,10 +67,14 @@ NurPrisma::NurPrisma() {
 	configInput(SPREAD_INPUT, "Spread CV");
 	configInput(RES_INPUT, "Resonance CV (poly: one per core)");
 	configInput(STACK_INPUT, "Stack CV");
+	configInput(CLOCK_INPUT, "Clock (sweep sync)");
+	configInput(RESET_INPUT, "Reset");
 	configInput(PING_INPUT, "Ping trigger (poly: one per core; voltage = velocity)");
 	configOutput(OUT_L_OUTPUT, "Left");
 	configOutput(OUT_R_OUTPUT, "Right");
 	configOutput(CORES_OUTPUT, "Cores (4 channels, one per core)");
+	configOutput(SWEEP_OUTPUT, "Sweep LFO");
+	configOutput(ORBIT_OUTPUT, "Orbit LFO (4 channels, one phase per core)");
 	configBypass(IN_L_INPUT, OUT_L_OUTPUT);
 	configBypass(IN_R_INPUT, OUT_R_OUTPUT);
 
@@ -80,6 +96,7 @@ void NurPrisma::onReset(const ResetEvent& e) {
 	pingMode = np::PING_ALL;
 	polySplit = true;
 	quantizeCutoff = false;
+	ppqnIndex = 0;
 	levelComp = np::LEVEL_FULL;
 	focus = -1;
 	for (int i = 0; i < NUM_CORES; i++) {
@@ -171,6 +188,7 @@ json_t* NurPrisma::dataToJson() {
 	json_object_set_new(root, "pingMode", json_integer(pingMode));
 	json_object_set_new(root, "polySplit", json_boolean(polySplit));
 	json_object_set_new(root, "quantizeCutoff", json_boolean(quantizeCutoff));
+	json_object_set_new(root, "ppqnIndex", json_integer(ppqnIndex));
 	json_object_set_new(root, "levelComp", json_integer(levelComp));
 	json_object_set_new(root, "focus", json_integer(focus));
 	json_t* ownJ = json_array();
@@ -197,6 +215,7 @@ void NurPrisma::dataFromJson(json_t* root) {
 	getInt("scale", 0, np::NUM_SCALES - 1, scale);
 	getInt("chord", 0, np::NUM_CHORDS - 1, chord);
 	getInt("pingMode", 0, np::NUM_PING_MODES - 1, pingMode);
+	getInt("ppqnIndex", 0, np::NUM_PPQN - 1, ppqnIndex);
 	getInt("levelComp", 0, np::NUM_LEVEL_COMPS - 1, levelComp);
 	getInt("focus", -1, NUM_CORES - 1, focus);
 	json_t* ownJ = json_object_get(root, "own");
@@ -230,6 +249,13 @@ void NurPrisma::readParams() {
 	p.color = params[COLOR_PARAM].getValue();
 	p.analog = params[ANALOG_PARAM].getValue();
 	p.digital = params[DIGITAL_PARAM].getValue();
+	p.drift = params[DRIFT_PARAM].getValue();
+	p.driftRate = params[DRIFT_RATE_PARAM].getValue();
+	p.orbit = params[ORBIT_PARAM].getValue();
+	p.orbitRate = params[ORBIT_RATE_PARAM].getValue();
+	p.sweepRate = params[SWEEP_RATE_PARAM].getValue();
+	p.sweepCut = params[SWEEP_CUT_PARAM].getValue();
+	p.sweepFan = params[SWEEP_FAN_PARAM].getValue();
 	p.strum = params[STRUM_PARAM].getValue();
 	p.strike = params[STRIKE_PARAM].getValue();
 	p.band = params[BAND_PARAM].getValue();
@@ -249,10 +275,12 @@ void NurPrisma::readParams() {
 		p.ownCutoff[i] = mask & OWN_CUTOFF;
 	}
 	p.shape = (int) params[SHAPE_PARAM].getValue();
+	p.sweepShape = (int) params[SWEEP_SHAPE_PARAM].getValue();
 	p.scale = scale;
 	p.chord = chord;
 	p.pingMode = pingMode;
 	p.quantizeCutoff = quantizeCutoff;
+	p.ppqn = np::PPQN_VALUES[ppqnIndex];
 	p.levelComp = levelComp;
 
 	// CV: V/OCT and CUTOFF are 1 V/oct, RES / SPREAD / STACK 10 V = the whole knob. Poly = one channel per core.
@@ -274,6 +302,10 @@ void NurPrisma::process(const ProcessArgs& args) {
 		int shape = (int) params[SHAPE_PARAM].getValue();
 		for (int i = 0; i < NUM_SHAPES; i++)
 			lights[SHAPE_LIGHT + i].setBrightness(i == shape ? 1.f : 0.f);
+		NVGcolor c = np::prismColor((float) params[SWEEP_SHAPE_PARAM].getValue() / NUM_SWEEP_SHAPES);
+		lights[SWEEP_SHAPE_LIGHT + 0].setBrightness(c.r);
+		lights[SWEEP_SHAPE_LIGHT + 1].setBrightness(c.g);
+		lights[SWEEP_SHAPE_LIGHT + 2].setBrightness(c.b);
 		for (int i = 0; i < NUM_CORES; i++)
 			corePos[i].store(engineOut.corePos[i], std::memory_order_relaxed);
 	}
@@ -291,6 +323,8 @@ void NurPrisma::process(const ProcessArgs& args) {
 				engine.pingAll(vel);
 		}
 	}
+	if (resetTrigger.process(inputs[RESET_INPUT].getVoltage(), 0.1f, 1.f))
+		engine.resetSweep();
 
 	// Inputs: 5 V = 1.0. Poly (2+ channels) = one voice per core; R unpatched = L.
 	Input& inL = inputs[IN_L_INPUT];
@@ -322,7 +356,8 @@ void NurPrisma::process(const ProcessArgs& args) {
 		xr[0] = dryR;
 	}
 
-	engine.process(xl, xr, perCore, dryL, dryR, engineOut);
+	engine.process(xl, xr, perCore, dryL, dryR, inputs[CLOCK_INPUT].getVoltage(), inputs[CLOCK_INPUT].isConnected(),
+		engineOut);
 
 	outputs[OUT_L_OUTPUT].setVoltage(5.f * engineOut.l);
 	outputs[OUT_R_OUTPUT].setVoltage(5.f * engineOut.r);
@@ -331,10 +366,17 @@ void NurPrisma::process(const ProcessArgs& args) {
 		for (int i = 0; i < NUM_CORES; i++)
 			outputs[CORES_OUTPUT].setVoltage(clamp(5.f * engineOut.cores[i], -10.f, 10.f), i);
 	}
+	if (outputs[SWEEP_OUTPUT].isConnected())
+		outputs[SWEEP_OUTPUT].setVoltage(5.f * engineOut.sweep);
+	if (outputs[ORBIT_OUTPUT].isConnected()) {
+		outputs[ORBIT_OUTPUT].setChannels(NUM_CORES);
+		for (int i = 0; i < NUM_CORES; i++)
+			outputs[ORBIT_OUTPUT].setVoltage(5.f * engineOut.orbit[i], i);
+	}
 }
 
 /** The core selector under the hero: an ALL pill and four bullets in the cores' colours. They never move, so a core
-can be picked while its dot on the ring is hard to catch. Click a bullet: TYPE, RES, BAND, the SPREAD
+can be picked while its dot on the ring is flying around with MOTION. Click a bullet: TYPE, RES, BAND, the SPREAD
 ring, WIDTH (-> PAN) and MIX (-> LEVEL) edit that core; click it again or ALL to go back. A ring around a bullet
 means that core has settings of its own. Right-click a bullet: follow the global knobs again, or reset the core. */
 struct CoreSelector : widget::OpaqueWidget {
@@ -488,6 +530,7 @@ struct NurPrismaWidget : app::ModuleWidget {
 		const NVGcolor gold = np::PanelText::gold();
 		text->add(Vec(FILTER_CX, TITLE_Y), "NUR PRISMA", TITLE_SIZE, cream, np::PanelText::TITLE, 0.06f);
 		text->add(Vec(FILTER_CX, SUBTITLE_Y), "SPREAD FILTER", SUBTITLE_SIZE, grey, np::PanelText::CAPTION, 0.45f);
+		text->add(Vec((MOTION_X + PANEL_W) / 2.f, MOTION_TITLE_Y), "MOTION", 2.3f, grey, np::PanelText::CAPTION, 0.3f);
 		if (module)
 			text->focus = &module->focus;
 		text->coreColor = np::coreColor;
@@ -570,6 +613,25 @@ struct NurPrismaWidget : app::ModuleWidget {
 				np::PanelText::LABEL, 0.1f);
 		}
 
+		// MOTION column
+		static const int MOTION_PARAMS[4][2] = {{NurPrisma::DRIFT_PARAM, NurPrisma::DRIFT_RATE_PARAM},
+			{NurPrisma::ORBIT_PARAM, NurPrisma::ORBIT_RATE_PARAM}, {NurPrisma::SWEEP_RATE_PARAM, -1},
+			{NurPrisma::SWEEP_CUT_PARAM, NurPrisma::SWEEP_FAN_PARAM}};
+		static const char* const MOTION_LABELS[4][2] = {{"DRIFT", "RATE"}, {"ORBIT", "RATE"}, {"SWEEP", ""},
+			{"CUT", "FAN"}};
+		const float cols[2] = {MOTION_COL1, MOTION_COL2};
+		for (int row = 0; row < 4; row++)
+			for (int c = 0; c < 2; c++)
+				if (MOTION_PARAMS[row][c] >= 0)
+					knob(createParamCentered<RoundSmallBlackKnob>(mm2px(Vec(cols[c], MOTION_Y[row])), module,
+							 MOTION_PARAMS[row][c]),
+						cols[c], MOTION_Y[row], KNOB_SMALL, MOTION_LABELS[row][c], 2.1f);
+		addParam(createParamCentered<np::CycleButton>(mm2px(Vec(MOTION_COL2, MOTION_SHAPE_Y)), module,
+			NurPrisma::SWEEP_SHAPE_PARAM));
+		addChild(createLightCentered<SmallLight<RedGreenBlueLight>>(
+			mm2px(Vec(MOTION_COL2, MOTION_SHAPE_Y + SHAPE_LED_DY)), module, NurPrisma::SWEEP_SHAPE_LIGHT));
+		text->add(Vec(MOTION_COL2, MOTION_SHAPE_Y + SHAPE_LED_DY + 3.f), "SHAPE", 2.2f, cream, np::PanelText::LABEL,
+			0.1f);
 
 		// Jacks
 		auto jackLabel = [&](float x, float y, const char* label, bool out) {
@@ -593,6 +655,14 @@ struct NurPrismaWidget : app::ModuleWidget {
 		addOutput(createOutputCentered<np::GoldJack>(mm2px(Vec(IO_X[4], IO_Y)), module, NurPrisma::OUT_R_OUTPUT));
 		jackLabel(IO_X[4], IO_Y, "OUT R", true);
 
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(MOTION_COL1, CV_Y)), module, NurPrisma::CLOCK_INPUT));
+		jackLabel(MOTION_COL1, CV_Y, "CLOCK", false);
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(MOTION_COL2, CV_Y)), module, NurPrisma::RESET_INPUT));
+		jackLabel(MOTION_COL2, CV_Y, "RESET", false);
+		addOutput(createOutputCentered<np::GoldJack>(mm2px(Vec(MOTION_COL1, IO_Y)), module, NurPrisma::SWEEP_OUTPUT));
+		jackLabel(MOTION_COL1, IO_Y, "SWEEP", true);
+		addOutput(createOutputCentered<np::GoldJack>(mm2px(Vec(MOTION_COL2, IO_Y)), module, NurPrisma::ORBIT_OUTPUT));
+		jackLabel(MOTION_COL2, IO_Y, "ORBIT", true);
 
 		// Text last: on top of the panel, below nothing interactive (it is transparent to the mouse).
 		addChild(text);
@@ -626,6 +696,12 @@ struct NurPrismaWidget : app::ModuleWidget {
 			[=]() { return m->levelComp; }, [=](int i) { m->levelComp = i; }));
 		menu->addChild(createBoolPtrMenuItem("Poly input: one voice per core", "", &m->polySplit));
 		menu->addChild(createMenuItem("Re-roll analog character", "", [=]() { m->rerollCharacter(); }));
+		menu->addChild(new ui::MenuSeparator);
+		std::vector<std::string> ppqn;
+		for (int i = 0; i < np::NUM_PPQN; i++)
+			ppqn.push_back(string::f("%d PPQN", np::PPQN_VALUES[i]));
+		menu->addChild(createIndexSubmenuItem("Clock resolution", ppqn, [=]() { return m->ppqnIndex; },
+			[=](int i) { m->ppqnIndex = i; }));
 	}
 };
 

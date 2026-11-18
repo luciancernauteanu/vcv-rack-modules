@@ -1,20 +1,25 @@
 #pragma once
 
-// Panel geometry in mm (18 HP). Mirrored in res/NurPrisma.svg; change both together.
+// Panel geometry in mm (24 HP). Mirrored in res/NurPrisma.svg; change both together.
+// The left 18 HP hold the filter (the original concept), the right 6 HP the MOTION column.
 
 namespace np {
 namespace layout {
 
-static const float PANEL_W = 91.44f;
+static const float PANEL_W = 121.92f;
 static const float PANEL_H = 128.5f;
-/** Centre of the panel */
+/** Centre of the filter part (left 18 HP) and of the MOTION column */
 static const float FILTER_CX = 45.72f;
+static const float MOTION_X = 91.44f;
+static const float MOTION_COL1 = 99.8f;
+static const float MOTION_COL2 = 113.6f;
 
 /** Text */
 static const float TITLE_Y = 12.f;
 static const float TITLE_SIZE = 8.6f;
 static const float SUBTITLE_Y = 19.6f;
 static const float SUBTITLE_SIZE = 2.3f;
+static const float MOTION_TITLE_Y = 26.5f;
 /** Gap between a knob's edge and its label's centre */
 static const float LABEL_GAP = 2.7f;
 /** Jack label centre below the jack centre */
@@ -69,6 +74,9 @@ static const float DIVIDER_Y = 109.4f;
 static const float IO_Y = 116.f;
 static const float IO_X[5] = {13.5f, 29.6f, 45.72f, 61.84f, 77.94f};
 
+/** MOTION rows */
+static const float MOTION_Y[4] = {35.f, 50.f, 65.f, 80.f};
+static const float MOTION_SHAPE_Y = 63.6f;
 
 } // namespace layout
 } // namespace np

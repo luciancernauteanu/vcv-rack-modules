@@ -4,12 +4,13 @@
 #include <cstdint>
 
 #include "Drive.hpp"
+#include "Lfo.hpp"
 #include "Limiter.hpp"
 #include "PrismaCore.hpp"
 #include "Shapes.hpp"
 
-// Nur Prisma's engine: four stereo filter cores, their places (CUTOFF, SPREAD, SHAPE), PING and the character
-// (ANALOG, DIGITAL). No Rack dependencies (tested in tests/). Audio in engine units: 1.0 = 5 V.
+// Nur Prisma's engine: four stereo filter cores, their places (CUTOFF, SPREAD, SHAPE), MOTION, PING and the
+// character (ANALOG, DIGITAL). No Rack dependencies (tested in tests/). Audio in engine units: 1.0 = 5 V.
 
 namespace np {
 
@@ -62,6 +63,13 @@ struct EngineParams {
 	float color = 0.3333f;
 	float analog = 0.5f;
 	float digital = 0.f;
+	float drift = 0.1f;
+	float driftRate = 0.4f;
+	float orbit = 0.f;
+	float orbitRate = 0.4f;
+	float sweepRate = 0.4f;
+	float sweepCut = 0.f;
+	float sweepFan = 0.f;
 	float strum = 0.f;
 	float strike = 0.35f;
 	/** 0 = off; up to 1 = each core narrowed to a steep 1/24-octave band */
@@ -82,10 +90,11 @@ struct EngineParams {
 	float corePan[NUM_CORES] = {0.f, 0.f, 0.f, 0.f};
 	bool ownPan[NUM_CORES] = {};
 	/** Per-core CUTOFF (0..1 like the knob): once owned the core sits there, out of its SPREAD place; global CUTOFF
-	no longer moves it (V/OCT still does) */
+	no longer moves it (V/OCT, SWEEP and the other motion still do) */
 	float coreCutoff[NUM_CORES] = {0.6667f, 0.6667f, 0.6667f, 0.6667f};
 	bool ownCutoff[NUM_CORES] = {};
 	int shape = SHAPE_EVEN;
+	int sweepShape = LFO_SINE;
 	// CV, not smoothed: pitch in octaves and RES (0..1 units) per core, SPREAD and STACK (0..1 units)
 	float pitchCv[NUM_CORES] = {};
 	float resCv[NUM_CORES] = {};
@@ -96,6 +105,7 @@ struct EngineParams {
 	int chord = 0;
 	int pingMode = PING_ALL;
 	bool quantizeCutoff = false;
+	int ppqn = 1;
 	int levelComp = LEVEL_FULL;
 };
 
@@ -199,6 +209,8 @@ struct DriveStage {
 struct EngineOutput {
 	float l = 0.f, r = 0.f;
 	float cores[NUM_CORES] = {};
+	float sweep = 0.f;
+	float orbit[NUM_CORES] = {};
 	/** Core frequencies, 0..1 = 20 Hz..20 kHz (log), for the display */
 	float corePos[NUM_CORES] = {};
 };
@@ -236,6 +248,7 @@ public:
 			mismatchOct[i] = r.uniform() * (8.f / 1200.f);
 			mismatchQ[i] = 1.f + 0.06f * r.uniform();
 			mismatchGain[i] = std::pow(10.f, 0.5f * r.uniform() / 20.f);
+			driftRng[i].seed(seed * 2654435761u + 17u * (i + 1));
 		}
 		hissRng.seed(seed ^ 0xa5a5a5a5u);
 	}
@@ -308,12 +321,22 @@ public:
 		}
 	}
 
+	void resetSweep() {
+		clock.reset();
+		sweepLfo.reset();
+	}
+
 	/** Settings for the next block (knobs are smoothed in here). */
 	EngineParams p;
 
 	/** One sample. `inL` / `inR`: one input per core when `perCore` (poly), else only [0] is used for all cores.
 	`dryL` / `dryR`: the unprocessed input for MIX. */
-	void process(const float* inL, const float* inR, bool perCore, float dryL, float dryR, EngineOutput& out) {
+	void process(const float* inL, const float* inR, bool perCore, float dryL, float dryR, float clockVoltage,
+			bool clockConnected, EngineOutput& out) {
+		// Clock and SWEEP run every sample (sync edges are sample exact).
+		clock.process(clockVoltage, clockConnected, sampleRate, p.ppqn);
+		sweepValue = sweepLfo.process(p.sweepShape, clockConnected, p.sweepRate, true, true, clock, 1.f / sampleRate);
+
 		if (blockPos == 0)
 			updateBlock();
 		blockPos = (blockPos + 1) % BLOCK;
@@ -395,8 +418,11 @@ public:
 		float r = dr + (wet[1] * compGain - dr) * s.mix;
 		limiter.process(l, r, CEILING, &out.l, &out.r);
 
-		for (int i = 0; i < NUM_CORES; i++)
+		out.sweep = sweepValue;
+		for (int i = 0; i < NUM_CORES; i++) {
+			out.orbit[i] = orbitOut[i];
 			out.corePos[i] = (oct[i] - LOG2_20) / LOG2_1000;
+		}
 	}
 
 	/** Output ceiling in engine units (2.0 = 10 V) */
@@ -458,6 +484,16 @@ private:
 	float mismatchGain[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
 	float randomPlaces[NUM_CORES] = {};
 	float bloom[NUM_CORES] = {};
+
+	// MOTION
+	ClockTracker clock;
+	Lfo sweepLfo;
+	float sweepValue = 0.f;
+	double orbitPhase = 0.0;
+	float orbitOut[NUM_CORES] = {};
+	Rng driftRng[NUM_CORES];
+	float driftPhase[NUM_CORES] = {};
+	float driftFrom[NUM_CORES] = {}, driftTo[NUM_CORES] = {};
 
 	// PING
 	PingBurst burst[NUM_CORES];
@@ -570,9 +606,17 @@ private:
 		}
 		if (s.band < 1e-5f && p.band == 0.f)
 			s.band = 0.f;
+		smooth(s.drift, p.drift, c);
+		smooth(s.driftRate, p.driftRate, c);
+		smooth(s.orbit, p.orbit, c);
+		smooth(s.orbitRate, p.orbitRate, c);
+		smooth(s.sweepCut, p.sweepCut, c);
+		smooth(s.sweepFan, p.sweepFan, c);
+		s.sweepRate = p.sweepRate;
 		s.strum = p.strum;
 		s.strike = p.strike;
 		s.shape = p.shape;
+		s.sweepShape = p.sweepShape;
 		// Exactly 0 once close (so "off" really skips work)
 		if (s.noise < 1e-5f && p.noise == 0.f)
 			s.noise = 0.f;
@@ -583,19 +627,47 @@ private:
 		if (s.analog < 1e-5f && p.analog == 0.f)
 			s.analog = 0.f;
 
+		float blockTime = (float) BLOCK / sampleRate;
 
-		// Where the cores are: CUTOFF, SPREAD shape, character
+		// Where the cores are: CUTOFF (+ SWEEP), SPREAD shape (+ FAN), MOTION, character
 		float base = LOG2_20 + s.cutoff * LOG2_1000;
 		if (p.quantizeCutoff) {
 			float semis = (base - std::log2(261.6256f)) * 12.f;
 			base = std::log2(261.6256f) + quantizeToScale(p.scale, semis) / 12.f;
 		}
-		float spreadEff = clamp01(s.spread + p.spreadCv);
+		base += s.sweepCut * 2.f * sweepValue;
+		float spreadEff = clamp01(s.spread + p.spreadCv + s.sweepFan * 0.5f * sweepValue);
 		float offs[NUM_CORES];
 		spreadOffsets(s.shape, spreadEff, p.scale, p.chord, randomPlaces, offs);
 		// Each core's own spread (the dots on the ring)
 		for (int i = 0; i < NUM_CORES; i++)
 			offs[i] *= s.coreSpread[i];
+
+		// ORBIT: one LFO read at four phases
+		float orbitHz = lfoFreeHz(s.orbitRate);
+		orbitPhase += orbitHz * blockTime;
+		orbitPhase -= std::floor(orbitPhase);
+		float orbitDepth = s.orbit * std::fabs(s.orbit) * 1.5f;
+		float dir = s.orbit >= 0.f ? 1.f : -1.f;
+		for (int i = 0; i < NUM_CORES; i++)
+			orbitOut[i] = (float) std::sin(6.283185307 * (orbitPhase + dir * 0.25 * i));
+
+		// DRIFT: smooth random per core, rates spread by the golden ratio so they never line up
+		static const float DRIFT_MULT[NUM_CORES] = {1.f, 1.618034f, 0.618034f, 1.272020f};
+		float driftHz = 0.02f * std::exp(s.driftRate * 5.521461f); // 0.02..5 Hz
+		float driftDepth = s.drift * s.drift;
+		float driftNow[NUM_CORES];
+		for (int i = 0; i < NUM_CORES; i++) {
+			driftPhase[i] += driftHz * DRIFT_MULT[i] * blockTime;
+			if (driftPhase[i] >= 1.f) {
+				driftPhase[i] -= std::floor(driftPhase[i]);
+				driftFrom[i] = driftTo[i];
+				driftTo[i] = driftRng[i].uniform();
+			}
+			float t = driftPhase[i];
+			t = t * t * (3.f - 2.f * t);
+			driftNow[i] = (driftFrom[i] + (driftTo[i] - driftFrom[i]) * t) * driftDepth;
+		}
 
 		// TYPE (per core), STACK
 		for (int i = 0; i < NUM_CORES; i++)
@@ -622,10 +694,12 @@ private:
 					float semis = (own - std::log2(261.6256f)) * 12.f;
 					own = std::log2(261.6256f) + quantizeToScale(p.scale, semis) / 12.f;
 				}
-				o = own + p.pitchCv[i] + an * mismatchOct[i] - an * 0.025f * bloom[i];
+				own += s.sweepCut * 2.f * sweepValue;
+				o = own + p.pitchCv[i] + orbitDepth * orbitOut[i] + driftNow[i] + an * mismatchOct[i] - an * 0.025f * bloom[i];
 			}
 			else {
-				o = base + p.pitchCv[i] + offs[i] + an * mismatchOct[i] - an * 0.025f * bloom[i];
+				o = base + p.pitchCv[i] + offs[i] + orbitDepth * orbitOut[i] + driftNow[i] + an * mismatchOct[i] -
+					an * 0.025f * bloom[i];
 			}
 			oct[i] = o;
 			float res = clamp01(s.coreRes[i] + p.resCv[i]);

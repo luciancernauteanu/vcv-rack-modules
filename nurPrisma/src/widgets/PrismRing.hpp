@@ -187,7 +187,7 @@ struct GoldJack : app::SvgPort {
 
 namespace np {
 
-/** A button that steps through a switch param's values (wraps at the end): SHAPE. LEDs show which. */
+/** A button that steps through a switch param's values (wraps at the end): SHAPE and SWEEP SHAPE. LEDs show which. */
 struct CycleButton : app::SvgSwitch {
 	CycleButton() {
 		addFrame(Svg::load(asset::system("res/ComponentLibrary/VCVButton_0.svg")));

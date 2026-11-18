@@ -1,8 +1,7 @@
 # Nur Prisma
 
-A four-core stereo spread filter for VCV Rack 2 (18 HP). Four resonant filter cores move together (CUTOFF), fan
-apart (SPREAD), stack in parallel or in series and spread across the stereo field; each core can also be set on its
-own. (MOTION, the cores moving by themselves, is being built in the branch `feat/nur-prisma-motion`.)
+A four-core stereo spread filter for VCV Rack 2 (24 HP). Four resonant filter cores move together (CUTOFF), fan
+apart (SPREAD), stack in parallel or in series, spread across the stereo field and move on their own (MOTION).
 A poly input gives each voice its own core. ANALOG and DIGITAL give the stack its character.
 
 **Status:** in development (branch `feat/nur-prisma`). Panel and engine work; custom knobs and by-ear tuning next.
@@ -38,9 +37,17 @@ SHAPE **Chord** tunes the cores to a chord (right-click > Chord); SPREAD climbs 
 | **DIGITAL** | Coarse filter maths and rate reduction: the sound of old DSP |
 | **STRUM**, **STRIKE** | See Ping above |
 
+**MOTION**
+
+| Control | What it does |
+|---|---|
+| **DRIFT**, **RATE** | Each core wanders slowly on its own |
+| **ORBIT**, **RATE** | One LFO at four phases, one per core: the peaks chase each other (negative = reverse) |
+| **SWEEP**, **SHAPE** | A global LFO, synced to CLOCK when patched |
+| **CUT**, **FAN** | How much SWEEP moves CUTOFF and SPREAD |
 
 **Jacks:** V/OCT, CUTOFF and RES take poly CV (one channel per core). IN L / IN R take stereo or poly audio (one voice per
-core). CORES outputs each core on its own channel.
+core). CORES outputs each core on its own channel. SWEEP and ORBIT output the LFOs.
 
 ## Building
 

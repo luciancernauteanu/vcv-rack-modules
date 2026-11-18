@@ -4,9 +4,8 @@
 #include "PrismaEngine.hpp"
 #include "plugin.hpp"
 
-/** Nur Prisma: four filter cores that move together (CUTOFF) and fan apart (SPREAD).
-Param, input, output and light IDs are append only: saved patches refer to them by number. The MOTION IDs are
-reserved here (no knobs, no jacks): the MOTION column comes with the branch feat/nur-prisma-motion. */
+/** Nur Prisma: four filter cores that move together (CUTOFF), fan apart (SPREAD) and move on their own (MOTION).
+Param, input, output and light IDs are append only: saved patches refer to them by number. */
 struct NurPrisma : engine::Module {
 	enum ParamId {
 		CUTOFF_PARAM,
@@ -22,7 +21,6 @@ struct NurPrisma : engine::Module {
 		COLOR_PARAM,
 		ANALOG_PARAM,
 		DIGITAL_PARAM,
-		// Reserved for MOTION (feat/nur-prisma-motion)
 		DRIFT_PARAM,
 		DRIFT_RATE_PARAM,
 		ORBIT_PARAM,
@@ -54,7 +52,6 @@ struct NurPrisma : engine::Module {
 		SPREAD_INPUT,
 		RES_INPUT,
 		STACK_INPUT,
-		// Reserved for MOTION
 		CLOCK_INPUT,
 		RESET_INPUT,
 		PING_INPUT,
@@ -64,20 +61,19 @@ struct NurPrisma : engine::Module {
 		OUT_L_OUTPUT,
 		OUT_R_OUTPUT,
 		CORES_OUTPUT,
-		// Reserved for MOTION
 		SWEEP_OUTPUT,
 		ORBIT_OUTPUT,
 		OUTPUTS_LEN
 	};
 	enum LightId {
 		ENUMS(SHAPE_LIGHT, 5),
-		// Reserved for MOTION
 		ENUMS(SWEEP_SHAPE_LIGHT, 3),
 		LIGHTS_LEN
 	};
 
 	static const int NUM_CORES = 4;
 	static const int NUM_SHAPES = 5;
+	static const int NUM_SWEEP_SHAPES = 7;
 
 	/** Live core frequencies for the prism ring, 0..1 = 20 Hz..20 kHz on a log scale (UI reads, audio writes) */
 	std::atomic<float> corePos[NUM_CORES];
@@ -92,6 +88,8 @@ struct NurPrisma : engine::Module {
 	/** Poly input: one voice per core (true) or summed to one signal for all cores */
 	bool polySplit = true;
 	bool quantizeCutoff = false;
+	/** Index into np::PPQN_VALUES */
+	int ppqnIndex = 0;
 	/** np::LevelComp: Off, Gentle, Full */
 	int levelComp = np::LEVEL_FULL;
 
@@ -107,6 +105,7 @@ struct NurPrisma : engine::Module {
 	float followValue(int core, int k);
 
 	dsp::SchmittTrigger pingTrigger[16];
+	dsp::SchmittTrigger resetTrigger;
 	/** Knobs and CV are read every BLOCK samples */
 	int paramCounter = 0;
 

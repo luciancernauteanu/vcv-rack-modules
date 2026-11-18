@@ -25,11 +25,11 @@ Last updated: 2026-11-18 (engine).
 | `src/Layout.hpp` | Panel geometry in mm, mirrored in `res/NurPrisma.svg` |
 | `src/widgets/PanelText.hpp` | All panel text, drawn at runtime with the bundled fonts |
 | `src/widgets/PrismRing.hpp` | `PrismRing` (SPREAD ring, core dots, glow), `HeroKnob` (CUTOFF), `GoldJack`, `CycleButton` |
-| `src/PrismaEngine.hpp` | `PrismaEngine`: the four stereo cores, places, PING, character, level compensation, limiter |
+| `src/PrismaEngine.hpp` | `PrismaEngine`: the four stereo cores, places, MOTION, PING, character, gain compensation, limiter |
 | `src/PrismaCore.hpp` | `Core` (one trapezoidal SVF), `coreCoefs`, `resQ` / `resFeedback` (RES map), `typeWeights`, `pingResponse` |
 | `src/Shapes.hpp` | `spreadOffsets` (SHAPE), `SCALES`, `CHORDS`, `quantizeToScale`, `ColoredNoise`, `Rng` |
-| `src/Drive.hpp`, `src/Limiter.hpp` | Copied from waveArtifact into namespace `np`: `WarmDrive`, `SafetyLimiter` |
-| `tests/test_prisma.cpp` | Offline checks (`np-test`): tuning, ping level, shapes, poly, stereo, stack, BAND, level, per core, safety |
+| `src/Drive.hpp`, `src/Lfo.hpp`, `src/Limiter.hpp` | Copied from waveArtifact into namespace `np`: `WarmDrive`, `Lfo` + `ClockTracker`, `SafetyLimiter` |
+| `tests/test_prisma.cpp` | Offline checks (`np-test`): tuning, ping level, shapes, poly, stereo, stack, noise, motion, safety |
 
 ## 2. Turning the hero control
 
@@ -53,7 +53,7 @@ Last updated: 2026-11-18 (engine).
   from the current sound: the global TYPE / RES / BAND, the core's SPREAD place for CUTOFF (`engine.place[i]`, knob
   units) and WIDTH's placement for PAN (`widthPlace`). The centre knob is a focus set too (`F_CUTOFF`), and a core
   dot with an own cutoff drags `CORE_CUTOFF_PARAM` instead of its spread (`CoreDot::step` swaps `paramId`).
-- Engine: an own cutoff puts the core at `coreCutoff` (+ quantize, V/OCT, character), without
+- Engine: an own cutoff puts the core at `coreCutoff` (+ quantize, SWEEP, V/OCT, ORBIT, DRIFT, character), without
   CUTOFF or its SPREAD offset; while not owned `s.coreCutoff` tracks the place, so taking it is seamless. An own pan
   replaces WIDTH's balance gains with mid / side panning (`panMid`, `panSide`): mid by the same sqrt law, side
   narrowed by 1 - |pan|, so a stereo core moves as a whole. `checkOwnership()` (UI thread, every frame) marks a twin owned (`own[i]` bits
@@ -65,13 +65,13 @@ Last updated: 2026-11-18 (engine).
 ## 3. Every sample (`NurPrisma::process`, audio thread)
 
 1. Every `PrismaEngine::BLOCK` (16) samples `readParams()` copies knobs, menu settings and CV into `engine.p`
-   (V/OCT + CUTOFF CV in octaves and RES CV per core: poly channel i -> core i), sets the SHAPE lights
+   (V/OCT + CUTOFF CV in octaves and RES CV per core: poly channel i -> core i), sets the SHAPE / SWEEP SHAPE lights
    and publishes `corePos` for the ring.
 2. PING: a Schmitt trigger per channel. Poly -> `engine.ping(c % 4, velocity)`; mono -> `engine.pingAll(velocity)`,
    which follows the ping mode (All = strummed by STRUM in pitch order, Cycle, Random). Velocity = volts / 10.
 3. Inputs (5 V = 1.0): with 2+ channels and "one voice per core" on, `routeVoices` puts voice v in core v mod 4;
    else one signal feeds all cores. R unpatched = L.
-4. `PrismaEngine::process`: `updateBlock()` every 16 samples ->
+4. `PrismaEngine::process`: clock + SWEEP LFO (per sample, sync exact) -> `updateBlock()` every 16 samples ->
    pending pings fire (`PingBurst`, injected into the core state with `Core::excite`) -> noise -> `DriveStage`
    (constant 31-sample latency) -> `runCores` (or `runCoresDigital`, noinline) -> gain compensation -> MIX with the
    dry delayed to match -> `SafetyLimiter` (10 V, DC block, NaN guard).
@@ -79,8 +79,9 @@ Last updated: 2026-11-18 (engine).
 ## 4. Control rate (`PrismaEngine::updateBlock`)
 
 - Knobs are smoothed (5 ms); CV is added unsmoothed.
-- Each core's pitch (log2 Hz): CUTOFF (+ quantize to scale) + `spreadOffsets` (SPREAD + CV) x each core's own spread
-  (`coreSpread`) + V/OCT/CUTOFF CV + ANALOG mismatch - pitch bloom (ring level sags the pitch a little) +- WIDTH's small left/right detune.
+- Each core's pitch (log2 Hz): CUTOFF (+ quantize to scale) + SWEEP x CUT + `spreadOffsets` (SPREAD + CV + SWEEP x
+  FAN) x each core's own spread (`coreSpread`) + V/OCT/CUTOFF CV + ORBIT (four phases) + DRIFT (smooth random, golden-ratio rates) + ANALOG mismatch -
+  pitch bloom (ring level sags the pitch a little) +- WIDTH's small left/right detune.
 - `coreCoefs` -> integrator gain g (interpolated per sample across the block), damping, BP gain, feedback.
   DIGITAL quantizes g and k (`quantizeCoef`), sets the sample-and-hold length and the state step.
 - BAND: `bandOctaves` (3 -> 1/24 octave), `bandStageK` (two 2-pole band-passes in series, 12 dB/oct skirts),
@@ -108,9 +109,10 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
-- 2026-11-18: MOTION moved to its own branch (`feat/nur-prisma-motion`): this branch has no MOTION column, no LFOs and
-  no clock, and the panel is back to 18 HP (the original concept). The MOTION param / jack / light IDs stay reserved
-  in the enums (not configured, no widgets), so patches are the same on both branches. 74 offline checks.
+- 2026-11-18: MOTION (branch `feat/nur-prisma-motion`, on top of the first Nur Prisma commit): the panel grows to
+  24 HP with the MOTION column: DRIFT + RATE, ORBIT + RATE, SWEEP rate + SHAPE, SWEEP to CUT / FAN, CLOCK and RESET
+  in, SWEEP and ORBIT LFO outs (`Lfo.hpp` copied from waveArtifact: `Lfo`, `ClockTracker`). Clock PPQN in the menu.
+  77 offline checks (adds orbit phases / direction and sweep clock lock).
 
 - 2026-11-18: per-core CUTOFF (append-only `CORE_CUTOFF_PARAM` x4, centre knob in focus) and PAN that replaces
   WIDTH's placement (was added to it, so a core could not reach hard left) and moves both channels. 77 offline
@@ -134,7 +136,7 @@ Last updated: 2026-11-18 (engine).
   bit-identical to before (6 golden scenarios); 57 offline checks. CPU: BAND 70% 169 ns/sample (+57), poly 203.
 
 - 2026-11-18: engine. `PrismaEngine` with all controls of the panel, offline tests (50 checks), module wiring, menu
-  (ping mode, scale, chord, quantize CUTOFF, re-roll Random / character, poly split), seeds saved in
+  (ping mode, scale, chord, quantize CUTOFF, re-roll Random / character, poly split, clock PPQN), seeds saved in
   the patch. CPU: 112 ns/sample at defaults, 155 poly, 302 all on, 867 DRIVE + poly (8 oversampled drives).
 
 - 2026-11-18: scaffold. Panel, all params and jacks, ring and labels. `process()` passes audio through and fills

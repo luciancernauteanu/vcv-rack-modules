@@ -70,7 +70,9 @@ struct Rig {
 		e.setSampleRate(SR);
 		EngineParams& p = e.p;
 		p.analog = 0.f;
+		p.drift = 0.f;
 		p.width = 0.f;
+		p.orbit = 0.f;
 		p.noise = 0.f;
 		p.digital = 0.f;
 		p.drive = 0.f;
@@ -78,10 +80,10 @@ struct Rig {
 	}
 	void step(float l = 0.f, float r = 0.f) {
 		float a[4] = {l, l, l, l}, b[4] = {r, r, r, r};
-		e.process(a, b, false, l, r, o);
+		e.process(a, b, false, l, r, 0.f, false, o);
 	}
 	void stepPoly(const float* in) {
-		e.process(in, in, true, 0.f, 0.f, o);
+		e.process(in, in, true, 0.f, 0.f, 0.f, false, o);
 	}
 };
 
@@ -400,7 +402,9 @@ static void testStereo() {
 		EngineParams& p = r.e.p;
 		p.width = 0.f;
 		p.analog = 1.f;
+		p.drift = 0.6f;
 		p.noise = 0.5f;
+		p.orbit = 0.7f;
 		p.digital = 0.3f;
 		p.drive = 0.5f;
 		p.res = 0.8f;
@@ -516,6 +520,43 @@ static void testNoise() {
 	check(std::fabs(slope[2] + 6.0) < 1.0, "noise: brown slope (dB/oct)", "%.2f (expect -6)", slope[2]);
 }
 
+static void testMotion() {
+	// ORBIT: the four phases are a quarter cycle apart; negative depth turns the other way
+	for (float depth : {1.f, -1.f}) {
+		Rig r;
+		r.e.p.orbit = depth;
+		r.e.p.orbitRate = 0.6f;
+		double err = 0.0, corr = 0.0;
+		float prev0 = 0.f;
+		for (int n = 0; n < 48000; n++) {
+			r.step();
+			const float* o = r.o.orbit;
+			err = std::max(err, std::fabs(o[0] * o[0] + o[1] * o[1] - 1.0));
+			err = std::max(err, (double) std::fabs(o[2] + o[0]));
+			corr += (o[0] - prev0) * o[1];
+			prev0 = o[0];
+		}
+		bool dirOk = depth > 0.f ? corr > 0.0 : corr < 0.0;
+		check(err < 1e-4 && dirOk, depth > 0.f ? "orbit: quarter-cycle phases, forward" : "orbit: reversed with negative depth",
+			"%.6f", err);
+	}
+	// SWEEP synced to a 120 BPM clock at 1/4: crosses zero (phase 0) on every beat once locked
+	{
+		Rig r;
+		r.e.p.sweepRate = (float) 13 / (NUM_SYNC_DIVISIONS - 1); // "1/4"
+		int period = (int) (0.5f * SR);
+		double worst = 0.0;
+		for (int n = 0; n < 8 * period; n++) {
+			float clk = (n % period) < 100 ? 10.f : 0.f;
+			float a[4] = {}, b[4] = {};
+			r.e.process(a, b, false, 0.f, 0.f, clk, true, r.o);
+			if (n > 4 * period && n % period == 1)
+				worst = std::max(worst, (double) std::fabs(r.o.sweep));
+		}
+		check(worst < 0.05, "sweep: locked to clock (value on the beat)", "%.4f (limit 0.05)", worst);
+	}
+}
+
 static void testSafety() {
 	// Everything at full, loud input, pings, poly: never above 10 V, never NaN
 	for (float dig : {0.f, 1.f}) {
@@ -527,6 +568,12 @@ static void testSafety() {
 		p.noise = 1.f;
 		p.analog = 1.f;
 		p.digital = dig;
+		p.drift = 1.f;
+		p.orbit = 1.f;
+		p.orbitRate = 1.f;
+		p.sweepCut = 1.f;
+		p.sweepFan = 1.f;
+		p.sweepRate = 1.f;
 		p.width = 1.f;
 		p.stack = 0.5f;
 		p.type = 1.5f;
@@ -538,7 +585,7 @@ static void testSafety() {
 				e.pingAll(1.f);
 			float s = (n / 50) % 2 ? 2.f : -2.f;
 			float in[4] = {s, -s, s, s};
-			e.process(in, in, true, s, s, o);
+			e.process(in, in, true, s, s, 0.f, false, o);
 			finite = finite && std::isfinite(o.l) && std::isfinite(o.r);
 			peak = std::max(peak, (double) std::max(std::fabs(o.l), std::fabs(o.r)));
 		}
@@ -558,8 +605,8 @@ static void testSafety() {
 		for (int n = 0; n < 48000; n++) {
 			float x = 0.3f * std::sin(0.05f * n);
 			float in[4] = {x, x, x, x};
-			a.process(in, in, false, x, x, oa);
-			b.process(in, in, false, x, x, ob);
+			a.process(in, in, false, x, x, 0.f, false, oa);
+			b.process(in, in, false, x, x, 0.f, false, ob);
 			diff = std::max(diff, (double) std::fabs(oa.l - ob.l));
 		}
 		check(diff == 0.0, "character: same seed, identical output", "%.3g", diff);
@@ -836,6 +883,7 @@ int main() {
 	testLevel();
 	testPerCore();
 	testNoise();
+	testMotion();
 	testSafety();
 	std::printf("\n%d checks, %d failed\n", checks, failures);
 	return failures ? 1 : 0;
