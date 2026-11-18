@@ -30,6 +30,8 @@ They work from any folder.
 | `wa-dist` | Create the `.vcvplugin` package in `waveArtifact/dist` |
 | `wa-clean` | Delete the plugin build output |
 | `wa-test` | Run the offline analysis tests (no Rack needed) |
+| `np-build` / `np-clean` / `np-test` | The same for the Nur Prisma plugin (`nurPrisma/`) |
+| `np-install-public` | Build the MinGW64 version of Nur Prisma and install it into the **real (downloaded) Rack** |
 | `rack-build` | Build the Rack source in `Rack/` |
 | `rack-run` | Launch Rack from source (loads the plugin from `Rack/plugins`) |
 | `msys "<cmd>"` | Run any command in MSYS2, e.g. `msys "ls /e/Project"` |

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nur Prisma, 24 HP. Shapes only: all text is drawn at runtime (src/widgets/PanelText.hpp) and the SPREAD
+prism ring by src/widgets/PrismRing.hpp. Geometry mirrors src/Layout.hpp (mm). One design for both Rack themes. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="121.92mm" height="128.5mm" viewBox="0 0 121.92 128.5" version="1.1">
+  <defs>
+    <radialGradient id="bg" cx="0.45" cy="0.42" r="0.85">
+      <stop offset="0" stop-color="#1b1c21"/>
+      <stop offset="1" stop-color="#111215"/>
+    </radialGradient>
+  </defs>
+  <g id="panel">
+    <rect id="background" x="0" y="0" width="121.92" height="128.5" fill="url(#bg)"/>
+    <g id="dividers" stroke="#2a2c31" stroke-width="0.3">
+      <line x1="4" y1="109.4" x2="87.4" y2="109.4"/>
+      <line x1="91.44" y1="24" x2="91.44" y2="123"/>
+      <line x1="95" y1="109.4" x2="118.4" y2="109.4"/>
+    </g>
+    <g id="hero-track">
+      <circle cx="45.72" cy="58" r="12.4" fill="#121316" stroke="#2b2d32" stroke-width="0.25"/>
+      <circle cx="45.72" cy="58" r="10.5" fill="none" stroke="#24262b" stroke-width="0.25"/>
+    </g>
+  </g>
+</svg>

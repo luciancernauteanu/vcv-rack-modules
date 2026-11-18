@@ -23,6 +23,12 @@ function wa-test    { Invoke-Msys "cd $script:VcvRoot/waveArtifact/tests && make
 # Close the public Rack first. Never use wa-install for the public Rack.
 function wa-install-public { & "C:\msys64\usr\bin\bash.exe" -lc "bash $script:VcvRoot/scripts/release_public.sh waveArtifact" }
 
+# Nur Prisma plugin (nurPrisma/), same commands with the np- prefix
+function np-build   { Invoke-Msys "cd $script:VcvRoot/nurPrisma && RACK_DIR=$script:VcvSdk make -j4 $($args -join ' ')" }
+function np-clean   { Invoke-Msys "cd $script:VcvRoot/nurPrisma && RACK_DIR=$script:VcvSdk make clean" }
+function np-test    { Invoke-Msys "cd $script:VcvRoot/nurPrisma/tests && make run" }
+function np-install-public { & "C:\msys64\usr\bin\bash.exe" -lc "bash $script:VcvRoot/scripts/release_public.sh nurPrisma" }
+
 # Rack source build (no RACK_DIR)
 function rack-build { Invoke-Msys "cd $script:VcvRoot/Rack && make -j4" }
 function rack-run   { Invoke-Msys "cd $script:VcvRoot/Rack && make run" }
@@ -33,4 +39,4 @@ function msys       { Invoke-Msys ($args -join ' ') }
 # Interactive MinGW 64-bit shell
 function mingw      { & "C:\msys64\mingw64.exe" -here }
 
-Write-Host "vcv dev helpers loaded: wa-build wa-install wa-install-public wa-dist wa-clean wa-test rack-build rack-run msys mingw"
+Write-Host "vcv dev helpers loaded: wa-build wa-install wa-install-public wa-dist wa-clean wa-test np-build np-clean np-test np-install-public rack-build rack-run msys mingw"
