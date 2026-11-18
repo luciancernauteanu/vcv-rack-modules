@@ -5,6 +5,9 @@
 # Refuses to install while the public Rack (F:\Programs\VCV\Rack2Pro) is running; the build still
 # happens, so the install is a quick re-run after closing it.
 PLUGIN=${1:-waveArtifact}
+# The installed folder and the dist folder are named after the plugin slug, which can differ from the repo folder.
+SLUG=$(sed -n 's/^  "slug": "\(.*\)",/\1/p' "/e/Project/vcv-rack-plugins/$PLUGIN/plugin.json" | head -1)
+[ -n "$SLUG" ] || SLUG=$PLUGIN
 # A login shell started from PowerShell has a short PATH (no tasklist, no powershell) and may not pass
 # LOCALAPPDATA on: add the Windows folders and ask Windows for it.
 export PATH="$PATH:/c/Windows/System32:/c/Windows/System32/WindowsPowerShell/v1.0"
@@ -19,8 +22,8 @@ rm -rf "$SCRATCH" && mkdir -p "$SCRATCH" || exit 1
 (cd "$ROOT/$PLUGIN" && tar --exclude=./build --exclude=./dist --exclude=./plugin.dll --exclude=./tests -cf - .) | (cd "$SCRATCH" && tar -xf -)
 /c/msys64/usr/bin/env MSYSTEM=MINGW64 /c/msys64/usr/bin/bash.exe -lc \
   "export PATH=/mingw64/bin:/usr/bin; cd '$SCRATCH' && RACK_DIR=$SDK make -j4 dist 2>&1 | grep -E ' error |Error ' | head -20"
-[ -f "$SCRATCH/dist/$PLUGIN/plugin.dll" ] || { echo "BUILD FAILED"; exit 1; }
-ucrt=$($OBJDUMP -p "$SCRATCH/dist/$PLUGIN/plugin.dll" | grep -c "api-ms-win-crt")
+[ -f "$SCRATCH/dist/$SLUG/plugin.dll" ] || { echo "BUILD FAILED"; exit 1; }
+ucrt=$($OBJDUMP -p "$SCRATCH/dist/$SLUG/plugin.dll" | grep -c "api-ms-win-crt")
 [ "$ucrt" = 0 ] || { echo "REFUSING: plugin links UCRT ($ucrt imports); wrong environment"; exit 1; }
 echo "built OK (msvcrt, no UCRT imports)"
 
@@ -30,5 +33,5 @@ if tasklist //FI "IMAGENAME eq Rack.exe" //FO CSV //NH | grep -q .; then
   done
 fi
 # Rack unpacks any .vcvplugin it finds at startup OVER the installed folder, so remove stale packages.
-rm -f "$DEST/$PLUGIN"-*.vcvplugin
-rm -rf "$DEST/$PLUGIN" && cp -r "$SCRATCH/dist/$PLUGIN" "$DEST/$PLUGIN" && echo "installed: $DEST/$PLUGIN"
+rm -f "$DEST/$SLUG"-*.vcvplugin
+rm -rf "$DEST/$SLUG" && cp -r "$SCRATCH/dist/$SLUG" "$DEST/$SLUG" && echo "installed: $DEST/$SLUG"

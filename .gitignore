@@ -29,3 +29,7 @@ waveArtifact/tests/test_poly
 waveArtifact/tests/test_poly.exe
 waveArtifact/tests/test_seq
 waveArtifact/tests/test_seq.exe
+
+# Nur Prisma offline test binaries
+nurPrisma/tests/test_*
+!nurPrisma/tests/test_*.cpp

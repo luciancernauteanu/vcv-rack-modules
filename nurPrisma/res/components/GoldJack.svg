@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Output jack, gold ring, 8 mm like PJ301M -->
+<svg xmlns="http://www.w3.org/2000/svg" width="8mm" height="8mm" viewBox="0 0 8 8" version="1.1">
+  <defs>
+    <radialGradient id="gold" cx="0.4" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#f3d89a"/>
+      <stop offset="1" stop-color="#8f6a2a"/>
+    </radialGradient>
+  </defs>
+  <circle cx="4" cy="4" r="4" fill="url(#gold)"/>
+  <circle cx="4" cy="4" r="2.7" fill="#2a2a2a"/>
+  <circle cx="4" cy="4" r="1.9" fill="#050505"/>
+</svg>
