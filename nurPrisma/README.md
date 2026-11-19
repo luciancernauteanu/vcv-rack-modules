@@ -28,7 +28,7 @@ SHAPE **Chord** tunes the cores to a chord (right-click > Chord); SPREAD climbs 
 | **TYPE** | LP → BP → HP → notch, morphing continuously |
 | **RES** | Resonance, self-oscillating at the top of the knob |
 | **BAND** | Narrows each core to a steep band at its pitch (3 octaves down to 1/24 octave): a drastic filter bank. 0 = off |
-| **DRIVE** | Warm saturation before the cores |
+| **DRIVE** | Saturation before the cores, from warm to rich (up to about +22 dB into the curve) |
 | **STACK** | Parallel (resonator, vowels, chords) → series (steep, aggressive) |
 | **WIDTH** | Spreads the cores over left and right; 0 is mono-safe |
 | **MIX** | Dry / wet |

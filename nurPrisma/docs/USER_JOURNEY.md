@@ -108,6 +108,19 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
+- 2026-11-19: fixes from testing in Rack.
+  - Ping clicks: `Core::excite(amount, bpShare)` puts the ping into the band state for LP / HP and into the low state
+    for BP / notch (by TYPE weight), so every output's ring starts from zero: the onset is no steeper than the ring
+    (1.05x, was a full-level step on BP), also when re-pinging a ringing core.
+  - STACK series kept the NOISE only in core 1: each core's series input now gets the noise too (`noiseNow`).
+  - CUTOFF in ALL moves every core: `readParams` keeps each own-CUTOFF core at CUTOFF + its offset
+    (`cutoffOffset`, saved in the patch). The offset is remembered apart from the value it plays at, so a core
+    pinned at 20 Hz / 20 kHz returns exactly to where it was set when CUTOFF comes back. An edit we did not write
+    (`cutoffWritten` differs: knob in focus, MIDI map) sets a new offset.
+  - "Quantize CUTOFF to the scale" shows SCALE (gold) inside the bottom of the ring (`PanelText::addIf`).
+  - DRIVE: gain 1..12 (was 1..3), bias 0.3, no make-up: H3 -21 dB at 42% (was -27), -11 dB at full.
+  85 offline checks + focus checks on the module. CPU unchanged (95 ns/sample at defaults).
+
 - 2026-11-18: MOTION moved to its own branch (`feat/nur-prisma-motion`): this branch has no MOTION column, no LFOs and
   no clock, and the panel is back to 18 HP (the original concept). The MOTION param / jack / light IDs stay reserved
   in the enums (not configured, no widgets), so patches are the same on both branches. 74 offline checks.

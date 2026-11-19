@@ -177,6 +177,10 @@ json_t* NurPrisma::dataToJson() {
 	for (int i = 0; i < NUM_CORES; i++)
 		json_array_append_new(ownJ, json_integer(own[i].load()));
 	json_object_set_new(root, "own", ownJ);
+	json_t* offJ = json_array();
+	for (int i = 0; i < NUM_CORES; i++)
+		json_array_append_new(offJ, std::isnan(cutoffOffset[i]) ? json_null() : json_real(cutoffOffset[i]));
+	json_object_set_new(root, "cutoffOffset", offJ);
 	// Seeds as doubles: json integers are signed, the seeds use all 32 bits
 	json_object_set_new(root, "characterSeed", json_real((double) engine.getCharacterSeed()));
 	json_object_set_new(root, "randomSeed", json_real((double) engine.getRandomSeed()));
@@ -206,6 +210,14 @@ void NurPrisma::dataFromJson(json_t* root) {
 		for (int k = 0; k < NUM_OWN; k++)
 			lastSeen[i][k] = NAN;
 	}
+	// Offsets win over the (possibly pinned) saved CORE_CUTOFF values: the params are already loaded here, so mark
+	// them as written by us.
+	json_t* offJ = json_object_get(root, "cutoffOffset");
+	for (int i = 0; i < NUM_CORES; i++) {
+		json_t* o = offJ ? json_array_get(offJ, i) : nullptr;
+		cutoffOffset[i] = (o && json_is_number(o)) ? (float) json_number_value(o) : NAN;
+		cutoffWritten[i] = std::isnan(cutoffOffset[i]) ? NAN : params[CORE_CUTOFF_PARAM + i].getValue();
+	}
 	getBool("polySplit", polySplit);
 	getBool("quantizeCutoff", quantizeCutoff);
 	json_t* c = json_object_get(root, "characterSeed");
@@ -218,7 +230,26 @@ void NurPrisma::dataFromJson(json_t* root) {
 
 void NurPrisma::readParams() {
 	np::EngineParams& p = engine.p;
-	p.cutoff = params[CUTOFF_PARAM].getValue();
+	// CUTOFF moves every core. A core with its own CUTOFF keeps its *offset* from CUTOFF (remembered apart from the
+	// value it plays at): it may pin at the end of the range while CUTOFF goes far, and comes back exactly to where
+	// it was set when CUTOFF returns. A change of the core's own value that we did not write (its knob in focus, a
+	// MIDI map, a loaded patch without offsets) sets a new offset.
+	float cutoff = params[CUTOFF_PARAM].getValue();
+	for (int i = 0; i < NUM_CORES; i++) {
+		if (!(own[i].load(std::memory_order_relaxed) & OWN_CUTOFF)) {
+			cutoffWritten[i] = NAN;
+			continue;
+		}
+		Param& c = params[CORE_CUTOFF_PARAM + i];
+		float v = c.getValue();
+		if (std::isnan(cutoffOffset[i]) || std::isnan(cutoffWritten[i]) || v != cutoffWritten[i])
+			cutoffOffset[i] = v - cutoff;
+		float target = clamp(cutoff + cutoffOffset[i], 0.f, 1.f);
+		if (target != v)
+			c.setValue(target);
+		cutoffWritten[i] = target;
+	}
+	p.cutoff = cutoff;
 	p.spread = params[SPREAD_PARAM].getValue();
 	p.res = params[RES_PARAM].getValue();
 	p.type = params[TYPE_PARAM].getValue();
@@ -491,6 +522,10 @@ struct NurPrismaWidget : app::ModuleWidget {
 		if (module)
 			text->focus = &module->focus;
 		text->coreColor = np::coreColor;
+		// Shown inside the bottom of the ring while CUTOFF snaps to the scale (right-click), so a stepped CUTOFF is
+		// never a mystery
+		if (module)
+			text->addIf(Vec(FILTER_CX, HERO_SCALE_Y), "SCALE", 1.8f, gold, &module->quantizeCutoff);
 		text->addFocus(Vec(FILTER_CX, HERO_LABEL_Y), "CUTOFF  \xc2\xb7  SPREAD", "CUTOFF  \xc2\xb7  CORE SPREAD", 2.3f, cream,
 			np::PanelText::LABEL, 0.3f);
 
@@ -617,7 +652,7 @@ struct NurPrismaWidget : app::ModuleWidget {
 			[=](int i) { m->scale = i; }));
 		menu->addChild(createIndexSubmenuItem("Chord (SHAPE Chord)", chords, [=]() { return m->chord; },
 			[=](int i) { m->chord = i; }));
-		menu->addChild(createBoolPtrMenuItem("Quantize CUTOFF to the scale", "", &m->quantizeCutoff));
+		menu->addChild(createBoolPtrMenuItem("Quantize CUTOFF to the scale (SCALE shows in the ring)", "", &m->quantizeCutoff));
 		menu->addChild(createMenuItem("Re-roll Random shape", "", [=]() { m->rerollRandomShape(); }));
 		menu->addChild(new ui::MenuSeparator);
 		menu->addChild(createMenuLabel("Input and output"));

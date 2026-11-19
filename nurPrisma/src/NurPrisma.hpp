@@ -109,6 +109,10 @@ struct NurPrisma : engine::Module {
 	dsp::SchmittTrigger pingTrigger[16];
 	/** Knobs and CV are read every BLOCK samples */
 	int paramCounter = 0;
+	/** Per core with its own CUTOFF: its offset from CUTOFF (knob units, kept even while the core is pinned at an
+	end of the range; saved in the patch), and the value we last wrote to its CORE_CUTOFF param (NAN = none). */
+	float cutoffOffset[NUM_CORES] = {NAN, NAN, NAN, NAN};
+	float cutoffWritten[NUM_CORES] = {NAN, NAN, NAN, NAN};
 
 	NurPrisma();
 	void process(const ProcessArgs& args) override;

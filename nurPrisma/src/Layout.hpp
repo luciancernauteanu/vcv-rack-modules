@@ -42,6 +42,8 @@ static const float HERO_Y = 58.f;
 static const float HERO_RING_D = 29.f;
 static const float HERO_KNOB_D = 18.f;
 static const float HERO_LABEL_Y = 75.f;
+/** "SCALE" inside the bottom of the ring, below the CUTOFF knob, while CUTOFF is quantized */
+static const float HERO_SCALE_Y = 69.3f;
 
 /** Core selector: ALL pill and four bullets under the hero */
 static const float BULLET_Y = 79.4f;
