@@ -70,14 +70,14 @@ struct NurPrisma : engine::Module {
 		OUTPUTS_LEN
 	};
 	enum LightId {
-		ENUMS(SHAPE_LIGHT, 5),
+		ENUMS(SHAPE_LIGHT, 7),
 		// Reserved for MOTION
 		ENUMS(SWEEP_SHAPE_LIGHT, 3),
 		LIGHTS_LEN
 	};
 
 	static const int NUM_CORES = 4;
-	static const int NUM_SHAPES = 5;
+	static const int NUM_SHAPES = 7;
 
 	/** Live core frequencies for the prism ring, 0..1 = 20 Hz..20 kHz on a log scale (UI reads, audio writes) */
 	std::atomic<float> corePos[NUM_CORES];
@@ -94,6 +94,11 @@ struct NurPrisma : engine::Module {
 	bool quantizeCutoff = false;
 	/** np::LevelComp: Off, Gentle, Full */
 	int levelComp = np::LEVEL_FULL;
+	/** np::DriveVoice (Warm, Diode, Fold) and np::DrivePosition (before / after the cores / both) */
+	int driveVoice = np::VOICE_WARM;
+	int drivePos = np::DRIVE_PRE;
+	/** SHAPE Chord / Scale in just intonation */
+	bool justTuning = false;
 
 	/** Which core the knobs edit: -1 = ALL (UI state, saved in the patch) */
 	int focus = -1;
@@ -109,8 +114,9 @@ struct NurPrisma : engine::Module {
 	dsp::SchmittTrigger pingTrigger[16];
 	/** Knobs and CV are read every BLOCK samples */
 	int paramCounter = 0;
-	/** Per core with its own CUTOFF: its offset from CUTOFF (knob units, kept even while the core is pinned at an
-	end of the range; saved in the patch), and the value we last wrote to its CORE_CUTOFF param (NAN = none). */
+	/** Per core with its own CUTOFF: its detune from its place (where CUTOFF / SPREAD / SHAPE put it; knob units,
+	kept even while the core is pinned at an end of the range; saved in the patch), and the value we last wrote to
+	its CORE_CUTOFF param (NAN = none). */
 	float cutoffOffset[NUM_CORES] = {NAN, NAN, NAN, NAN};
 	float cutoffWritten[NUM_CORES] = {NAN, NAN, NAN, NAN};
 

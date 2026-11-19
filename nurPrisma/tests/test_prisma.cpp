@@ -1,6 +1,7 @@
 // Offline tests for Nur Prisma's DSP (no Rack). Each check prints the measured value next to its limit.
 #include <cmath>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 #include "PrismaEngine.hpp"
@@ -884,6 +885,90 @@ static void testClicks() {
 		std::fabs(first - prev) / ringSlope);
 }
 
+/** Peak gain (dB) of core 1 at its own frequency for a sine of `amp`, LP RES 80% at 1 kHz, ANALOG `an` */
+static double resonantGain(float an, float amp) {
+	Rig r;
+	r.e.p.cutoff = cutoffKnob(1000.f);
+	r.e.p.spread = 0.f;
+	r.e.p.res = 0.8f;
+	r.e.p.analog = an;
+	r.e.seedCharacter(1);
+	std::vector<float> y;
+	for (int n = 0; n < 48000; n++) {
+		float x = amp * (float) std::sin(2.0 * M_PI * 1000.0 * n / SR);
+		r.step(x, x);
+		y.push_back(r.o.cores[0]);
+	}
+	return db(goertzel(y, 24000, 48000, 1000.0) / amp);
+}
+
+static void testResonanceSaturation() {
+	// Quiet signals ring as before; loud ones squash the resonant peak (ANALOG), like an OTA / ladder loop
+	double q0 = resonantGain(0.f, 0.002f), q1 = resonantGain(1.f, 0.002f);
+	double l0 = resonantGain(0.f, 0.2f), l1 = resonantGain(1.f, 0.2f);
+	std::printf("     resonant gain: quiet %.1f / %.1f dB, loud %.1f / %.1f dB (ANALOG 0 / 1)\n", q0, q1, l0, l1);
+	// (ANALOG 1 also detunes the cores slightly (mismatch), which moves the peak: compare quiet vs loud within a setting)
+	double qq1 = resonantGain(1.f, 0.0005f);
+	check(std::fabs(q1 - qq1) < 0.5, "resonance: quiet signals stay linear at ANALOG 1 (dB)", "%.2f (limit +-0.5)", q1 - qq1);
+	double extra = (l1 - q1) - (l0 - q0);
+	check(extra < -6.0, "resonance: loud input squashes the peak (extra vs ANALOG 0, dB)", "%.2f (limit < -6)", extra);
+
+	// A hard ping at ANALOG 1 settles faster at first (bloom), stays in tune
+	auto pingDecay = [](float an, double* cents) {
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(440.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.88f;
+		r.e.p.analog = an;
+		r.e.seedCharacter(1);
+		r.step();
+		r.e.pingAll(1.f);
+		std::vector<float> y;
+		for (int n = 0; n < 3 * 48000; n++) {
+			r.step();
+			y.push_back(r.o.cores[0]);
+		}
+		double peak = 0.0;
+		for (int n = 0; n < 2400; n++)
+			peak = std::max(peak, (double) std::fabs(y[n]));
+		int t20 = -1;
+		for (size_t n = 2400; n < y.size(); n += 48) {
+			double m = 0.0;
+			for (size_t k = n; k < n + 480 && k < y.size(); k++)
+				m = std::max(m, (double) std::fabs(y[k]));
+			if (m < peak * 0.1) {
+				t20 = (int) n;
+				break;
+			}
+		}
+		double f = zeroCrossFreq(y, 48000, 96000);
+		*cents = 1200.0 * std::log2(f / 440.0);
+		return t20 / SR;
+	};
+	double c0, c1;
+	double t0 = pingDecay(0.f, &c0), t1 = pingDecay(1.f, &c1);
+	std::printf("     hard ping, time to -20 dB: %.3f s (ANALOG 0) vs %.3f s (ANALOG 1); pitch %.2f / %.2f cents\n", t0, t1, c0,
+		c1);
+	check(t1 < t0, "resonance: a hard ping blooms (settles faster at ANALOG 1)", "%.3f vs %.3f s", t1, t0);
+	check(std::fabs(c1) < 10.0, "resonance: ping still in tune at ANALOG 1 (cents)", "%.2f (limit 10)", c1);
+
+	// Self-oscillation at ANALOG 1 stays bounded and alive
+	Rig r;
+	r.e.p.cutoff = cutoffKnob(440.f);
+	r.e.p.spread = 0.f;
+	r.e.p.res = 1.f;
+	r.e.p.analog = 1.f;
+	r.step();
+	r.e.pingAll(0.2f);
+	double tail = 0.0;
+	for (int n = 0; n < 3 * 48000; n++) {
+		r.step();
+		if (n > 2 * 48000)
+			tail = std::max(tail, (double) std::fabs(r.o.cores[0]));
+	}
+	check(tail > 0.05 && tail < 1.2, "resonance: self-oscillation at ANALOG 1 (peak)", "%.3f (0.05 .. 1.2)", tail);
+}
+
 static void testDrive() {
 	// DRIVE has audible character: rich odd and even harmonics at full, still clean at 0
 	auto harm = [](float drive, double hz) {
@@ -900,6 +985,219 @@ static void testDrive() {
 	check(mid > -25.0, "drive: 42% DRIVE is audible (H3 dB)", "%.1f (limit -25)", mid);
 	double lvl = db(h1 / 0.5);
 	check(std::fabs(lvl) < 6.0, "drive: full DRIVE level vs input (dB)", "%.1f (limit +-6)", lvl);
+}
+
+static void testNewShapes() {
+	float rnd[4] = {};
+	float o[4];
+	double worst = 0.0;
+	// Bell: exact ratios at SPREAD 50%
+	const float BELL[4] = {1.f, 2.f, 2.4f, 4.f};
+	spreadOffsets(SHAPE_BELL, 0.5f, 0, 0, rnd, o);
+	for (int i = 0; i < 4; i++)
+		worst = std::max(worst, std::fabs(1200.0 * (o[i] - std::log2(BELL[i]))));
+	check(worst < 0.01, "shape: Bell exact ratios at SPREAD 50% (cents)", "%.4f", worst);
+	// Vowel: SPREAD 0 = A, 25% = E (offsets from 1 kHz)
+	spreadOffsets(SHAPE_VOWEL, 0.f, 0, 0, rnd, o);
+	double a1 = 1000.0 * std::exp2(o[0]), a2 = 1000.0 * std::exp2(o[1]);
+	spreadOffsets(SHAPE_VOWEL, 0.25f, 0, 0, rnd, o);
+	double e2 = 1000.0 * std::exp2(o[1]);
+	check(std::fabs(a1 - 600.0) < 0.1 && std::fabs(a2 - 1050.0) < 0.1 && std::fabs(e2 - 1600.0) < 0.1,
+		"shape: Vowel A (600 / 1050 Hz), E (F2 1600 Hz)", "%.1f / %.1f", a1, e2);
+	// Just: major chord third = 5/4 (-13.7 cents from 12-TET), dominant 7 seventh = 7/4, scale maj7 = 15/8
+	spreadOffsets(SHAPE_CHORD, 0.f, 0, 5, rnd, o, true);
+	double third = 1200.0 * o[1] - 400.0;
+	check(std::fabs(std::exp2(o[1]) - 1.25) < 1e-5 && std::fabs(std::exp2(o[2]) - 1.5) < 1e-5,
+		"tuning: just major chord 5/4, 3/2", "%.2f cents vs 12-TET third", third);
+	spreadOffsets(SHAPE_CHORD, 0.f, 0, 2, rnd, o, true);
+	check(std::fabs(std::exp2(o[3]) - 1.75) < 1e-5, "tuning: just dominant 7 uses 7/4", "%.5f", std::exp2(o[3]));
+	spreadOffsets(SHAPE_SCALE, 2.f / 7.f, 0, 0, rnd, o, true);
+	check(std::fabs(std::exp2(o[3]) - 1.875) < 1e-5, "tuning: just major scale, 7th degree = 15/8", "%.5f", std::exp2(o[3]));
+	// Equal tuning unchanged: the major third is 400 cents
+	spreadOffsets(SHAPE_CHORD, 0.f, 0, 5, rnd, o, false);
+	check(std::fabs(1200.0 * o[1] - 400.0) < 1e-3, "tuning: equal major third = 400 cents", "%.4f", 1200.0 * o[1]);
+
+	// Random re-roll (the rainbow LED) glides to the new places (~40 ms) instead of jumping
+	{
+		Rig r;
+		r.e.p.shape = SHAPE_RANDOM;
+		r.e.p.spread = 1.f;
+		r.e.seedRandomShape(1);
+		for (int n = 0; n < 4800; n++)
+			r.step();
+		float b4[4], e4[4];
+		for (int i = 0; i < 4; i++)
+			b4[i] = r.e.oct[i];
+		r.e.seedRandomShape(99, true);
+		for (int n = 0; n < 2 * PrismaEngine::BLOCK; n++)
+			r.step();
+		for (int i = 0; i < 4; i++)
+			e4[i] = r.e.oct[i];
+		for (int n = 0; n < 24000; n++)
+			r.step();
+		// The core that moves furthest
+		int k = 0;
+		for (int i = 1; i < 4; i++)
+			if (std::fabs(r.e.oct[i] - b4[i]) > std::fabs(r.e.oct[k] - b4[k]))
+				k = i;
+		float before = b4[k], early = e4[k], after = r.e.oct[k];
+		double share = std::fabs(early - before) / std::max(1e-6f, std::fabs(after - before));
+		check(std::fabs(after - before) > 0.05f && share < 0.3, "shape: Random re-roll glides (share after 2 blocks)",
+			"%.3f (limit 0.3)", share);
+	}
+
+	// A pinged Bell rings its tierce at 2.4 x CUTOFF (core 3), in tune
+	{
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(220.f);
+		r.e.p.shape = SHAPE_BELL;
+		r.e.p.spread = 0.5f;
+		r.e.p.res = 0.9f;
+		r.step();
+		r.e.pingAll(1.f);
+		std::vector<float> y;
+		for (int n = 0; n < 24000; n++) {
+			r.step();
+			y.push_back(r.o.cores[2]);
+		}
+		double f = zeroCrossFreq(y, 480, 24000);
+		double cents = 1200.0 * std::log2(f / (220.0 * 2.4));
+		check(std::fabs(cents) < 3.0, "shape: pinged Bell tierce at 2.4 x CUTOFF (cents)", "%.3f (limit 3)", cents);
+	}
+}
+
+static void testIdle() {
+	// Nothing connected, NOISE 0, high ANALOG + RES: silence (the noise floor follows activity)
+	auto idleLevel = [](float res, float analog, int seconds = 3) {
+		Rig r;
+		r.e.p.res = res;
+		r.e.p.analog = analog;
+		r.e.p.spread = 0.56f;
+		double e = 0.0, peak = 0.0;
+		for (int n = 0; n < seconds * 48000; n++) {
+			r.step();
+			if (n > (seconds - 1) * 48000) {
+				e += r.o.l * r.o.l;
+				peak = std::max(peak, (double) std::fabs(r.o.l));
+			}
+		}
+		return std::make_pair(10.0 * std::log10(e / 48000 + 1e-30), peak);
+	};
+	double quiet = idleLevel(0.85f, 0.84f).first;
+	check(quiet < -120.0, "idle: nothing connected, ANALOG + RES high (dB)", "%.1f (limit -120)", quiet);
+	// RES at the top still self-oscillates on its own (the noise floor stays on to start it)
+	// (it builds up slowly from the noise floor: the loop gain at the top is only 1.12)
+	double osc = idleLevel(1.f, 0.5f, 8).second;
+	check(osc > 0.3, "idle: RES 100% self-oscillates with nothing connected (peak at 8 s)", "%.3f (> 0.3)", osc);
+	// Under signal the noise floor is there (gate open): output with a quiet input differs from ANALOG 0 by hiss only
+	{
+		Rig r;
+		r.e.p.res = 0.85f;
+		r.e.p.analog = 0.84f;
+		for (int n = 0; n < 48000; n++) {
+			float x = 0.3f * (float) std::sin(2.0 * M_PI * 220.0 * n / SR);
+			r.step(x, x);
+		}
+		check(r.e.levelCompDb() > -20.f, "idle: engine runs normally under signal", "%.2f dB comp", r.e.levelCompDb());
+	}
+}
+
+static void testDriveVoicings() {
+	// Each voicing on a 220 Hz sine at full DRIVE: harmonic profile and level
+	auto harm = [](int voice, double hz, float amount) {
+		WarmDrive w;
+		w.drive.voice = voice;
+		w.sampleRate = SR;
+		std::vector<float> y;
+		for (int n = 0; n < 72000; n++)
+			y.push_back(w.process(0.5f * (float) std::sin(2.0 * M_PI * 220.0 * n / SR), amount));
+		return goertzel(y, 24000, 72000, hz);
+	};
+	const char* names[3] = {"warm", "diode", "fold"};
+	double h2[3], h5[3], lvl[3];
+	for (int v = 0; v < 3; v++) {
+		double h1 = harm(v, 220.0, 1.f);
+		h2[v] = db(harm(v, 440.0, 1.f) / h1);
+		h5[v] = db(harm(v, 1100.0, 1.f) / h1);
+		lvl[v] = db(h1 / 0.5);
+		std::printf("     drive %s: H2 %.1f dB, H5 %.1f dB, fundamental %.1f dB vs input\n", names[v], h2[v], h5[v], lvl[v]);
+	}
+	check(h2[1] > h2[0] + 3.0, "drive: diode has more even harmonics than warm (H2 dB)", "%.1f vs %.1f", h2[1], h2[0]);
+	check(h5[2] > h5[0] + 6.0, "drive: fold is richer up high than warm (H5 dB)", "%.1f vs %.1f", h5[2], h5[0]);
+	check(std::fabs(lvl[1]) < 6.0 && std::fabs(lvl[2]) < 9.0, "drive: diode / fold level vs input (dB)", "%.1f / %.1f",
+		lvl[1], lvl[2]);
+
+	// After the cores, the harmonics survive a low cutoff; before the cores, the cores filter them away
+	auto h3Out = [](int pos) {
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(1500.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.f;
+		r.e.p.drive = 1.f;
+		r.e.p.driveVoice = VOICE_DIODE;
+		r.e.p.drivePos = pos;
+		std::vector<float> y;
+		for (int n = 0; n < 72000; n++) {
+			float x = 0.5f * (float) std::sin(2.0 * M_PI * 1000.0 * n / SR);
+			r.step(x, x);
+			y.push_back(r.o.l);
+		}
+		return db(goertzel(y, 36000, 72000, 3000.0) / goertzel(y, 36000, 72000, 1000.0));
+	};
+	double pre = h3Out(DRIVE_PRE), post = h3Out(DRIVE_POST);
+	check(post > pre + 10.0, "drive: after the cores keeps the harmonics (H3 dB)", "%.1f vs %.1f before", post, pre);
+
+	// DRIVE after the cores adds exactly one DRIVE latency to both the wet and the dry path (MIX stays aligned):
+	// a click at MIX 50% peaks exactly DRIVE_LATENCY later than with DRIVE before the cores
+	{
+		int at[2];
+		for (int k = 0; k < 2; k++) {
+			Rig r;
+			r.e.p.cutoff = 1.f;
+			r.e.p.res = 0.f;
+			r.e.p.spread = 0.f;
+			r.e.p.drive = 0.02f;
+			r.e.p.drivePos = k ? DRIVE_POST : DRIVE_PRE;
+			r.e.p.mix = 0.5f;
+			for (int n = 0; n < 2000; n++)
+				r.step();
+			double best = 0.0;
+			at[k] = -1;
+			for (int n = 0; n < 400; n++) {
+				float x = (n == 10) ? 0.5f : 0.f;
+				r.step(x, x);
+				if (std::fabs(r.o.l) > best) {
+					best = std::fabs(r.o.l);
+					at[k] = n;
+				}
+			}
+		}
+		check(at[1] - at[0] == DriveStage::DRIVE_LATENCY, "drive: after the cores, MIX stays aligned (extra latency)",
+			"%.0f (expect %.0f)", at[1] - at[0], DriveStage::DRIVE_LATENCY);
+	}
+
+	// Switching position fades: no step bigger than the steady signal's own
+	{
+		Rig r;
+		r.e.p.drive = 0.6f;
+		float prev = 0.f, steady = 0.f, during = 0.f, after = 0.f;
+		for (int n = 0; n < 48000; n++) {
+			if (n == 24000)
+				r.e.p.drivePos = DRIVE_POST;
+			float x = 0.4f * (float) std::sin(2.0 * M_PI * 200.0 * n / SR);
+			r.step(x, x);
+			float d = std::fabs(r.o.l - prev);
+			prev = r.o.l;
+			if (n > 12000 && n < 24000)
+				steady = std::max(steady, d);
+			if (n >= 24000 && n < 26000)
+				during = std::max(during, d);
+			if (n > 36000)
+				after = std::max(after, d);
+		}
+		check(during < 1.2f * std::max(steady, after), "drive: position switch is click-free",
+			"%.4f vs steady %.4f", during, std::max(steady, after));
+	}
 }
 
 static void testSeriesNoise() {
@@ -928,11 +1226,15 @@ int main() {
 	testPing();
 	testClicks();
 	testPlaces();
+	testNewShapes();
 	testPoly();
 	testStereo();
 	testStack();
 	testSeriesNoise();
 	testDrive();
+	testDriveVoicings();
+	testResonanceSaturation();
+	testIdle();
 	testBand();
 	testLevel();
 	testPerCore();

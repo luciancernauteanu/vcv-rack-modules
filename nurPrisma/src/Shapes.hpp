@@ -14,7 +14,31 @@ enum SpreadShape {
 	SHAPE_SCALE,
 	SHAPE_RANDOM,
 	SHAPE_CHORD,
+	/** Tuned bell partials hum 1 : prime 2 : tierce 2.4 : nominal 4 (the minor-third tierce), exact at SPREAD 50% */
+	SHAPE_BELL,
+	/** Vowel formants (F1, F2, F3, F4); SPREAD morphs A > E > I > O > U, CUTOFF shifts the voice (1 kHz = adult) */
+	SHAPE_VOWEL,
 	NUM_SPREAD_SHAPES
+};
+
+/** Just intonation: octaves from C of `semis` semitones as a pure ratio (5-limit; with `harmonic7` the minor seventh
+is the harmonic 7/4 instead of 9/5). A major third is 5/4 (-13.7 cents from 12-TET), a fifth 3/2 (+2 cents). */
+inline float justOctaves(int semis, bool harmonic7) {
+	static const float RATIO[12] = {1.f, 16.f / 15.f, 9.f / 8.f, 6.f / 5.f, 5.f / 4.f, 4.f / 3.f, 45.f / 32.f, 3.f / 2.f,
+		8.f / 5.f, 5.f / 3.f, 9.f / 5.f, 15.f / 8.f};
+	int oct = semis >= 0 ? semis / 12 : -((-semis + 11) / 12);
+	int i = semis - 12 * oct;
+	float r = (i == 10 && harmonic7) ? 7.f / 4.f : RATIO[i];
+	return (float) oct + std::log2(r);
+}
+
+/** Formant frequencies (Hz) F1..F4 for A, E, I, O, U (F1-F3 after Winer, The Audio Circuits Cookbook, table 5.3) */
+static const float VOWELS[5][4] = {
+	{600.f, 1050.f, 2350.f, 3300.f},
+	{400.f, 1600.f, 2425.f, 3300.f},
+	{250.f, 1750.f, 2600.f, 3300.f},
+	{400.f, 750.f, 2600.f, 3300.f},
+	{350.f, 600.f, 2700.f, 3300.f},
 };
 
 struct Scale {
@@ -90,17 +114,37 @@ inline float quantizeToScale(int scale, float semis) {
 - Scale: root on CUTOFF, the others every `step` scale degrees (SPREAD 0..1 = 0..7 degrees apart).
 - Random: centred, frozen random places (`random[]` in -1..1), +-2.5 octaves at full SPREAD.
 - Chord: the chord's tones from CUTOFF; SPREAD climbs through inversions (each step lifts the lowest note an octave). */
-inline void spreadOffsets(int shape, float s, int scale, int chord, const float random[4], float out[4]) {
+inline void spreadOffsets(int shape, float s, int scale, int chord, const float random[4], float out[4],
+		bool just = false) {
 	s = std::min(std::max(s, 0.f), 1.f);
 	switch (shape) {
+		case SHAPE_BELL: {
+			static const float BELL[4] = {1.f, 2.f, 2.4f, 4.f};
+			for (int i = 0; i < 4; i++)
+				out[i] = 2.f * s * std::log2(BELL[i]);
+			break;
+		}
+		case SHAPE_VOWEL: {
+			// Offsets from CUTOFF relative to 1 kHz, so CUTOFF at 1 kHz gives the table's voice
+			float pos = s * 4.f;
+			int a = std::min((int) pos, 3);
+			float f = pos - a;
+			for (int i = 0; i < 4; i++) {
+				float la = std::log2(VOWELS[a][i] / 1000.f), lb = std::log2(VOWELS[a + 1][i] / 1000.f);
+				out[i] = la + (lb - la) * f;
+			}
+			break;
+		}
 		case SHAPE_HARMONIC:
 			for (int i = 0; i < 4; i++)
 				out[i] = 2.f * s * std::log2((float) (i + 1));
 			break;
 		case SHAPE_SCALE: {
 			float step = s * 7.f;
-			for (int i = 0; i < 4; i++)
-				out[i] = scaleSemis(scale, (int) std::lround(i * step)) / 12.f;
+			for (int i = 0; i < 4; i++) {
+				int semis = scaleSemis(scale, (int) std::lround(i * step));
+				out[i] = just ? justOctaves(semis, false) : semis / 12.f;
+			}
 			break;
 		}
 		case SHAPE_RANDOM:
@@ -118,8 +162,9 @@ inline void spreadOffsets(int shape, float s, int scale, int chord, const float 
 						lo = i;
 				n[lo] += 12;
 			}
+			// Dominant 7 (index 2) takes the harmonic seventh 7/4 in just tuning
 			for (int i = 0; i < 4; i++)
-				out[i] = n[i] / 12.f;
+				out[i] = just ? justOctaves(n[i], chord == 2) : n[i] / 12.f;
 			break;
 		}
 		default: {

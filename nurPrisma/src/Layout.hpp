@@ -35,6 +35,7 @@ static const float STRUM_X = 30.9f;
 static const float STRIKE_X = 60.54f;
 /** Shape LEDs: row below the button */
 static const float SHAPE_LED_DY = 4.4f;
+/** SHAPE LEDs: pitch between the small ones (the big Random LED in the middle gets 0.8 mm extra each side) */
 static const float SHAPE_LED_PITCH = 2.4f;
 
 /** Hero: inner CUTOFF knob, outer SPREAD ring */

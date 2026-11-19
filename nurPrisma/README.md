@@ -22,19 +22,19 @@ SHAPE **Chord** tunes the cores to a chord (right-click > Chord); SPREAD climbs 
 |---|---|
 | **CUTOFF** (centre knob) | Moves all four cores at once; the spacing between them stays the same |
 | **SPREAD** (prism ring around it) | From all four cores on one peak to fanned out over ±2.5 octaves. The dots on the ring show each core's frequency |
-| **Core bullets** (ALL and four colours, under the ring) | Pick a core to edit on its own: CUTOFF (centre knob), TYPE, RES, BAND and the SPREAD ring then set that core only, WIDTH becomes its PAN and MIX its LEVEL. A core follows the global knobs until you change one of them in focus; from then on it keeps its own value (an own CUTOFF takes the core out of SPREAD and global CUTOFF; an own PAN replaces WIDTH's placement and moves both channels of the core). Click it again (or ALL) to go back. The bullets never move, so a core can be picked while MOTION moves its dot. A ring around a bullet = that core has its own settings; right-click a bullet to make it follow the global knobs again or to reset it |
+| **Core bullets** (ALL and four colours, under the ring) | Pick a core to edit on its own: CUTOFF (centre knob), TYPE, RES, BAND and the SPREAD ring then set that core only, WIDTH becomes its PAN and MIX its LEVEL. A core follows the global knobs until you change one of them in focus; from then on it keeps its own value (an own CUTOFF is a detune from the core's place, so CUTOFF, SPREAD and SHAPE still move every core; an own PAN replaces WIDTH's placement and moves both channels of the core). Right-click > "All cores follow the global knobs again" clears every core's own settings. Click it again (or ALL) to go back. The bullets never move, so a core can be picked while MOTION moves its dot. A ring around a bullet = that core has its own settings; right-click a bullet to make it follow the global knobs again or to reset it |
 | **Core dots** (on the ring) | Each core's own share of SPREAD: drag a dot up / down (-100% .. 200%, double-click = 100%). 0% keeps that core on CUTOFF, negative puts it on the other side. In Scale and Chord, amounts other than 100% leave the scale |
-| **SHAPE** | How the cores are spaced: Even, Harmonic, Scale, Random, Chord |
+| **SHAPE** | How the cores are spaced: Even, Harmonic, Scale, **Random** (the big rainbow LED in the middle of the SHAPE LEDs: click it for new random places, which glide in), Chord, **Bell** (hum, prime, minor-third tierce, nominal: 1 : 2 : 2.4 : 4), **Vowel** (formants; SPREAD morphs A > E > I > O > U, CUTOFF shifts the voice, 1 kHz = adult). Bell / Harmonic are exact at SPREAD 50%. The label shows the shape's name. Right-click > Chord and scale tuning: Equal or **Just** (pure ratios: pinged chords fuse instead of beating) |
 | **TYPE** | LP → BP → HP → notch, morphing continuously |
 | **RES** | Resonance, self-oscillating at the top of the knob |
 | **BAND** | Narrows each core to a steep band at its pitch (3 octaves down to 1/24 octave): a drastic filter bank. 0 = off |
-| **DRIVE** | Saturation before the cores, from warm to rich (up to about +22 dB into the curve) |
+| **DRIVE** | Saturation, from warm to rich (up to about +22 dB into the curve). Right-click: **voicing** Warm (tanh), Diode (one-sided: strong even harmonics), Fold (wavefolder: gritty); **position** before the cores, after them (the harmonics survive the filters; drives pings and resonances) or both at 70% each. The label shows the choice: DRIVE / DIODE / FOLD, + POST or BOTH. **Click the label** for the next voicing, **hold it** (0.5 s) for the next position. Diode and Fold add a high cut that grows with the amount |
 | **STACK** | Parallel (resonator, vowels, chords) → series (steep, aggressive) |
 | **WIDTH** | Spreads the cores over left and right; 0 is mono-safe |
 | **MIX** | Dry / wet |
 | Level compensation (right-click) | **Full** (default): the output keeps the input's loudness whatever BAND, TYPE or RES do (-12 .. +24 dB). **Gentle**: +-6 dB. **Off**: a closing filter gets quieter, as on a classic filter |
 | **NOISE**, **COLOR** | Noise fed into the cores (white → pink → brown → crackle): with high RES the stack sings on its own |
-| **ANALOG** | Slightly mismatched cores, saturation, drift, a soft noise floor |
+| **ANALOG** | Slightly mismatched cores, saturation, a soft noise floor, and resonance that reacts to level like an analog filter: loud input widens and softens the peak, quiet signals and pings ring freely, a hard ping blooms (settles fast, then rings on) |
 | **DIGITAL** | Coarse filter maths and rate reduction: the sound of old DSP |
 | **STRUM**, **STRIKE** | See Ping above |
 

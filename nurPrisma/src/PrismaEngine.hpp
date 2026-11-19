@@ -29,6 +29,17 @@ inline float widthPlace(int i) {
 	return PAN[i];
 }
 
+/** Where DRIVE sits (right-click menu) */
+enum DrivePosition {
+	/** Before the cores (the original): the cores filter the harmonics it adds */
+	DRIVE_PRE,
+	/** After the cores (on the wet signal): the harmonics stay, pings and resonances get driven */
+	DRIVE_POST,
+	/** Both, each at 70%: two stages pushed a little sound cleaner than one pushed hard */
+	DRIVE_BOTH,
+	NUM_DRIVE_POSITIONS
+};
+
 /** Output level compensation (right-click menu) */
 enum LevelComp {
 	LEVEL_OFF,
@@ -97,6 +108,10 @@ struct EngineParams {
 	int pingMode = PING_ALL;
 	bool quantizeCutoff = false;
 	int levelComp = LEVEL_FULL;
+	int driveVoice = VOICE_WARM;
+	/** SHAPE Chord / Scale in just intonation (pure ratios) instead of 12-TET */
+	bool justTuning = false;
+	int drivePos = DRIVE_PRE;
 };
 
 /** The excitation of one ping. The mallet is an impulse through two one-pole low-passes ("felt"): unit area, so low
@@ -219,6 +234,14 @@ public:
 	void setSampleRate(float sr) {
 		sampleRate = sr;
 		limiter.setSampleRate(sr);
+		for (int c = 0; c < 2; c++) {
+			for (int i = 0; i < NUM_CORES; i++)
+				drives[c][i].drive.sampleRate = sr;
+			postDrives[c].drive.sampleRate = sr;
+		}
+		driveFadeStep = 1.f / (0.005f * sr);
+		randomGlide = 1.f - std::exp(-(float) BLOCK / (0.04f * sr));
+		hissGateCoef = 1.f - std::exp(-(float) BLOCK / (0.05f * sr));
 		blockCoef = 1.f - std::exp(-(float) BLOCK / (0.005f * sr));
 		compCoef = 1.f - std::exp(-1.f / (0.3f * sr));
 		compSmooth = 1.f - std::exp(-(float) BLOCK / (0.15f * sr));
@@ -243,13 +266,17 @@ public:
 		return characterSeed;
 	}
 
-	/** The frozen places of SHAPE Random (saved in the patch). */
-	void seedRandomShape(uint32_t seed) {
+	/** The frozen places of SHAPE Random (saved in the patch). `glide`: move there over ~40 ms (a re-roll while
+	playing); else jump (load, start). */
+	void seedRandomShape(uint32_t seed, bool glide = false) {
 		randomSeed = seed;
 		Rng r;
 		r.seed(seed);
-		for (int i = 0; i < NUM_CORES; i++)
-			randomPlaces[i] = r.uniform();
+		for (int i = 0; i < NUM_CORES; i++) {
+			randomTarget[i] = r.uniform();
+			if (!glide)
+				randomPlaces[i] = randomTarget[i];
+		}
 	}
 	uint32_t getRandomSeed() const {
 		return randomSeed;
@@ -260,6 +287,7 @@ public:
 			for (int i = 0; i < NUM_CORES; i++) {
 				cores[c][i].reset();
 				drives[c][i].reset();
+				postDrives[c % 2].reset();
 				holdVal[c][i] = 0.f;
 				holdCount[c][i] = 0;
 				bands[c][i].reset();
@@ -340,9 +368,38 @@ public:
 			noiseL = a * amt;
 			noiseR = (a + (b - a) * s.width) * amt;
 		}
+		// ANALOG's noise floor follows activity (hissGate, per block): there under signal and rings, silent when nothing
+		// plays (high RES would otherwise ring it up to an audible hiss with nothing connected)
 		float hiss = 0.f;
-		if (s.analog > 0.f)
-			hiss = hissRng.uniform() * s.analog * HISS;
+		if (s.analog > 0.f && hissGate > 0.f)
+			hiss = hissRng.uniform() * s.analog * HISS * hissGate;
+
+		// DRIVE voicing / position: a change fades the output out (5 ms), switches while silent, fades back in
+		if (p.driveVoice != voiceNow || p.drivePos != posNow) {
+			driveFade -= driveFadeStep;
+			if (driveFade <= 0.f) {
+				driveFade = 0.f;
+				voiceNow = p.driveVoice;
+				posNow = p.drivePos;
+				// Stay silent until the (reset) drive paths have filled, then fade in
+				driveHold = 2 * DriveStage::DRIVE_LATENCY + 8;
+				for (int c = 0; c < 2; c++) {
+					for (int i = 0; i < NUM_CORES; i++)
+						drives[c][i].drive.drive.voice = voiceNow;
+					postDrives[c].drive.drive.voice = voiceNow;
+					postDrives[c].reset();
+				}
+			}
+		}
+		else if (driveHold > 0)
+			driveHold--;
+		else if (driveFade < 1.f)
+			driveFade = std::min(1.f, driveFade + driveFadeStep);
+		float preAmt = s.drive;
+		if (posNow == DRIVE_POST)
+			preAmt = 0.f;
+		else if (posNow == DRIVE_BOTH)
+			preAmt = BOTH_SHARE * s.drive;
 
 		// Inputs per core, through DRIVE
 		float x[2][NUM_CORES];
@@ -353,10 +410,10 @@ public:
 		for (int c = 0; c < 2; c++) {
 			if (perCore) {
 				for (int i = 0; i < NUM_CORES; i++)
-					x[c][i] = drives[c][i].process(in[c][i], s.drive, grace) + noiseLR[c];
+					x[c][i] = drives[c][i].process(in[c][i], preAmt, grace) + noiseLR[c];
 			}
 			else {
-				float v = drives[c][0].process(in[c][0], s.drive, grace) + noiseLR[c];
+				float v = drives[c][0].process(in[c][0], preAmt, grace) + noiseLR[c];
 				for (int i = 0; i < NUM_CORES; i++)
 					x[c][i] = v;
 			}
@@ -368,16 +425,37 @@ public:
 				gNow[c][i] += gStep[c][i];
 
 		float wet[2];
-		if (bandOn) {
-			if (digitalOn)
-				runCoresDigitalBand(x, exc, hiss, wet, out);
-			else
-				runCoresBand(x, exc, hiss, wet, out);
+		// Nothing to hear (no input, noise, hiss or ping, rings decayed, no self-oscillation): skip the cores. Their
+		// state is cleared once on the way in, so they restart from exactly zero when signal returns.
+		bool idle = coresQuiet && hiss == 0.f && noiseL == 0.f && noiseR == 0.f;
+		for (int c = 0; c < 2 && idle; c++)
+			for (int i = 0; i < NUM_CORES && idle; i++)
+				idle = x[c][i] == 0.f && exc[i] == 0.f;
+		if (idle) {
+			if (!coresIdle) {
+				coresIdle = true;
+				for (int c = 0; c < 2; c++)
+					for (int i = 0; i < NUM_CORES; i++) {
+						cores[c][i].reset();
+						bands[c][i].reset();
+						holdVal[c][i] = 0.f;
+					}
+			}
+			wet[0] = wet[1] = 0.f;
+			for (int i = 0; i < NUM_CORES; i++)
+				out.cores[i] = 0.f;
 		}
-		else if (digitalOn)
-			runCoresDigital(x, exc, hiss, wet, out);
 		else
-			runCores(x, exc, hiss, wet, out);
+			runCoresAny(x, exc, hiss, wet, out);
+
+
+		// DRIVE after the cores (After / Both): on the wet signal, before the level compensation. Adds its latency,
+		// so the dry path is delayed by the same amount below.
+		if (posNow != DRIVE_PRE) {
+			float postAmt = (posNow == DRIVE_BOTH) ? BOTH_SHARE * s.drive : s.drive;
+			for (int c = 0; c < 2; c++)
+				wet[c] = postDrives[c].process(wet[c], postAmt, grace);
+		}
 
 		// Level compensation: the wet signal is brought back to the input's loudness (BAND, narrow BP, notch, a low LP...).
 		// Energies are followed per sample (300 ms); the gain is worked out per block (see updateLevelComp) and
@@ -395,6 +473,10 @@ public:
 		float dr = dryDelay(1, dryR);
 		float l = dl + (wet[0] * compGain - dl) * s.mix;
 		float r = dr + (wet[1] * compGain - dr) * s.mix;
+		if (driveFade < 1.f) {
+			l *= driveFade;
+			r *= driveFade;
+		}
 		limiter.process(l, r, CEILING, &out.l, &out.r);
 
 		for (int i = 0; i < NUM_CORES; i++)
@@ -407,6 +489,17 @@ public:
 	static constexpr float PING_LEVEL = 0.9f;
 	/** Noise floor per core at full ANALOG (about -70 dB) */
 	static constexpr float HISS = 3e-4f;
+	/** Activity (input RMS + strongest ring, engine units) at which the noise floor is fully on (-34 dBFS of 10 V) */
+	static constexpr float HISS_GATE_REF = 0.02f;
+	/** Rings below this count as gone (-200 dB) */
+	static constexpr float QUIET_LEVEL = 1e-10f;
+	/** A core self-oscillates once its feedback loop gain (fbNow, see resFeedback) reaches 1 */
+	static constexpr float FB_SELF_OSC = 1.f;
+
+	/** True once the first block has run (place[] is valid) */
+	bool placeReady() const {
+		return !first;
+	}
 
 	/** Level compensation now, in dB (for tests and a future meter) */
 	float levelCompDb() const {
@@ -431,6 +524,15 @@ private:
 
 	Core cores[2][NUM_CORES];
 	DriveStage drives[2][NUM_CORES];
+	/** DRIVE after the cores, one per side */
+	DriveStage postDrives[2];
+	int voiceNow = VOICE_WARM;
+	int posNow = DRIVE_PRE;
+	/** Output gain while a DRIVE voicing / position change fades out and back in (1 = steady) */
+	float driveFade = 1.f;
+	float driveFadeStep = 1.f / 240.f;
+	int driveHold = 0;
+	static constexpr float BOTH_SHARE = 0.7f;
 	ColoredNoise noise[2];
 	Rng hissRng;
 	Rng pingRng;
@@ -447,12 +549,20 @@ private:
 	float panMid[2][NUM_CORES] = {};
 	float panSide[NUM_CORES] = {};
 	bool anyOwnPan = false;
+	/** Noise-floor gate 0..1 (per block), its smoothing, idle state */
+	float hissGate = 1.f;
+	float hissGateCoef = 0.1f;
+	bool selfOsc = false;
+	bool coresQuiet = false;
+	bool coresIdle = false;
 	/** This sample's noise per side (already in every core's input; series cores get it again on top of the chain) */
 	float noiseNow[2] = {};
 	float coreGain[NUM_CORES] = {};
 	float weights[NUM_CORES][4] = {{1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}};
 	float stackNow = 0.f;
 	float limit = 0.f;
+	/** Level-dependent resonance amount (RES_SAT x ANALOG; 0 = off) */
+	float resSat = 0.f;
 	float pingResp[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
 
 	// Character
@@ -461,6 +571,8 @@ private:
 	float mismatchQ[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
 	float mismatchGain[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
 	float randomPlaces[NUM_CORES] = {};
+	float randomTarget[NUM_CORES] = {};
+	float randomGlide = 0.3f;
 	float bloom[NUM_CORES] = {};
 
 	// PING
@@ -528,14 +640,16 @@ private:
 		float g = std::pow(10.f, compDb * 0.05f);
 		compStep = (g - compGain) / BLOCK;
 	}
-	float dryBuf[2][64] = {};
+	float dryBuf[2][128] = {};
 	int dryPos[2] = {};
 
 	/** The dry signal, delayed like the wet path (DRIVE latency), so MIX never combs. */
 	float dryDelay(int c, float x) {
 		dryBuf[c][dryPos[c]] = x;
-		float y = dryBuf[c][(dryPos[c] - DriveStage::DRIVE_LATENCY) & 63];
-		dryPos[c] = (dryPos[c] + 1) & 63;
+		// One DRIVE latency (before the cores), or two with DRIVE after the cores too
+		int lat = (posNow == DRIVE_PRE) ? DriveStage::DRIVE_LATENCY : 2 * DriveStage::DRIVE_LATENCY;
+		float y = dryBuf[c][(dryPos[c] - lat) & 127];
+		dryPos[c] = (dryPos[c] + 1) & 127;
 		return y;
 	}
 
@@ -596,7 +710,9 @@ private:
 		}
 		float spreadEff = clamp01(s.spread + p.spreadCv);
 		float offs[NUM_CORES];
-		spreadOffsets(s.shape, spreadEff, p.scale, p.chord, randomPlaces, offs);
+		for (int i = 0; i < NUM_CORES; i++)
+			randomPlaces[i] += (randomTarget[i] - randomPlaces[i]) * randomGlide;
+		spreadOffsets(s.shape, spreadEff, p.scale, p.chord, randomPlaces, offs, p.justTuning);
 		// Each core's own spread (the dots on the ring)
 		for (int i = 0; i < NUM_CORES; i++)
 			offs[i] *= s.coreSpread[i];
@@ -609,12 +725,15 @@ private:
 		// ANALOG: integrators saturate earlier, mismatch and pitch bloom grow
 		float an = s.analog;
 		limit = 8.f - 6.2f * an;
+		resSat = RES_SAT * an;
 		static const float PAN[NUM_CORES] = {-1.f, 1.f / 3.f, -1.f / 3.f, 1.f};
 		static const float WIDTH_SIGN[NUM_CORES] = {-1.f, 1.f, 1.f, -1.f};
 		anyOwnPan = false;
+		float maxRing = 0.f;
 		for (int i = 0; i < NUM_CORES; i++) {
 			// Pitch bloom: a loud ring sags the core's pitch a little; it comes back as the ring decays.
 			float level = std::min(cores[0][i].ringLevel(), 2.f);
+			maxRing = std::max(maxRing, std::max(level, cores[1][i].ringLevel()));
 			smooth(bloom[i], level, 0.25f);
 			// Where SPREAD puts the core, in CUTOFF knob units (an own cutoff starts here, so taking it never jumps)
 			place[i] = s.cutoff + offs[i] / LOG2_1000;
@@ -691,6 +810,17 @@ private:
 				for (int i = 0; i < NUM_CORES; i++)
 					bands[ch][i].reset();
 		}
+		// Activity (input level + strongest ring) -> noise floor gate; self-oscillation keeps it open (it starts the
+		// oscillation, as in a real filter). Idle check for skipping the cores.
+		selfOsc = false;
+		for (int i = 0; i < NUM_CORES; i++)
+			selfOsc = selfOsc || fbNow[i] * FB_SELF_OSC >= 1.f;
+		float activity = std::sqrt(energyIn) + maxRing;
+		float gateTarget = selfOsc ? 1.f : std::min(1.f, activity / HISS_GATE_REF);
+		hissGate += (gateTarget - hissGate) * hissGateCoef;
+		if (!selfOsc && hissGate < 1e-4f && gateTarget == 0.f)
+			hissGate = 0.f;
+		coresQuiet = !selfOsc && maxRing < QUIET_LEVEL;
 		// DIGITAL: coarse coefficients (above), sample-and-hold rate reduction, then coarse states at the top
 		digitalOn = s.digital > 0.f;
 		if (digitalOn) {
@@ -710,7 +840,7 @@ private:
 
 	/** The four cores on both sides, stacked (parallel ... series), panned. BAND narrows each core's output to a steep
 	band at its pitch (only instantiated with BAND on, so BAND 0 runs exactly the code it ran before). */
-	template <bool DIGITAL, bool BAND>
+	template <bool DIGITAL, bool BAND, bool SAT = false>
 	inline void coresImpl(float x[2][NUM_CORES], const float exc[NUM_CORES], float hiss, float wet[2], EngineOutput& out) {
 		float m = stackNow;
 		float ycore[2][NUM_CORES];
@@ -724,7 +854,8 @@ private:
 					core.excite(exc[i], weights[i][1] + weights[i][3]);
 				// In series a core hears the previous core: give it the noise too, so NOISE reaches every core
 				float u = x[c][i] + (prev + noiseNow[c] - x[c][i]) * m + hiss;
-				float y = core.process(u, gNow[c][i], kNow[c][i], weights[i], bpGain[i], fbNow[i], limit) * coreGain[i];
+				float y = core.process(u, gNow[c][i], SAT ? core.saturatedK(kNow[c][i], resSat) : kNow[c][i], weights[i],
+					bpGain[i], fbNow[i], limit) * coreGain[i];
 				if (BAND) {
 					float yb = bands[c][i].process(y, gNow[c][i], bandK[i]) * bandGain[i];
 					y += (yb - y) * bandMix[i];
@@ -766,6 +897,23 @@ private:
 			out.cores[i] = 0.5f * (ycore[0][i] + ycore[1][i]);
 	}
 
+	/** The cores, in the instantiation that matches the settings (ANALOG saturation, BAND, DIGITAL) */
+	void runCoresAny(float x[2][NUM_CORES], const float exc[NUM_CORES], float hiss, float wet[2], EngineOutput& out) {
+		coresIdle = false;
+		if (resSat > 0.f)
+			runCoresSat(x, exc, hiss, wet, out);
+		else if (bandOn) {
+			if (digitalOn)
+				runCoresDigitalBand(x, exc, hiss, wet, out);
+			else
+				runCoresBand(x, exc, hiss, wet, out);
+		}
+		else if (digitalOn)
+			runCoresDigital(x, exc, hiss, wet, out);
+		else
+			runCores(x, exc, hiss, wet, out);
+	}
+
 	void runCores(float x[2][NUM_CORES], const float exc[NUM_CORES], float hiss, float wet[2], EngineOutput& out) {
 		coresImpl<false, false>(x, exc, hiss, wet, out);
 	}
@@ -780,6 +928,20 @@ private:
 	NP_NOINLINE void runCoresDigitalBand(float x[2][NUM_CORES], const float exc[NUM_CORES], float hiss, float wet[2],
 			EngineOutput& out) {
 		coresImpl<true, true>(x, exc, hiss, wet, out);
+	}
+	/** ANALOG on: the level-dependent resonance, in its own instantiations (ANALOG 0 runs the plain ones, unchanged) */
+	NP_NOINLINE void runCoresSat(float x[2][NUM_CORES], const float exc[NUM_CORES], float hiss, float wet[2],
+			EngineOutput& out) {
+		if (bandOn) {
+			if (digitalOn)
+				coresImpl<true, true, true>(x, exc, hiss, wet, out);
+			else
+				coresImpl<false, true, true>(x, exc, hiss, wet, out);
+		}
+		else if (digitalOn)
+			coresImpl<true, false, true>(x, exc, hiss, wet, out);
+		else
+			coresImpl<false, false, true>(x, exc, hiss, wet, out);
 	}
 };
 
