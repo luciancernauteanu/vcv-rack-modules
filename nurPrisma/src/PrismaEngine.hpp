@@ -348,6 +348,8 @@ public:
 		float x[2][NUM_CORES];
 		const float* in[2] = {inL, inR};
 		float noiseLR[2] = {noiseL, noiseR};
+		noiseNow[0] = noiseL;
+		noiseNow[1] = noiseR;
 		for (int c = 0; c < 2; c++) {
 			if (perCore) {
 				for (int i = 0; i < NUM_CORES; i++)
@@ -445,6 +447,8 @@ private:
 	float panMid[2][NUM_CORES] = {};
 	float panSide[NUM_CORES] = {};
 	bool anyOwnPan = false;
+	/** This sample's noise per side (already in every core's input; series cores get it again on top of the chain) */
+	float noiseNow[2] = {};
 	float coreGain[NUM_CORES] = {};
 	float weights[NUM_CORES][4] = {{1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}};
 	float stackNow = 0.f;
@@ -717,8 +721,9 @@ private:
 			for (int i = 0; i < NUM_CORES; i++) {
 				Core& core = cores[c][i];
 				if (exc[i] != 0.f)
-					core.excite(exc[i]);
-				float u = x[c][i] + (prev - x[c][i]) * m + hiss;
+					core.excite(exc[i], weights[i][1] + weights[i][3]);
+				// In series a core hears the previous core: give it the noise too, so NOISE reaches every core
+				float u = x[c][i] + (prev + noiseNow[c] - x[c][i]) * m + hiss;
 				float y = core.process(u, gNow[c][i], kNow[c][i], weights[i], bpGain[i], fbNow[i], limit) * coreGain[i];
 				if (BAND) {
 					float yb = bands[c][i].process(y, gNow[c][i], bandK[i]) * bandGain[i];

@@ -825,13 +825,114 @@ static void testPerCore() {
 	}
 }
 
+/** Click at a ping's onset: the largest sample step in the first ms vs the largest step of the ring itself later on
+(a ring that starts from zero has an onset no steeper than its own slope). TYPE `type`, RES 90%, STRIKE 0 (hardest). */
+static double pingClick(float type, bool repingRinging) {
+	Rig r;
+	r.e.p.cutoff = cutoffKnob(440.f);
+	r.e.p.spread = 0.f;
+	r.e.p.res = 0.9f;
+	r.e.p.type = type;
+	r.e.p.strike = 0.f;
+	r.step();
+	std::vector<float> y;
+	int at = 0;
+	if (repingRinging) {
+		r.e.pingAll(1.f);
+		for (int n = 0; n < 4801; n++) {
+			r.step();
+			y.push_back(r.o.cores[0]);
+		}
+		at = (int) y.size();
+	}
+	r.e.pingAll(1.f);
+	for (int n = 0; n < 9600; n++) {
+		r.step();
+		y.push_back(r.o.cores[0]);
+	}
+	double onset = 0.0, ring = 0.0;
+	for (size_t n = at + 1; n < y.size(); n++) {
+		double d = std::fabs(y[n] - y[n - 1]);
+		if ((int) n < at + 48)
+			onset = std::max(onset, d);
+		else if ((int) n > at + 480)
+			ring = std::max(ring, d);
+	}
+	return onset / ring;
+}
+
+static void testClicks() {
+	const char* names[3] = {"LP", "BP", "HP"};
+	for (int t = 0; t < 3; t++) {
+		char name[80];
+		double c = pingClick((float) t, false);
+		std::snprintf(name, sizeof name, "click: ping onset on %s, STRIKE 0 (x ring slope)", names[t]);
+		check(c < 2.0, name, "%.2f (limit 2)", c);
+		c = pingClick((float) t, true);
+		std::snprintf(name, sizeof name, "click: re-ping a ringing %s core (x ring slope)", names[t]);
+		check(c < 2.0, name, "%.2f (limit 2)", c);
+	}
+	// The old way (all into the band state) on BP, for reference: it must have been a click
+	Core core;
+	float w[4] = {0.f, 1.f, 0.f, 0.f};
+	CoreCoefs cc = coreCoefs(440.f, 0.9f, 1.f, SR);
+	float prev = core.process(0.f, cc.g, cc.k, w, cc.bpGain, 0.f, 0.f);
+	core.excite(0.9f / pingResponse(w, cc.k, cc.bpGain), 0.f);
+	float first = core.process(0.f, cc.g, cc.k, w, cc.bpGain, 0.f, 0.f);
+	double ringSlope = 0.9 * 2.0 * M_PI * 440.0 / SR;
+	check(std::fabs(first - prev) / ringSlope > 2.0, "click: old excitation on BP was a step (x ring slope)", "%.1f",
+		std::fabs(first - prev) / ringSlope);
+}
+
+static void testDrive() {
+	// DRIVE has audible character: rich odd and even harmonics at full, still clean at 0
+	auto harm = [](float drive, double hz) {
+		WarmDrive w;
+		std::vector<float> y;
+		for (int n = 0; n < 72000; n++)
+			y.push_back(w.process(0.5f * (float) std::sin(2.0 * M_PI * 220.0 * n / SR), drive));
+		return goertzel(y, 24000, 72000, hz);
+	};
+	double h1 = harm(1.f, 220.0);
+	double h2 = db(harm(1.f, 440.0) / h1), h3 = db(harm(1.f, 660.0) / h1);
+	check(h3 > -15.0 && h2 > -25.0, "drive: full DRIVE harmonics H2 / H3 (dB)", "%.1f / %.1f (H3 > -15, H2 > -25)", h2, h3);
+	double mid = db(harm(0.42f, 660.0) / harm(0.42f, 220.0));
+	check(mid > -25.0, "drive: 42% DRIVE is audible (H3 dB)", "%.1f (limit -25)", mid);
+	double lvl = db(h1 / 0.5);
+	check(std::fabs(lvl) < 6.0, "drive: full DRIVE level vs input (dB)", "%.1f (limit +-6)", lvl);
+}
+
+static void testSeriesNoise() {
+	// NOISE alone, STACK fully series: the last core still gets noise of its own (not only what survives the chain)
+	double rms[2][4] = {};
+	for (int k = 0; k < 2; k++) {
+		Rig r;
+		r.e.p.noise = 0.7f;
+		r.e.p.stack = (float) k;
+		r.e.p.type = 1.f;
+		r.e.p.res = 0.6f;
+		r.e.p.spread = 0.8f;
+		for (int n = 0; n < 2 * 48000; n++) {
+			r.step();
+			if (n > 48000)
+				for (int i = 0; i < 4; i++)
+					rms[k][i] += r.o.cores[i] * r.o.cores[i];
+		}
+	}
+	double d = 10.0 * std::log10(rms[1][3] / rms[0][3]);
+	check(d > -6.0, "stack: series keeps NOISE in the last core (vs parallel, dB)", "%.1f (limit -6)", d);
+}
+
 int main() {
 	testCore();
 	testPing();
+	testClicks();
 	testPlaces();
 	testPoly();
 	testStereo();
 	testStack();
+	testSeriesNoise();
+	testDrive();
 	testBand();
 	testLevel();
 	testPerCore();

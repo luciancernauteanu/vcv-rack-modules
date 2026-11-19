@@ -18,6 +18,8 @@ struct PanelText : widget::TransparentWidget {
 		/** While a core is in focus: this text instead (empty = same), tinted with the core's colour if `tint` */
 		std::string focusText;
 		bool tint;
+		/** Shown only while *showIf is true (null = always) */
+		const bool* showIf;
 	};
 	std::vector<Item> items;
 	/** The module's focus (-1 = ALL), or null (browser) */
@@ -30,13 +32,19 @@ struct PanelText : widget::TransparentWidget {
 	static NVGcolor gold() { return nvgRGB(0xd6, 0xa6, 0x4f); }
 
 	void add(Vec mmPos, const std::string& text, float mmSize, NVGcolor color, Face face = LABEL, float spacing = 0.1f) {
-		items.push_back({mmPos, text, mmSize, color, face, spacing, "", false});
+		items.push_back({mmPos, text, mmSize, color, face, spacing, "", false, nullptr});
+	}
+
+	/** A label shown only while `*flag` is true (e.g. SCALE while CUTOFF is quantized). */
+	void addIf(Vec mmPos, const std::string& text, float mmSize, NVGcolor color, const bool* flag, Face face = CAPTION,
+			float spacing = 0.2f) {
+		items.push_back({mmPos, text, mmSize, color, face, spacing, "", false, flag});
 	}
 
 	/** A label that changes while a core is in focus (e.g. MIX -> LEVEL), tinted with the core's colour. */
 	void addFocus(Vec mmPos, const std::string& text, const std::string& focusText, float mmSize, NVGcolor color,
 			Face face = LABEL, float spacing = 0.1f) {
-		items.push_back({mmPos, text, mmSize, color, face, spacing, focusText, true});
+		items.push_back({mmPos, text, mmSize, color, face, spacing, focusText, true, nullptr});
 	}
 
 	void draw(const DrawArgs& args) override {
@@ -48,6 +56,8 @@ struct PanelText : widget::TransparentWidget {
 		nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
 		int f = focus ? *focus : -1;
 		for (const Item& it : items) {
+			if (it.showIf && !*it.showIf)
+				continue;
 			const std::shared_ptr<window::Font>& font = fonts[it.face];
 			bool focused = f >= 0 && it.tint;
 			const std::string& str = (focused && !it.focusText.empty()) ? it.focusText : it.text;

@@ -95,10 +95,14 @@ struct Core {
 		ic1 = ic2 = lastV1 = 0.f;
 	}
 
-	/** Adds energy straight into the resonator (a ping): the ring that follows has about this amplitude in the LP
-	and HP outputs, whatever the frequency or Q. */
-	void excite(float amount) {
-		ic1 += amount;
+	/** Adds energy straight into the resonator (a ping): the ring that follows has about this amplitude, whatever the
+	frequency or Q. Where it goes decides how the ring starts in each output: energy in the band state (ic1) starts
+	LP and HP at zero but makes BP / notch jump; energy in the low state (ic2) does the opposite. `bpShare` (the
+	TYPE weight of BP + notch) splits it, so every output's ring starts from zero: no click, even on a hard strike or
+	on a core that is still ringing. */
+	void excite(float amount, float bpShare = 0.f) {
+		ic1 += amount * (1.f - bpShare);
+		ic2 += amount * bpShare;
 	}
 
 	/** Amplitude of the ringing (the two states are a quadrature pair at resonance) */

@@ -30,7 +30,7 @@ struct Halfband {
 
 /** Soft-clip drive: tanh with first-order antiderivative anti-aliasing (ADAA), run at 2x
 oversampling. Heavy drive adds harmonics without fold-back hash.
-DRIVE 0..1: input gain 1..3 (0..9.5 dB), a warm saturation rather than a fuzz. Output is scaled so a full-scale input stays near full
+DRIVE 0..1: input gain 1..12 (0..21.6 dB; Nur Prisma, wider than waveArtifact's 9.5 dB): warm at the start, rich at the top. Output is scaled so a full-scale input stays near full
 scale. The first quarter of the knob fades the drive in, so 0 is clean. The path is always
 oversampled (constant 31-sample latency), so turning DRIVE never jumps in time. */
 struct Drive {
@@ -67,7 +67,7 @@ struct Drive {
 	float process(float x, float drive, float bias = 0.f) {
 		const Halfband& hb = fir();
 		drive = std::min(std::max(drive, 0.f), 1.f);
-		float g = std::exp(drive * 1.098612289f); // ln(3)
+		float g = std::exp(drive * 2.48490665f); // ln(12)
 		// `bias` is a DC offset in input units; scaled by the gain and capped, so it tilts the clipping
 		// (even harmonics) without pushing one side flat. Normalized by the larger peak.
 		bias = std::min(bias * g, 0.8f);
@@ -110,10 +110,10 @@ struct WarmDrive {
 	float dcY = 0.f;
 
 	/** Bias at full drive, in input units (scaled by the drive gain inside Drive) */
-	static constexpr float BIAS = 0.2f;
+	static constexpr float BIAS = 0.3f;
 	static constexpr float DC_BLOCK = 0.9995f;
 	/** Level given back as DRIVE rises, so full drive is about as loud as drive 0 */
-	static constexpr float MAKEUP = 0.35f;
+	static constexpr float MAKEUP = 0.f;
 
 	void reset() {
 		drive.reset();
