@@ -108,6 +108,47 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
+- 2026-11-19: silence and CPU when nothing plays. ANALOG's noise floor (hiss) now follows activity: `hissGate`
+  (per block, 50 ms) = (input RMS + strongest ring) / 0.02, fully open while a core self-oscillates (so RES at the
+  top still starts singing on its own). Nothing connected at ANALOG 84 % / RES 85 % went from -73 dB to digital
+  silence. Idle skip: with no input, noise, hiss or ping, rings below -200 dB and no self-oscillation, the cores are
+  skipped (`coresIdle`, states cleared once) and restart from exactly zero; dispatch moved to `runCoresAny`.
+  Golden identical. CPU: idle 50 ns/sample (was ~107), playing unchanged. 107 offline checks.
+
+- 2026-11-19: SHAPE Bar removed (7 shapes; released values 0-4 unchanged, Bell = 5, Vowel = 6). Random's LED is
+  `RandomLed`: bigger, prism rainbow, centred, glows while Random is selected; click = select Random +
+  `rerollRandomShape` (`seedRandomShape(seed, glide = true)`: places glide to the new targets, 40 ms time constant).
+  104 offline checks.
+
+- 2026-11-19: an own CUTOFF is a detune from the core's *place* (`engine.place[i]`: CUTOFF + SHAPE / SPREAD offset),
+  kept by `readParams` (`cutoffOffset`, saved as `cutoffDetune`), so CUTOFF, SPREAD and SHAPE move every core (before:
+  owned cores sat at a fixed frequency and SHAPE did nothing once all four were owned). Menu: "All cores follow the
+  global knobs again". Focus probe: SHAPE Even -> Harmonic moves an owned core exactly with its place (0.900 oct).
+
+- 2026-11-19: new SHAPEs (enum appended: `SHAPE_BAR`, `SHAPE_BELL`, `SHAPE_VOWEL`) in `spreadOffsets`; Bar / Bell
+  exact at SPREAD 50% (2 s log2 ratio, like Harmonic); Vowel interpolates `VOWELS` (F1-F4, A E I O U) in log
+  frequency, offsets relative to 1 kHz. Just tuning (`EngineParams::justTuning`, menu, saved): `justOctaves` maps
+  semitones to 5-limit ratios (7/4 for Dominant 7) for SHAPE Scale and Chord. SHAPE shows 8 LEDs and its name
+  (`PanelText::addDynamic`, + JUST). Default (Even, equal) bit-identical. 103 offline checks. CPU unchanged.
+
+- 2026-11-19: DRIVE voicings and position. `Drive::voice` (Warm = the original code, untouched; Diode / Fold run
+  `processVoiced`: same 2x oversampled ADAA path with `curve` / `curveInt`). Diode: negative side tanh, positive side
+  8 tanh(u/8), no bias (H2 -10.6 dB at full vs -17.7 Warm); Fold: sin (H5 +1.6 dB). `WarmDrive::tone`: one-pole high
+  cut growing with the amount, Diode / Fold only. `EngineParams::drivePos`: PRE / POST (`postDrives`, on the wet
+  before the level compensation) / BOTH (70% each); the dry delay follows (31 or 62 samples) so MIX stays aligned.
+  A voicing / position change fades out 5 ms, switches, waits for the drive paths to fill, fades in (click-free).
+  Menu + saved in the patch; the DRIVE label shows the choice (`PanelText::addDynamic`) and is a control
+  (`DriveLabelButton`, over the label): click = next voicing, hold 0.5 s = next position (fires while held, in
+  `step()`), hover = underline + tooltip; right-click falls through to the module menu. The knob stays a plain knob. Defaults bit-identical
+  (6 golden scenarios). 96 offline checks. CPU: POST 300 ns, BOTH + Fold 367 ns (defaults 105).
+
+- 2026-11-19: level-dependent resonance (ANALOG). `Core::saturatedK` raises each core's damping with its own ringing
+  level, k (1 + RES_SAT x ANALOG x v1^2) (v1^2 capped at 16), like an OTA / ladder loop running into saturation.
+  It runs only in the SAT instantiation of `coresImpl` (`runCoresSat`, chosen when ANALOG > 0), so ANALOG 0 is
+  bit-identical to before (6 golden scenarios). Measured: quiet input linear (-0.42 dB between -66 and -54 dBFS),
+  loud input squashed 9.3 dB more than at ANALOG 0, a hard ping settles to -20 dB in 0.26 s (0.30 s at ANALOG 0),
+  self-oscillation bounded (0.56 = 2.8 V). 90 offline checks. CPU: 105 ns/sample at defaults (+10).
+
 - 2026-11-19: fixes from testing in Rack.
   - Ping clicks: `Core::excite(amount, bpShare)` puts the ping into the band state for LP / HP and into the low state
     for BP / notch (by TYPE weight), so every output's ring starts from zero: the onset is no steeper than the ring

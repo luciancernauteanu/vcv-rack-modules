@@ -8,7 +8,8 @@
 
 using namespace np::layout;
 
-static const char* const SHAPE_NAMES[NurPrisma::NUM_SHAPES] = {"Even", "Harmonic", "Scale", "Random", "Chord"};
+static const char* const SHAPE_NAMES[NurPrisma::NUM_SHAPES] = {"Even", "Harmonic", "Scale", "Random", "Chord", "Bell",
+	"Vowel"};
 
 NurPrisma::NurPrisma() {
 	config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -18,7 +19,7 @@ NurPrisma::NurPrisma() {
 	configParam(RES_PARAM, 0.f, 1.f, 0.35f, "Resonance", "%", 0.f, 100.f);
 	configParam(TYPE_PARAM, 0.f, 3.f, 0.f, "Type (LP > BP > HP > notch)");
 	configSwitch(SHAPE_PARAM, 0.f, NUM_SHAPES - 1, 0.f, "Spread shape",
-		{SHAPE_NAMES[0], SHAPE_NAMES[1], SHAPE_NAMES[2], SHAPE_NAMES[3], SHAPE_NAMES[4]});
+		{SHAPE_NAMES[0], SHAPE_NAMES[1], SHAPE_NAMES[2], SHAPE_NAMES[3], SHAPE_NAMES[4], SHAPE_NAMES[5], SHAPE_NAMES[6]});
 	configParam(STACK_PARAM, 0.f, 1.f, 0.f, "Stack (parallel > series)", "%", 0.f, 100.f);
 	configParam(DRIVE_PARAM, 0.f, 1.f, 0.f, "Drive", "%", 0.f, 100.f);
 	configParam(WIDTH_PARAM, 0.f, 1.f, 0.5f, "Stereo width", "%", 0.f, 100.f);
@@ -81,6 +82,9 @@ void NurPrisma::onReset(const ResetEvent& e) {
 	polySplit = true;
 	quantizeCutoff = false;
 	levelComp = np::LEVEL_FULL;
+	driveVoice = np::VOICE_WARM;
+	drivePos = np::DRIVE_PRE;
+	justTuning = false;
 	focus = -1;
 	for (int i = 0; i < NUM_CORES; i++) {
 		own[i].store(0);
@@ -161,7 +165,7 @@ void NurPrisma::rerollCharacter() {
 }
 
 void NurPrisma::rerollRandomShape() {
-	engine.seedRandomShape(random::u32());
+	engine.seedRandomShape(random::u32(), true);
 }
 
 json_t* NurPrisma::dataToJson() {
@@ -172,6 +176,9 @@ json_t* NurPrisma::dataToJson() {
 	json_object_set_new(root, "polySplit", json_boolean(polySplit));
 	json_object_set_new(root, "quantizeCutoff", json_boolean(quantizeCutoff));
 	json_object_set_new(root, "levelComp", json_integer(levelComp));
+	json_object_set_new(root, "driveVoice", json_integer(driveVoice));
+	json_object_set_new(root, "drivePos", json_integer(drivePos));
+	json_object_set_new(root, "justTuning", json_boolean(justTuning));
 	json_object_set_new(root, "focus", json_integer(focus));
 	json_t* ownJ = json_array();
 	for (int i = 0; i < NUM_CORES; i++)
@@ -180,7 +187,7 @@ json_t* NurPrisma::dataToJson() {
 	json_t* offJ = json_array();
 	for (int i = 0; i < NUM_CORES; i++)
 		json_array_append_new(offJ, std::isnan(cutoffOffset[i]) ? json_null() : json_real(cutoffOffset[i]));
-	json_object_set_new(root, "cutoffOffset", offJ);
+	json_object_set_new(root, "cutoffDetune", offJ);
 	// Seeds as doubles: json integers are signed, the seeds use all 32 bits
 	json_object_set_new(root, "characterSeed", json_real((double) engine.getCharacterSeed()));
 	json_object_set_new(root, "randomSeed", json_real((double) engine.getRandomSeed()));
@@ -202,6 +209,8 @@ void NurPrisma::dataFromJson(json_t* root) {
 	getInt("chord", 0, np::NUM_CHORDS - 1, chord);
 	getInt("pingMode", 0, np::NUM_PING_MODES - 1, pingMode);
 	getInt("levelComp", 0, np::NUM_LEVEL_COMPS - 1, levelComp);
+	getInt("driveVoice", 0, np::NUM_DRIVE_VOICES - 1, driveVoice);
+	getInt("drivePos", 0, np::NUM_DRIVE_POSITIONS - 1, drivePos);
 	getInt("focus", -1, NUM_CORES - 1, focus);
 	json_t* ownJ = json_object_get(root, "own");
 	for (int i = 0; i < NUM_CORES; i++) {
@@ -212,7 +221,7 @@ void NurPrisma::dataFromJson(json_t* root) {
 	}
 	// Offsets win over the (possibly pinned) saved CORE_CUTOFF values: the params are already loaded here, so mark
 	// them as written by us.
-	json_t* offJ = json_object_get(root, "cutoffOffset");
+	json_t* offJ = json_object_get(root, "cutoffDetune");
 	for (int i = 0; i < NUM_CORES; i++) {
 		json_t* o = offJ ? json_array_get(offJ, i) : nullptr;
 		cutoffOffset[i] = (o && json_is_number(o)) ? (float) json_number_value(o) : NAN;
@@ -220,6 +229,7 @@ void NurPrisma::dataFromJson(json_t* root) {
 	}
 	getBool("polySplit", polySplit);
 	getBool("quantizeCutoff", quantizeCutoff);
+	getBool("justTuning", justTuning);
 	json_t* c = json_object_get(root, "characterSeed");
 	if (c)
 		engine.seedCharacter((uint32_t) json_number_value(c));
@@ -230,21 +240,23 @@ void NurPrisma::dataFromJson(json_t* root) {
 
 void NurPrisma::readParams() {
 	np::EngineParams& p = engine.p;
-	// CUTOFF moves every core. A core with its own CUTOFF keeps its *offset* from CUTOFF (remembered apart from the
-	// value it plays at): it may pin at the end of the range while CUTOFF goes far, and comes back exactly to where
-	// it was set when CUTOFF returns. A change of the core's own value that we did not write (its knob in focus, a
-	// MIDI map, a loaded patch without offsets) sets a new offset.
+	// A core's own CUTOFF is a detune from its *place*: where CUTOFF, SPREAD and SHAPE put it (engine.place, knob
+	// units, last block). So CUTOFF, SPREAD and SHAPE move every core, and the per-core setting travels along. The
+	// detune is remembered apart from the value the core plays at, so a core pinned at an end of the range comes back
+	// exactly. A change of the core's own value that we did not write (its knob in focus, a MIDI map, a loaded patch)
+	// sets a new detune.
 	float cutoff = params[CUTOFF_PARAM].getValue();
 	for (int i = 0; i < NUM_CORES; i++) {
-		if (!(own[i].load(std::memory_order_relaxed) & OWN_CUTOFF)) {
+		if (!(own[i].load(std::memory_order_relaxed) & OWN_CUTOFF) || !engine.placeReady()) {
 			cutoffWritten[i] = NAN;
 			continue;
 		}
+		float place = engine.place[i];
 		Param& c = params[CORE_CUTOFF_PARAM + i];
 		float v = c.getValue();
 		if (std::isnan(cutoffOffset[i]) || std::isnan(cutoffWritten[i]) || v != cutoffWritten[i])
-			cutoffOffset[i] = v - cutoff;
-		float target = clamp(cutoff + cutoffOffset[i], 0.f, 1.f);
+			cutoffOffset[i] = v - place;
+		float target = clamp(place + cutoffOffset[i], 0.f, 1.f);
 		if (target != v)
 			c.setValue(target);
 		cutoffWritten[i] = target;
@@ -285,6 +297,9 @@ void NurPrisma::readParams() {
 	p.pingMode = pingMode;
 	p.quantizeCutoff = quantizeCutoff;
 	p.levelComp = levelComp;
+	p.driveVoice = driveVoice;
+	p.drivePos = drivePos;
+	p.justTuning = justTuning;
 
 	// CV: V/OCT and CUTOFF are 1 V/oct, RES / SPREAD / STACK 10 V = the whole knob. Poly = one channel per core.
 	Input& voct = inputs[VOCT_INPUT];
@@ -368,6 +383,169 @@ void NurPrisma::process(const ProcessArgs& args) {
 can be picked while its dot on the ring is hard to catch. Click a bullet: TYPE, RES, BAND, the SPREAD
 ring, WIDTH (-> PAN) and MIX (-> LEVEL) edit that core; click it again or ALL to go back. A ring around a bullet
 means that core has settings of its own. Right-click a bullet: follow the global knobs again, or reset the core. */
+/** SHAPE Random's LED: bigger, filled with the prism rainbow, glowing while Random is the shape. Click it: Random is
+selected and its places are re-rolled (they glide in over ~40 ms). Hover shows a tooltip. */
+struct RandomLed : widget::OpaqueWidget {
+	NurPrisma* module = nullptr;
+	ui::Tooltip* tooltip = nullptr;
+
+	bool selected() {
+		return module && (int) module->params[NurPrisma::SHAPE_PARAM].getValue() == np::SHAPE_RANDOM;
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS && module) {
+			module->params[NurPrisma::SHAPE_PARAM].setValue((float) np::SHAPE_RANDOM);
+			module->rerollRandomShape();
+			e.consume(this);
+		}
+	}
+
+	void onEnter(const EnterEvent& e) override {
+		if (!tooltip && module && settings::tooltips) {
+			tooltip = new ui::Tooltip;
+			tooltip->text = "Random spread\nClick: new random places";
+			APP->scene->addChild(tooltip);
+		}
+	}
+	void onLeave(const LeaveEvent& e) override {
+		removeTooltip();
+	}
+	void removeTooltip() {
+		if (tooltip) {
+			APP->scene->removeChild(tooltip);
+			delete tooltip;
+			tooltip = nullptr;
+		}
+	}
+	~RandomLed() {
+		removeTooltip();
+	}
+
+	void drawDisc(NVGcontext* vg, float alpha) {
+		Vec c = box.size.div(2.f);
+		float r = mm2px(1.5f);
+		const int SEG = 24;
+		for (int k = 0; k < SEG; k++) {
+			float a0 = (float) k / SEG * 2.f * (float) M_PI, a1 = (k + 1.05f) / SEG * 2.f * (float) M_PI;
+			nvgBeginPath(vg);
+			nvgMoveTo(vg, c.x, c.y);
+			nvgArc(vg, c.x, c.y, r, a0, a1, NVG_CW);
+			nvgClosePath(vg);
+			NVGcolor col = np::prismColor((float) k / SEG);
+			col.a = alpha;
+			nvgFillColor(vg, col);
+			nvgFill(vg);
+		}
+	}
+
+	void draw(const DrawArgs& args) override {
+		// Unlit: a dim rainbow, so it reads as "the special one" even when another shape is selected
+		drawDisc(args.vg, 0.55f);
+		if (APP->event->hoveredWidget == this) {
+			Vec c = box.size.div(2.f);
+			nvgBeginPath(args.vg);
+			nvgCircle(args.vg, c.x, c.y, mm2px(1.85f));
+			nvgStrokeColor(args.vg, nvgRGBA(0xe9, 0xe3, 0xd5, 0x90));
+			nvgStrokeWidth(args.vg, 1.f);
+			nvgStroke(args.vg);
+		}
+	}
+
+	void drawLayer(const DrawArgs& args, int layer) override {
+		if (layer == 1 && selected()) {
+			Vec c = box.size.div(2.f);
+			nvgBeginPath(args.vg);
+			nvgCircle(args.vg, c.x, c.y, mm2px(2.f));
+			nvgFillColor(args.vg, nvgRGBA(0xff, 0xff, 0xff, 0x28));
+			nvgFill(args.vg);
+			drawDisc(args.vg, 1.f);
+		}
+		Widget::drawLayer(args, layer);
+	}
+};
+
+/** The DRIVE label as a control: click = next voicing (Warm, Diode, Fold), hold 0.5 s = next position (before the
+cores, after, both; it fires while still held). Hover shows a faint underline and a tooltip with the current setting.
+Right-click is left alone (module menu, which has the same choices). The knob itself stays a plain knob, so turning
+and double-click reset never change the voicing. */
+struct DriveLabelButton : widget::OpaqueWidget {
+	NurPrisma* module = nullptr;
+	bool pressed = false;
+	bool longFired = false;
+	double pressTime = 0.0;
+	ui::Tooltip* tooltip = nullptr;
+	static constexpr double LONG_PRESS = 0.5;
+
+	static std::string describe(NurPrisma* m) {
+		static const char* const V[np::NUM_DRIVE_VOICES] = {"Warm", "Diode", "Fold"};
+		static const char* const P[np::NUM_DRIVE_POSITIONS] = {"before the cores", "after the cores", "both, 70% each"};
+		return string::f("Drive: %s, %s\nClick: next voicing (Warm, Diode, Fold)\nHold: next position (before, after, both)",
+			V[m->driveVoice], P[m->drivePos]);
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS && module) {
+			pressed = true;
+			longFired = false;
+			pressTime = system::getTime();
+			e.consume(this);
+		}
+	}
+
+	void onDragEnd(const DragEndEvent& e) override {
+		if (pressed && !longFired && module)
+			module->driveVoice = (module->driveVoice + 1) % np::NUM_DRIVE_VOICES;
+		pressed = false;
+	}
+
+	void step() override {
+		if (pressed && !longFired && module && system::getTime() - pressTime >= LONG_PRESS) {
+			module->drivePos = (module->drivePos + 1) % np::NUM_DRIVE_POSITIONS;
+			longFired = true;
+		}
+		if (tooltip && module)
+			tooltip->text = describe(module);
+		OpaqueWidget::step();
+	}
+
+	void onEnter(const EnterEvent& e) override {
+		if (!tooltip && module && settings::tooltips) {
+			tooltip = new ui::Tooltip;
+			tooltip->text = describe(module);
+			APP->scene->addChild(tooltip);
+		}
+	}
+
+	void onLeave(const LeaveEvent& e) override {
+		removeTooltip();
+	}
+
+	void removeTooltip() {
+		if (tooltip) {
+			APP->scene->removeChild(tooltip);
+			delete tooltip;
+			tooltip = nullptr;
+		}
+	}
+
+	~DriveLabelButton() {
+		removeTooltip();
+	}
+
+	void draw(const DrawArgs& args) override {
+		if (APP->event->hoveredWidget != this && !pressed)
+			return;
+		// A faint underline: this label can be clicked
+		nvgBeginPath(args.vg);
+		nvgMoveTo(args.vg, box.size.x * 0.15f, box.size.y - 1.f);
+		nvgLineTo(args.vg, box.size.x * 0.85f, box.size.y - 1.f);
+		nvgStrokeColor(args.vg, nvgRGBA(0xe9, 0xe3, 0xd5, pressed ? 0xc0 : 0x70));
+		nvgStrokeWidth(args.vg, 1.f);
+		nvgStroke(args.vg);
+	}
+};
+
 struct CoreSelector : widget::OpaqueWidget {
 	NurPrisma* module = nullptr;
 
@@ -477,6 +655,7 @@ struct NurPrismaWidget : app::ModuleWidget {
 	/** Controls that edit one core while it is in focus: [which][0 = global, 1..4 = core] */
 	enum { F_TYPE, F_RES, F_BAND, F_WIDTH, F_MIX, F_RING, F_CUTOFF, NUM_FOCUS };
 	app::ParamWidget* focusWidgets[NUM_FOCUS][1 + NurPrisma::NUM_CORES] = {};
+	DriveLabelButton* driveLabel = nullptr;
 
 	/** One global knob and four per-core twins at the same place; step() shows the one in focus. */
 	template <class TKnob>
@@ -543,13 +722,37 @@ struct NurPrismaWidget : app::ModuleWidget {
 		knob(createParamCentered<RoundSmallBlackKnob>(mm2px(Vec(STRIKE_X, TOP_Y)), module, NurPrisma::STRIKE_PARAM),
 			STRIKE_X, TOP_Y, KNOB_SMALL, "STRIKE", 2.1f);
 
-		// SHAPE: a button that steps through the five spacings, with one LED per spacing.
+		// SHAPE: a button that steps through the seven spacings, with one LED per spacing. Random's LED is the big
+		// rainbow one in the middle: click it for new random places.
 		addParam(createParamCentered<np::CycleButton>(mm2px(Vec(FILTER_CX, SHAPE_Y)), module, NurPrisma::SHAPE_PARAM));
-		for (int i = 0; i < NurPrisma::NUM_SHAPES; i++)
-			addChild(createLightCentered<SmallLight<WhiteLight>>(
-				mm2px(Vec(FILTER_CX + (i - 2.f) * SHAPE_LED_PITCH, SHAPE_Y + SHAPE_LED_DY)), module,
-				NurPrisma::SHAPE_LIGHT + i));
-		text->add(Vec(FILTER_CX, SHAPE_Y + SHAPE_LED_DY + 3.f), "SHAPE", 2.2f, cream, np::PanelText::LABEL, 0.1f);
+		for (int i = 0; i < NurPrisma::NUM_SHAPES; i++) {
+			// Random (index 3) in the middle; the others 3.2 / 5.6 / 8.0 mm out, clear of the bigger rainbow LED
+			int d = i - np::SHAPE_RANDOM;
+			float off = d == 0 ? 0.f : (d > 0 ? 1.f : -1.f) * (0.8f + std::abs(d) * SHAPE_LED_PITCH);
+			Vec at = mm2px(Vec(FILTER_CX + off, SHAPE_Y + SHAPE_LED_DY));
+			if (i == np::SHAPE_RANDOM) {
+				RandomLed* led = createWidget<RandomLed>(Vec(0, 0));
+				led->box.size = mm2px(Vec(4.f, 4.f));
+				led->box.pos = at.minus(led->box.size.div(2.f));
+				led->module = module;
+				addChild(led);
+				continue;
+			}
+			addChild(createLightCentered<SmallLight<WhiteLight>>(at, module, NurPrisma::SHAPE_LIGHT + i));
+		}
+		// The label names the shape (8 dots alone are hard to read); "SHAPE" in the module browser
+		if (module) {
+			NurPrisma* m = module;
+			text->addDynamic(Vec(FILTER_CX, SHAPE_Y + SHAPE_LED_DY + 3.f), [m]() {
+				static const char* const N[NurPrisma::NUM_SHAPES] = {"EVEN", "HARMONIC", "SCALE", "RANDOM", "CHORD", "BELL",
+					"VOWEL"};
+				int i = std::min(std::max((int) m->params[NurPrisma::SHAPE_PARAM].getValue(), 0), NurPrisma::NUM_SHAPES - 1);
+				bool tuned = m->justTuning && (i == 2 || i == 4);
+				return std::string(N[i]) + (tuned ? " JUST" : "");
+			}, 2.2f, cream);
+		}
+		else
+			text->add(Vec(FILTER_CX, SHAPE_Y + SHAPE_LED_DY + 3.f), "SHAPE", 2.2f, cream, np::PanelText::LABEL, 0.1f);
 
 		// Hero: the ring first, the CUTOFF knob on top.
 		np::PrismRing* ring = nullptr;
@@ -601,6 +804,21 @@ struct NurPrismaWidget : app::ModuleWidget {
 		static const char* const CHAR_LABELS[5] = {"DRIVE", "NOISE", "COLOR", "ANALOG", "DIGITAL"};
 		for (int i = 0; i < 5; i++) {
 			addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(CHAR_X[i], CHAR_Y)), module, CHAR_PARAMS[i]));
+			if (i == 0 && module) {
+				// DRIVE's label names its voicing and position: DRIVE / DIODE / FOLD, + POST (after the cores) or BOTH
+				NurPrisma* m = module;
+				text->addDynamic(Vec(CHAR_X[i], CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), [m]() {
+					static const char* const V[np::NUM_DRIVE_VOICES] = {"DRIVE", "DIODE", "FOLD"};
+					static const char* const P[np::NUM_DRIVE_POSITIONS] = {"", " POST", " BOTH"};
+					return std::string(V[m->driveVoice]) + P[m->drivePos];
+				}, 2.2f, cream);
+				DriveLabelButton* b = createWidget<DriveLabelButton>(
+					mm2px(Vec(CHAR_X[i] - 8.f, CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP - 1.8f)));
+				b->box.size = mm2px(Vec(16.f, 3.8f));
+				b->module = module;
+				driveLabel = b;
+				continue;
+			}
 			text->add(Vec(CHAR_X[i], CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), CHAR_LABELS[i], 2.2f, cream,
 				np::PanelText::LABEL, 0.1f);
 		}
@@ -631,6 +849,9 @@ struct NurPrismaWidget : app::ModuleWidget {
 
 		// Text last: on top of the panel, below nothing interactive (it is transparent to the mouse).
 		addChild(text);
+		// The clickable DRIVE label goes above the text (it must receive the clicks)
+		if (driveLabel)
+			addChild(driveLabel);
 	}
 
 	void appendContextMenu(ui::Menu* menu) override {
@@ -653,14 +874,25 @@ struct NurPrismaWidget : app::ModuleWidget {
 		menu->addChild(createIndexSubmenuItem("Chord (SHAPE Chord)", chords, [=]() { return m->chord; },
 			[=](int i) { m->chord = i; }));
 		menu->addChild(createBoolPtrMenuItem("Quantize CUTOFF to the scale (SCALE shows in the ring)", "", &m->quantizeCutoff));
+		menu->addChild(createIndexSubmenuItem("Chord and scale tuning", {"Equal (12-TET)", "Just (pure ratios)"},
+			[=]() { return m->justTuning ? 1 : 0; }, [=](int i) { m->justTuning = i == 1; }));
 		menu->addChild(createMenuItem("Re-roll Random shape", "", [=]() { m->rerollRandomShape(); }));
 		menu->addChild(new ui::MenuSeparator);
 		menu->addChild(createMenuLabel("Input and output"));
+		menu->addChild(createIndexSubmenuItem("Drive voicing", {"Warm (tanh)", "Diode (one-sided: even + odd)", "Fold (wavefolder)"},
+			[=]() { return m->driveVoice; }, [=](int i) { m->driveVoice = i; }));
+		menu->addChild(createIndexSubmenuItem("Drive position",
+			{"Before the cores", "After the cores (POST)", "Both, 70% each (BOTH)"}, [=]() { return m->drivePos; },
+			[=](int i) { m->drivePos = i; }));
 		menu->addChild(createIndexSubmenuItem("Level compensation",
 			{"Off (filters change the level)", "Gentle (+-6 dB)", "Full (keep the input's loudness)"},
 			[=]() { return m->levelComp; }, [=](int i) { m->levelComp = i; }));
 		menu->addChild(createBoolPtrMenuItem("Poly input: one voice per core", "", &m->polySplit));
 		menu->addChild(createMenuItem("Re-roll analog character", "", [=]() { m->rerollCharacter(); }));
+		menu->addChild(createMenuItem("All cores follow the global knobs again", "", [=]() {
+			for (int i = 0; i < NurPrisma::NUM_CORES; i++)
+				m->followGlobal(i);
+		}));
 	}
 };
 

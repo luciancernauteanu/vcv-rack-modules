@@ -23,6 +23,9 @@ static const float FB_GAIN = 1.12f;
 /** Feedback clip tanh(c v1) / c on the raw resonator state v1: the self-oscillation settles near 0.65 / c (~3 V) */
 static const float FB_CLIP = 1.f;
 static const float FB_HF_CORNER = 12000.f;
+/** Level-dependent resonance (ANALOG): damping factor 1 + RES_SAT * ANALOG * v1^2, v1^2 capped (keeps it bounded) */
+static const float RES_SAT = 0.6f;
+static const float RES_SAT_CAP = 16.f;
 static const float LOG2_20 = 4.321928f;
 static const float LOG2_1000 = 9.965784f;
 
@@ -108,6 +111,15 @@ struct Core {
 	/** Amplitude of the ringing (the two states are a quadrature pair at resonance) */
 	float ringLevel() const {
 		return 0.5f * std::sqrt(ic1 * ic1 + ic2 * ic2);
+	}
+
+	/** Level-dependent resonance (ANALOG): the damping grows with the core's own ringing level, k (1 + resSat v1^2),
+	like an OTA / ladder loop running into saturation: a loud input or a hard ping widens and softens the peak while
+	quiet signals ring freely (and a loud ring "blooms": it settles faster, then rings on). Kept out of process() and
+	used only by the SAT instantiation of the engine's core loop: an optional term inside the plain loop made the
+	compiler regroup its maths (cpu.md bit-identity trap). */
+	float saturatedK(float k, float resSat) const {
+		return k * (1.f + resSat * std::min(lastV1 * lastV1, RES_SAT_CAP));
 	}
 
 	/** One sample. `w` = TYPE weights; `lim` > 0 saturates the integrators above 40% of it (analog). */

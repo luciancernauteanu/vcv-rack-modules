@@ -4,7 +4,25 @@
 
 // Copied from waveArtifact (same author): the warm drive (tanh with ADAA at 2x oversampling). No Rack dependencies.
 
+#ifndef NP_NOINLINE
+#if defined(__GNUC__)
+#define NP_NOINLINE __attribute__((noinline))
+#else
+#define NP_NOINLINE
+#endif
+#endif
+
 namespace np {
+
+/** DRIVE voicings: Warm = symmetric tanh (the original); Diode = a single clipping diode: the negative side clips
+early, the positive side passes almost untouched (softly limited at 8x), so the waveform turns lopsided in time: strong
+even + odd harmonics; Fold = sine wavefolder (folds back over itself at high drive: gritty, rich, noisy). */
+enum DriveVoice {
+	VOICE_WARM,
+	VOICE_DIODE,
+	VOICE_FOLD,
+	NUM_DRIVE_VOICES
+};
 
 
 /** 63-tap halfband low-pass (Blackman-windowed sinc) at the 2x rate, for 2x oversampling. */
@@ -42,6 +60,8 @@ struct Drive {
 	float in[HIST] = {};
 	float up[Halfband::TAPS] = {};
 	float u1 = 0.f;
+	/** DriveVoice. Warm runs the original code exactly; the others go through processVoiced(). */
+	int voice = VOICE_WARM;
 
 	static float logCosh(float u) {
 		float a = std::fabs(u);
@@ -64,7 +84,67 @@ struct Drive {
 		return x + (sat - x) * blend;
 	}
 
+	/** Transfer curve of a voicing, and its antiderivative (F(0) = 0) for ADAA. */
+	static float curve(int v, float u) {
+		if (v == VOICE_DIODE)
+			return u >= 0.f ? 8.f * std::tanh(u * (1.f / 8.f)) : std::tanh(u);
+		return std::sin(u);
+	}
+	static float curveInt(int v, float u) {
+		if (v == VOICE_DIODE)
+			return u >= 0.f ? 64.f * logCosh(u * (1.f / 8.f)) : logCosh(u);
+		return 1.f - std::cos(u);
+	}
+
+	float shapeVoiced(float x, float g, float bias, float norm, float blend) {
+		float u0 = u1, u = g * x;
+		u1 = u;
+		if (blend <= 0.f)
+			return x;
+		float sat = (std::fabs(u - u0) > 1e-4f) ? (curveInt(voice, u + bias) - curveInt(voice, u0 + bias)) / (u - u0)
+												 : curve(voice, 0.5f * (u0 + u) + bias);
+		sat = (sat - curve(voice, bias)) * norm;
+		return x + (sat - x) * blend;
+	}
+
+	/** Diode and Fold: same 2x oversampled ADAA path as Warm, other curve. */
+	NP_NOINLINE float processVoiced(float x, float drive, float bias) {
+		const Halfband& hb = fir();
+		drive = std::min(std::max(drive, 0.f), 1.f);
+		float g = std::exp(drive * 2.48490665f); // ln(12)
+		// The diode's asymmetry is in its curve; a bias would push the signal away from the clipping side.
+		bias = (voice == VOICE_DIODE) ? 0.f : std::min(bias * g, 0.8f);
+		float norm = 1.f;
+		if (voice == VOICE_DIODE) {
+			float pos = curve(voice, g + bias) - curve(voice, bias);
+			float neg = curve(voice, bias) - curve(voice, -g + bias);
+			norm = 1.f / std::max(pos, neg);
+		}
+		float blend = std::min(1.f, 4.f * drive);
+		for (int i = HIST - 1; i > 0; i--)
+			in[i] = in[i - 1];
+		in[0] = x;
+		float sv[2];
+		for (int p = 0; p < 2; p++) {
+			float acc = 0.f;
+			for (int k = 0; 2 * k + p < Halfband::TAPS; k++)
+				acc += hb.h[2 * k + p] * in[k];
+			sv[p] = 2.f * acc;
+		}
+		for (int p = 0; p < 2; p++) {
+			for (int i = Halfband::TAPS - 1; i > 0; i--)
+				up[i] = up[i - 1];
+			up[0] = shapeVoiced(sv[p], g, bias, norm, blend);
+		}
+		float y = 0.f;
+		for (int i = 0; i < Halfband::TAPS; i++)
+			y += hb.h[i] * up[i];
+		return y;
+	}
+
 	float process(float x, float drive, float bias = 0.f) {
+		if (voice != VOICE_WARM)
+			return processVoiced(x, drive, bias);
 		const Halfband& hb = fir();
 		drive = std::min(std::max(drive, 0.f), 1.f);
 		float g = std::exp(drive * 2.48490665f); // ln(12)
@@ -115,9 +195,30 @@ struct WarmDrive {
 	/** Level given back as DRIVE rises, so full drive is about as loud as drive 0 */
 	static constexpr float MAKEUP = 0.f;
 
+	/** Tone (Diode / Fold): a one-pole high cut that comes in with the amount (20 kHz -> ~4 kHz Diode, ~2.4 kHz
+	Fold at full), the classic answer to the buzz of hard clipping. */
+	float sampleRate = 48000.f;
+	float toneLp = 0.f;
+	float toneCoef = 1.f;
+	float toneFor = -1.f;
+	int toneVoice = -1;
+
 	void reset() {
 		drive.reset();
 		dcX = dcY = 0.f;
+		toneLp = 0.f;
+	}
+
+	NP_NOINLINE float tone(float y, float amount) {
+		if (amount != toneFor || drive.voice != toneVoice) {
+			toneFor = amount;
+			toneVoice = drive.voice;
+			float fc = 20000.f * std::pow(drive.voice == VOICE_FOLD ? 0.12f : 0.2f, amount);
+			fc = std::min(fc, 0.45f * sampleRate);
+			toneCoef = 1.f - std::exp(-6.2831853f * fc / sampleRate);
+		}
+		toneLp += toneCoef * (y - toneLp);
+		return y + (toneLp - y) * amount;
 	}
 
 	float process(float x, float amount) {
@@ -127,6 +228,8 @@ struct WarmDrive {
 		dcX = y;
 		dcY = out;
 		out *= 1.f + MAKEUP * amount;
+		if (drive.voice != VOICE_WARM)
+			out = tone(out, amount);
 		return std::isfinite(out) ? out : 0.f;
 	}
 };
