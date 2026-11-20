@@ -37,8 +37,8 @@ NurPrisma::NurPrisma() {
 		"ANALOG or DIGITAL, as the switch says; each keeps its own value";
 	configSwitch(FEEL_SWITCH_PARAM, 0.f, 1.f, 0.f, "FEEL edits", {"Analog", "Digital"});
 	configParam(OUT_GAIN_PARAM, -12.f, 12.f, 0.f, "Output gain", " dB");
-	configParam(NOISE_FOLLOW_PARAM, 0.f, 1.f, 0.f, "Noise follows the ping / input", "%", 0.f, 100.f)->description =
-		"0: plain noise. 100%: noise only while a ping or the input sounds, with a short release";
+	configParam(NOISE_FOLLOW_PARAM, 0.f, 1.f, 1.f, "Noise tail", "%", 0.f, 100.f)->description =
+		"How long the noise lingers after a ping / the input: 0% = no tail (follows tightly), 100% = full tail (plain noise)";
 	static const char* const CORE_NAMES[NUM_CORES] = {"Red", "Yellow", "Green", "Violet"};
 	for (int i = 0; i < NUM_CORES; i++)
 		configParam(CORE_SPREAD_PARAM + i, -1.f, 2.f, 1.f, string::f("%s core spread (drag its dot on the ring)", CORE_NAMES[i]),
@@ -337,7 +337,7 @@ void NurPrisma::readParams() {
 	p.lpgSource = lpgSource;
 	p.noiseType = noiseType;
 	p.noiseFollow = noiseFollow;
-	p.noiseFollowAmt = params[NOISE_FOLLOW_PARAM].getValue();
+	p.noiseTail = params[NOISE_FOLLOW_PARAM].getValue();
 	p.levelWeight = levelWeight;
 	for (int i = 0; i < NUM_CORES; i++)
 		p.slope24[i] = coreSlope[i];
@@ -528,6 +528,45 @@ struct RandomLed : widget::OpaqueWidget {
 cores, after, both; it fires while still held). Hover shows a faint underline and a tooltip with the current setting.
 Right-click is left alone (module menu, which has the same choices). The knob itself stays a plain knob, so turning
 and double-click reset never change the voicing. */
+/** A mini vertical slider, the size of the FEEL switch (COLOR beside NOISE): drag up / down like a knob; the handle
+shows the value. */
+struct MiniSlider : app::SliderKnob {
+	MiniSlider() {
+		box.size = mm2px(Vec(np::layout::MINI_SLIDER_W, np::layout::MINI_SLIDER_H));
+	}
+
+	void draw(const DrawArgs& args) override {
+		engine::ParamQuantity* pq = getParamQuantity();
+		float v = pq ? pq->getScaledValue() : 0.3333f;
+		float w = box.size.x, h = box.size.y;
+		float rr = mm2px(0.8f);
+		// Track
+		nvgBeginPath(args.vg);
+		nvgRoundedRect(args.vg, 0.f, 0.f, w, h, rr);
+		nvgFillColor(args.vg, nvgRGB(0x16, 0x17, 0x1b));
+		nvgFill(args.vg);
+		nvgStrokeColor(args.vg, nvgRGB(0x3a, 0x3b, 0x42));
+		nvgStrokeWidth(args.vg, 1.f);
+		nvgStroke(args.vg);
+		// Groove
+		nvgBeginPath(args.vg);
+		nvgRect(args.vg, w / 2.f - 0.75f, mm2px(0.9f), 1.5f, h - mm2px(1.8f));
+		nvgFillColor(args.vg, nvgRGB(0x05, 0x05, 0x07));
+		nvgFill(args.vg);
+		// Handle
+		float hh = mm2px(2.3f), pad = mm2px(0.45f);
+		float y = pad + (1.f - v) * (h - hh - 2.f * pad);
+		nvgBeginPath(args.vg);
+		nvgRoundedRect(args.vg, pad, y, w - 2.f * pad, hh, mm2px(0.4f));
+		nvgFillColor(args.vg, nvgRGB(0xd8, 0xd3, 0xc6));
+		nvgFill(args.vg);
+		nvgBeginPath(args.vg);
+		nvgRect(args.vg, pad + mm2px(0.5f), y + hh / 2.f - 0.5f, w - 2.f * pad - mm2px(1.f), 1.f);
+		nvgFillColor(args.vg, nvgRGB(0x55, 0x52, 0x4a));
+		nvgFill(args.vg);
+	}
+};
+
 /** FEEL: the knob edits ANALOG or DIGITAL (the switch beside it). Its pointer shows the one being edited; a small
 coloured dot on its rim shows the other one's value (amber = ANALOG, cyan = DIGITAL). The tooltip names both. */
 struct FeelKnob : RoundBlackKnob {
@@ -566,9 +605,9 @@ struct FeelKnob : RoundBlackKnob {
 	}
 };
 
-/** NOISE follows: the amount slider and what it follows (the module menu and the NOISE label's long press) */
+/** NOISE tail: the slider and what the noise follows (the module menu and the NOISE label's long press) */
 static void addNoiseFollowItems(ui::Menu* menu, NurPrisma* m) {
-	menu->addChild(createMenuLabel("Noise follows the ping / input (0 = plain noise)"));
+	menu->addChild(createMenuLabel("Noise tail: 0% = no tail (follows tightly), 100% = plain noise"));
 	ui::Slider* amt = new ui::Slider;
 	amt->quantity = m->getParamQuantity(NurPrisma::NOISE_FOLLOW_PARAM);
 	amt->box.size.x = 220.f;
@@ -577,7 +616,7 @@ static void addNoiseFollowItems(ui::Menu* menu, NurPrisma* m) {
 		[=]() { return m->noiseFollow - 1; }, [=](int i) { m->noiseFollow = i + 1; }));
 }
 
-/** The NOISE label: hold it (0.5 s) for the "noise follows" slider. NOISE ~ shows while the noise follows. */
+/** The NOISE label: hold it (0.5 s) for the noise tail slider. NOISE ~ shows while the noise follows (tail < 100%). */
 struct NoiseLabelButton : widget::OpaqueWidget {
 	NurPrisma* module = nullptr;
 	bool pressed = false;
@@ -613,7 +652,7 @@ struct NoiseLabelButton : widget::OpaqueWidget {
 	void onEnter(const EnterEvent& e) override {
 		if (!tooltip && module && settings::tooltips) {
 			tooltip = new ui::Tooltip;
-			tooltip->text = "Noise\nHold: how much the noise follows the ping / input";
+			tooltip->text = "Noise\nHold: the noise tail (how long it lingers after a ping / the input)";
 			APP->scene->addChild(tooltip);
 		}
 	}
@@ -989,12 +1028,15 @@ struct NurPrismaWidget : app::ModuleWidget {
 		selector->module = module;
 		addChild(selector);
 
-		// NOISE, COLOR, FEEL (+ switch), GAIN, DRIVE
-		enum { CH_NOISE, CH_COLOR, CH_FEEL, CH_GAIN, CH_DRIVE };
-		static const int CHAR_PARAMS[5] = {NurPrisma::NOISE_PARAM, NurPrisma::COLOR_PARAM, NurPrisma::FEEL_PARAM,
-			NurPrisma::OUT_GAIN_PARAM, NurPrisma::DRIVE_PARAM};
-		static const char* const CHAR_LABELS[5] = {"NOISE", "COLOR", "FEEL", "GAIN", "DRIVE"};
-		for (int i = 0; i < 5; i++) {
+		// FEEL (+ switch), NOISE (+ COLOR mini slider), DRIVE, GAIN
+		enum { CH_FEEL, CH_NOISE, CH_DRIVE, CH_GAIN };
+		static const int CHAR_PARAMS[4] = {NurPrisma::FEEL_PARAM, NurPrisma::NOISE_PARAM, NurPrisma::DRIVE_PARAM,
+			NurPrisma::OUT_GAIN_PARAM};
+		static const char* const CHAR_LABELS[4] = {"FEEL", "NOISE", "DRIVE", "GAIN"};
+		addParam(createParamCentered<MiniSlider>(mm2px(Vec(COLOR_SLIDER_X, CHAR_Y)), module, NurPrisma::COLOR_PARAM));
+		text->add(Vec(COLOR_SLIDER_X, CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), "COLOR", 1.8f, grey,
+			np::PanelText::CAPTION, 0.1f);
+		for (int i = 0; i < 4; i++) {
 			if (i == CH_FEEL) {
 				FeelKnob* fk = createParamCentered<FeelKnob>(mm2px(Vec(CHAR_X[i], CHAR_Y)), module, CHAR_PARAMS[i]);
 				fk->nmodule = module;
@@ -1032,7 +1074,8 @@ struct NurPrismaWidget : app::ModuleWidget {
 				// NOISE's label: NOISE ~ while the noise follows the ping / input; hold it for the amount slider
 				NurPrisma* m = module;
 				text->addDynamic(Vec(CHAR_X[i], CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), [m]() {
-					return std::string(m->params[NurPrisma::NOISE_FOLLOW_PARAM].getValue() > 0.f ? "NOISE ~" : "NOISE");
+					return std::string(m->params[NurPrisma::NOISE_FOLLOW_PARAM].getValue() < np::PrismaEngine::NOISE_TAIL_PLAIN
+						? "NOISE ~" : "NOISE");
 				}, 2.2f, cream);
 				NoiseLabelButton* b = createWidget<NoiseLabelButton>(
 					mm2px(Vec(CHAR_X[i] - 7.f, CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP - 1.8f)));

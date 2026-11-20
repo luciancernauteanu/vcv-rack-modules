@@ -64,12 +64,15 @@ static const float SIDE_Y2 = 67.f;
 static const float CHAR_Y = 87.f;
 /** Gap between a character knob's edge and its label (tighter than LABEL_GAP: the CV jacks are close) */
 static const float CHAR_LABEL_GAP = 2.2f;
-/** NOISE, COLOR, FEEL (with its ANALOG / DIGITAL switch), GAIN, DRIVE */
-static const float CHAR_X[5] = {11.72f, 28.72f, 43.2f, 62.72f, 79.72f};
-/** FEEL's switch, right of the FEEL knob */
-static const float FEEL_SWITCH_X = 51.7f;
-/** FEEL's label is centred under the knob and its switch */
-static const float FEEL_LABEL_X = 47.45f;
+/** FEEL (+ ANALOG / DIGITAL switch), NOISE (+ COLOR mini slider), DRIVE, GAIN */
+static const float CHAR_X[4] = {9.5f, 32.5f, 60.5f, 79.5f};
+/** FEEL's switch, right of the FEEL knob; FEEL's label is centred under the knob and its switch */
+static const float FEEL_SWITCH_X = 18.f;
+static const float FEEL_LABEL_X = 13.75f;
+/** COLOR: a mini slider right of the NOISE knob (the size of the FEEL switch) */
+static const float COLOR_SLIDER_X = 41.f;
+static const float MINI_SLIDER_W = 4.7f;
+static const float MINI_SLIDER_H = 8.f;
 
 /** Jack rows */
 static const float CV_Y = 100.f;

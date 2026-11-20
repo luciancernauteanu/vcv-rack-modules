@@ -108,6 +108,26 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
+- 2026-11-20: LPG input source follows transients. `lpgEnv` is now fed in process() from the clean input (with the
+  noise-tail follower, before DRIVE and NOISE; it used to read each core's input after the noise, so NOISE held the gate
+  open) and mapped in dB: t = x^2, x = clamp((dBV + 40) / 46) (was min(1, sqrt(10 env)): fully open above 0.5 V). The
+  per-sample level update left the core loop (LPG instantiation). Drum hits (5 V, 80 ms decay, fastest release): gate
+  0.96 of no gate just after, 0.38 at 200-300 ms; noise alone keeps it shut. 152 offline checks.
+
+- 2026-11-20: NOISE_FOLLOW_PARAM is now the **noise tail** (default 100% = plain noise; `EngineParams::noiseTail`).
+  Below `NOISE_TAIL_PLAIN` (0.999) the noise gain is max(ping envelope, input level in dB), both released with
+  tau = 10 ms x 200^tail (`followDecay` per sample for the input, `blockDecay` for the ping), so 0% = no tail and
+  higher = a longer tail. Replaces the amount / x^3 curve and the ring-rate blend. Saved values change meaning (old
+  amount 100% = new tail 100% = plain). Tests: ping noise 100-300 ms after, tail 0 vs 50%: 0.0005 vs 0.022; input
+  noise after it stops, tail 0 vs 60%: 0.001 vs 0.080. 150 offline checks.
+
+- 2026-11-20: noise follow at 100% releases in 10 ms (rate 100 /s, was 40 ms): with fast clocked pings the 40 ms bursts
+  plus the resonance tail sounded like constant noise. Measured (user's patch, RES 0.95, pings every 0.5 s): noise left
+  100-300 ms after a ping 0.073 -> 0.035 (plain 0.51). At RES 1.0 a burst only shifts the phase of the self-oscillation
+  (a difference of 0.1 that is not heard as noise; -60 dB of plain noise gives 0.002). Panel row: FEEL + switch, NOISE +
+  COLOR `MiniSlider` (SliderKnob drawn with nanovg, the size of the CKSS), DRIVE, GAIN (`CHAR_X[4]`, `COLOR_SLIDER_X`).
+  V/OCT and CUTOFF CV are summed into `pitchCv` (identical inputs today). 149 offline checks.
+
 - 2026-11-20: panel row is now NOISE, COLOR, FEEL (+ switch), GAIN, DRIVE (`CHAR_X`, `FEEL_SWITCH_X`, `FEEL_LABEL_X` in
   Layout.hpp). FEEL: `FEEL_PARAM` + `FEEL_SWITCH_PARAM` (CKSS, 0 = analog, down); `NurPrisma::syncFeel()` once per block:
   a switch change loads the knob from ANALOG_PARAM / DIGITAL_PARAM, a knob change writes into the selected one, so each

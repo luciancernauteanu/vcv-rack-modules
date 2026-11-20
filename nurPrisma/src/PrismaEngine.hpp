@@ -136,7 +136,7 @@ struct EngineParams {
 	/** NOISE follows what: 1 = each core's ping, 2 = the input level, 3 = ping or input */
 	int noiseFollow = 3;
 	/** How much NOISE follows (0 = plain noise, no envelope; 1 = only while a ping / the input sounds, short release) */
-	float noiseFollowAmt = 0.f;
+	float noiseTail = 1.f;
 	/** NOISE type: 0 = coloured (white, pink, brown, crackle), 1 = digital shift register */
 	int noiseType = 0;
 	/** Level compensation detector: 0 = flat RMS, 1 = ear (weighted like a loudness meter) */
@@ -302,6 +302,8 @@ struct EngineOutput {
 class PrismaEngine {
 public:
 	static const int BLOCK = 16;
+	/** NOISE tail at or above this = plain noise (no envelope) */
+	static constexpr float NOISE_TAIL_PLAIN = 0.999f;
 
 	PrismaEngine() {
 		shiftNoise[1].reg = 0x1A2B3u;
@@ -325,7 +327,7 @@ public:
 		randomGlide = 1.f - std::exp(-(float) BLOCK / (0.04f * sr));
 		hissGateCoef = 1.f - std::exp(-(float) BLOCK / (0.05f * sr));
 		lpgEnvDecay = std::exp(-1.f / (0.03f * sr));
-		followDecay = std::exp(-1.f / (0.03f * sr));
+
 		outGainCoef = 1.f - std::exp(-1.f / (0.005f * sr));
 		for (int c = 0; c < 2; c++) {
 			weightIn[c].setSampleRate(sr);
@@ -513,10 +515,16 @@ public:
 		// Inputs per core, through DRIVE
 		float x[2][NUM_CORES];
 		const float* in[2] = {inL, inR};
-		if (p.noiseFollowAmt > 0.f && p.noiseFollow >= 2)
+		// Input level per core (the clean input: before DRIVE and NOISE) for the noise tail and the LPG's input source
+		bool followNoise = p.noiseTail < NOISE_TAIL_PLAIN && p.noiseFollow >= 2;
+		bool followLpg = (lpgOn || p.lpg > 0.f) && p.lpgSource != 0;
+		if (followNoise || followLpg)
 			for (int i = 0; i < NUM_CORES; i++) {
 				float a = perCore ? std::max(std::fabs(inL[i]), std::fabs(inR[i])) : std::max(std::fabs(inL[0]), std::fabs(inR[0]));
-				followIn[i] = std::max(a, followIn[i] * followDecay);
+				if (followNoise)
+					followIn[i] = std::max(a, followIn[i] * followDecay);
+				if (followLpg)
+					lpgEnv[i] = std::max(a, lpgEnv[i] * lpgEnvDecay);
 			}
 		float noiseLR[2] = {noiseL, noiseR};
 		noiseNow[0] = noiseL;
@@ -1028,8 +1036,14 @@ private:
 				float t = 0.f;
 				if (usePing && lpgPulse[i] > 0)
 					t = lpgVel[i];
-				if (useEnv)
-					t = std::max(t, std::min(1.f, std::sqrt(lpgEnv[i] * 10.f)));
+				if (useEnv) {
+					// The input's level in dB (lpgEnv is the peak at 0.2 x volts): -40 dBV shut, +6 dBV (2 V) open, squared
+					// (like a vactrol's LED drive), so the gate opens on a hit and closes down its decay (a linear map was
+					// fully open above 0.5 V: no transients)
+					float db = 20.f * std::log10(lpgEnv[i] * 5.f + 1e-6f);
+					float xd = clamp01((db + 40.f) / 46.f);
+					t = std::max(t, xd * xd);
+				}
 				lpgPulse[i] = std::max(0, lpgPulse[i] - BLOCK);
 				float v = lpgV[i];
 				if (t > v)
@@ -1058,23 +1072,22 @@ private:
 				lpgLp[0][i] = lpgLp[1][i] = 0.f;
 			}
 		}
-		// NOISE follows (amount f): the core's noise gain is 1 - f + f env, env = its ping envelope and / or the input
-		// level, smoothed over ~1 ms. f = 0 is plain noise; f = 1 is noise only while a ping / the input sounds.
-		// The ping envelope is set by the ping (velocity) and released between half the core's ring rate (low amounts:
-		// a tail that blooms in the resonance) and 40 ms (full amount: tight, short). It is not read from the core's
-		// state, which the noise itself excites (following the state latched the noise on at 10 V).
+		// NOISE tail (t): the core's noise follows its ping envelope and / or the input level, released with a time
+		// constant of 10 ms x 200^t (0% = no tail, tight; 50% ~ 140 ms; 99% ~ 1.9 s); 100% = full tail = plain noise.
+		// The ping envelope is set by the ping (velocity). It is not read from the core's state, which the noise itself
+		// excites (following the state latched the noise on at 10 V).
 		float followMax = 0.f;
-		// Reversed exponential: the slider's lower part barely changes the noise, the top gates it (x^3 of the travel)
-		float fAmt = clamp01(p.noiseFollowAmt);
-		fAmt = fAmt * fAmt * fAmt;
+		float tail = clamp01(p.noiseTail);
+		bool following = tail < NOISE_TAIL_PLAIN;
+		float tau = 0.01f * std::pow(200.f, tail);
+		followDecay = std::exp(-1.f / (tau * sampleRate));
+		float blockDecay = std::exp(-(float) BLOCK / (tau * sampleRate));
 		for (int i = 0; i < NUM_CORES; i++) {
 			float target = 1.f;
-			if (fAmt > 0.f) {
+			if (following) {
 				float gp = 0.f;
 				if (p.noiseFollow & 1) {
-					float ringRate = 0.5f * 3.14159265f * std::exp2(oct[i]) * std::max(kNow[0][i], 0.002f);
-					float rate = (1.f - fAmt) * ringRate + fAmt * 25.f; // 1 / s (25 = 40 ms)
-					pingEnv[i] *= std::exp(-rate * BLOCK / sampleRate);
+					pingEnv[i] *= blockDecay;
 					if (pingEnv[i] < 1e-4f)
 						pingEnv[i] = 0.f;
 					gp = pingEnv[i];
@@ -1086,7 +1099,7 @@ private:
 					float db = 20.f * std::log10(followIn[i] * 5.f + 1e-6f);
 					gi = clamp01((db + 40.f) / 30.f);
 				}
-				target = 1.f - fAmt + fAmt * std::max(gp, gi);
+				target = std::max(gp, gi);
 			}
 			followGain[i] += (target - followGain[i]) * 0.3f;
 			if (target == 0.f && followGain[i] < 1e-4f)
@@ -1189,10 +1202,8 @@ private:
 		float m = stackNow;
 		float ycore[2][NUM_CORES];
 		if (LPG) {
-			// Each core's input level (for the gate's input source) and the gate's gain / cutoff, interpolated
+			// The gate's gain / cutoff, interpolated (its input level is followed in process(), before DRIVE and NOISE)
 			for (int i = 0; i < NUM_CORES; i++) {
-				float a = 0.5f * (std::fabs(x[0][i]) + std::fabs(x[1][i]));
-				lpgEnv[i] = std::max(a, lpgEnv[i] * lpgEnvDecay);
 				lpgGainNow[i] += lpgGainStep[i];
 				lpgCoefNow[i] += lpgCoefStep[i];
 			}

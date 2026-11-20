@@ -1135,6 +1135,51 @@ static void testLpg() {
 		check(before == 0.0 && during > 0.1 && after < 0.003, "lpg: input opens the gate and it closes after",
 			"%.3f open, %.5f closed", during, after);
 	}
+	// The gate follows input transients: drum-like hits (5 V, 80 ms decay) open it fully, and it closes down each
+	// decay (level in dB); NOISE alone does not open it (the input is read before NOISE and DRIVE)
+	{
+		auto hits = [](float lpg, double* early, double* late) {
+			Rig r;
+			r.e.p.cutoff = cutoffKnob(2000.f);
+			r.e.p.spread = 0.f;
+			r.e.p.res = 0.2f;
+			r.e.p.lpg = lpg;
+			r.e.p.lpgDecay = 0.f; // the fastest release (40 ms): a slower one closes after the hit's own decay
+			r.e.p.lpgSource = 1;
+			r.e.p.levelComp = LEVEL_OFF;
+			*early = *late = 0.0;
+			for (int n = 0; n < 3 * 48000; n++) {
+				int k = n % 24000;
+				float x = (float) (std::exp(-k / (0.08 * SR)) * std::sin(2.0 * M_PI * 200.0 * k / SR));
+				r.step(x, x);
+				if (n < 48000)
+					continue;
+				double a = std::fabs(r.o.l);
+				if (k > 480 && k < 1440)
+					*early = std::max(*early, a);
+				else if (k > 9600 && k < 14400)
+					*late = std::max(*late, a);
+			}
+		};
+		double e0, l0, e1, l1;
+		hits(0.f, &e0, &l0);
+		hits(1.f, &e1, &l1);
+		double earlyRatio = e1 / e0, lateRatio = l1 / l0;
+		std::printf("     gate on hits: 10-30 ms after a hit %.2f of no gate, 200-300 ms after %.2f\n", earlyRatio, lateRatio);
+		check(earlyRatio > 0.7 && lateRatio < 0.6 * earlyRatio, "lpg: the gate follows input transients (open on the hit, closing down the decay)",
+			"%.2f early / %.2f late", earlyRatio, lateRatio);
+		Rig r;
+		r.e.p.lpg = 1.f;
+		r.e.p.lpgSource = 1;
+		r.e.p.noise = 0.7f;
+		double peak = 0.0;
+		for (int n = 0; n < 48000; n++) {
+			r.step();
+			if (n > 4800)
+				peak = std::max(peak, (double) std::fabs(r.o.l));
+		}
+		check(peak < 0.01, "lpg: NOISE alone does not open the input gate", "%.5f", peak);
+	}
 
 	// The level compensation must not boost a closed gate
 	{
@@ -1617,7 +1662,7 @@ static void testNoiseFollowAndGain() {
 		Rig r;
 		r.e.p.noise = noise;
 		r.e.p.noiseFollow = 1;
-		r.e.p.noiseFollowAmt = follow;
+		r.e.p.noiseTail = 1.f - follow;
 		r.e.p.cutoff = cutoffKnob(800.f);
 		r.e.p.spread = 0.f;
 		r.e.p.res = 0.8f;
@@ -1645,21 +1690,47 @@ static void testNoiseFollowAndGain() {
 	double alwaysAfter = diffRms(always, clean, 12000 + 4 * 48000, 12000 + len);
 	std::printf("     noise following the ping (rms vs the clean ping): before %.6f, during %.4f, 4 s later %.6f (always on: %.4f)\n",
 		before, during, after, alwaysAfter);
-	check(before < 0.01 * alwaysAfter && during > 0.1 * alwaysAfter && after < 0.01 * alwaysAfter,
-		"noise follows the ping (silent before, with the ring, gone after)", "%.4f during / %.6f after", during, after);
-	// Reversed exponential: at 50% of the slider only 12.5% follows, so 87.5% of the noise stays between pings; at
-	// 100% the noise is gone between pings (only the ping's own breath is left)
-	double halfAfter = diffRms(half, clean, 12000 + 4 * 48000, 12000 + len);
-	double fullAfter = diffRms(follow, clean, 12000 + 4 * 48000, 12000 + len);
-	check(std::fabs(halfAfter / alwaysAfter - 0.875) < 0.05 && fullAfter < 0.01 * alwaysAfter,
-		"noise follow is reversed exponential (50% keeps 87.5%, 100% keeps ~0 between pings)",
-		"%.3f at 50%%, %.4f at 100%%", halfAfter / alwaysAfter, fullAfter / alwaysAfter);
+	// (at 100% a ping gets a short breath of noise, 10 ms: present, but well under the plain noise)
+	check(before < 0.01 * alwaysAfter && during > 0.03 * alwaysAfter && during < 0.3 * alwaysAfter
+		&& after < 0.01 * alwaysAfter,
+		"noise follows the ping (silent before, a small breath with the ring, gone after)", "%.4f during / %.6f after",
+		during, after);
+	// NOISE tail on a ping: 0% = no tail (gone 100-300 ms after the ping), 50% (~140 ms) lingers there; both gone 4 s on
+	double tail0 = diffRms(follow, clean, 12000 + 4800, 12000 + 14400);
+	double tail50 = diffRms(half, clean, 12000 + 4800, 12000 + 14400);
+	double tail50After = diffRms(half, clean, 12000 + 4 * 48000, 12000 + len);
+	std::printf("     ping noise 100-300 ms after: tail 0%% %.4f, tail 50%% %.4f (plain %.4f)\n", tail0, tail50, alwaysAfter);
+	check(tail50 > 3.0 * tail0 && tail50 < alwaysAfter && tail50After < 0.01 * alwaysAfter,
+		"noise tail: 50% lingers after a ping, 0% does not, both end", "%.4f vs %.4f", tail50, tail0);
+	// NOISE tail on the input: the noise lingers after the input stops, longer with more tail
+	{
+		auto inRun = [](float noise, float tail) {
+			Rig r;
+			r.e.p.noise = noise;
+			r.e.p.noiseFollow = 2;
+			r.e.p.noiseTail = tail;
+			r.e.p.cutoff = cutoffKnob(800.f);
+			r.e.p.res = 0.5f;
+			std::vector<float> y;
+			for (int n = 0; n < 2 * 48000; n++) {
+				float x = n < 48000 ? 0.2f * (float) std::sin(2.0 * M_PI * 200.0 * n / SR) : 0.f;
+				r.step(x, x);
+				y.push_back(r.o.l);
+			}
+			return y;
+		};
+		std::vector<float> c0 = inRun(0.f, 0.f), n0 = inRun(0.7f, 0.f), c6 = inRun(0.f, 0.6f), n6 = inRun(0.7f, 0.6f);
+		double after0 = diffRms(n0, c0, 48000 + 4800, 48000 + 14400), after6 = diffRms(n6, c6, 48000 + 4800, 48000 + 14400);
+		std::printf("     input noise 100-300 ms after the input stops: tail 0%% %.4f, tail 60%% %.4f\n", after0, after6);
+		check(after6 > 5.0 * after0 && after0 < 0.005, "noise tail: 60% lingers after the input stops, 0% does not",
+			"%.4f vs %.4f", after6, after0);
+	}
 	// NOISE follows the input: noise only while there is input
 	{
 		Rig r;
 		r.e.p.noise = 0.7f;
 		r.e.p.noiseFollow = 2;
-		r.e.p.noiseFollowAmt = 1.f;
+		r.e.p.noiseTail = 0.f;
 		r.e.p.cutoff = cutoffKnob(800.f);
 		r.e.p.res = 0.5f;
 		double quiet = 0.0, loud = 0.0, none = 0.0;
@@ -1683,7 +1754,7 @@ static void testNoiseFollowAndGain() {
 			Rig r;
 			r.e.p.noise = noise;
 			r.e.p.noiseFollow = 2;
-			r.e.p.noiseFollowAmt = amt;
+			r.e.p.noiseTail = 1.f - amt;
 			r.e.p.cutoff = cutoffKnob(800.f);
 			r.e.p.res = 0.5f;
 			std::vector<float> y;
