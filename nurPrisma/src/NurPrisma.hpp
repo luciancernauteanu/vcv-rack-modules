@@ -44,6 +44,17 @@ struct NurPrisma : engine::Module {
 		ENUMS(CORE_PAN_PARAM, 4),
 		/** Per-core CUTOFF (the centre knob while the core is in focus) */
 		ENUMS(CORE_CUTOFF_PARAM, 4),
+		/** Low-pass gate: depth (0 = off) and release time; set from the right-click menu */
+		LPG_PARAM,
+		LPG_DECAY_PARAM,
+		/** How much NOISE follows the ping / input (long-press the NOISE label) */
+		NOISE_FOLLOW_PARAM,
+		/** FEEL: one knob for ANALOG and DIGITAL; the switch picks which one it edits (each keeps its own value in
+		ANALOG_PARAM / DIGITAL_PARAM, which the engine reads) */
+		FEEL_PARAM,
+		FEEL_SWITCH_PARAM,
+		/** Output gain, -12 .. +12 dB */
+		OUT_GAIN_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -70,14 +81,14 @@ struct NurPrisma : engine::Module {
 		OUTPUTS_LEN
 	};
 	enum LightId {
-		ENUMS(SHAPE_LIGHT, 5),
+		ENUMS(SHAPE_LIGHT, 7),
 		// Reserved for MOTION
 		ENUMS(SWEEP_SHAPE_LIGHT, 3),
 		LIGHTS_LEN
 	};
 
 	static const int NUM_CORES = 4;
-	static const int NUM_SHAPES = 5;
+	static const int NUM_SHAPES = 7;
 
 	/** Live core frequencies for the prism ring, 0..1 = 20 Hz..20 kHz on a log scale (UI reads, audio writes) */
 	std::atomic<float> corePos[NUM_CORES];
@@ -94,6 +105,23 @@ struct NurPrisma : engine::Module {
 	bool quantizeCutoff = false;
 	/** np::LevelComp: Off, Gentle, Full */
 	int levelComp = np::LEVEL_FULL;
+	/** np::DriveVoice (Warm, Diode, Fold) and np::DrivePosition (before / after the cores / both) */
+	int driveVoice = np::VOICE_WARM;
+	int drivePos = np::DRIVE_PRE;
+	/** SHAPE Chord / Scale in just intonation */
+	bool justTuning = false;
+	/** Low-pass gate source: 0 = ping, 1 = input level, 2 = both */
+	int lpgSource = 2;
+	/** 24 dB slope per core (right-click a core's bullet) */
+	bool coreSlope[NUM_CORES] = {};
+	/** NOISE follows what: 1 = ping, 2 = input level, 3 = ping or input (the amount is NOISE_FOLLOW_PARAM) */
+	int noiseFollow = 3;
+	/** NOISE type: 0 = colours, 1 = digital shift register */
+	int noiseType = 0;
+	/** Level compensation detector: 0 = flat RMS, 1 = ear (loudness-weighted) */
+	int levelWeight = 1;
+	/** For the panel tag: the gate is on */
+	bool lpgFlag = false;
 
 	/** Which core the knobs edit: -1 = ALL (UI state, saved in the patch) */
 	int focus = -1;
@@ -109,13 +137,18 @@ struct NurPrisma : engine::Module {
 	dsp::SchmittTrigger pingTrigger[16];
 	/** Knobs and CV are read every BLOCK samples */
 	int paramCounter = 0;
-	/** Per core with its own CUTOFF: its offset from CUTOFF (knob units, kept even while the core is pinned at an
-	end of the range; saved in the patch), and the value we last wrote to its CORE_CUTOFF param (NAN = none). */
+	/** Per core with its own CUTOFF: its detune from its place (where CUTOFF / SPREAD / SHAPE put it; knob units,
+	kept even while the core is pinned at an end of the range; saved in the patch), and the value we last wrote to
+	its CORE_CUTOFF param (NAN = none). */
 	float cutoffOffset[NUM_CORES] = {NAN, NAN, NAN, NAN};
 	float cutoffWritten[NUM_CORES] = {NAN, NAN, NAN, NAN};
 
 	NurPrisma();
 	void process(const ProcessArgs& args) override;
+	/** FEEL knob <-> ANALOG / DIGITAL (see FEEL_PARAM) */
+	void syncFeel();
+	int feelSwitchLast = -1;
+	float feelLast = -1.f;
 	void onSampleRateChange(const SampleRateChangeEvent& e) override;
 	void onReset(const ResetEvent& e) override;
 	json_t* dataToJson() override;

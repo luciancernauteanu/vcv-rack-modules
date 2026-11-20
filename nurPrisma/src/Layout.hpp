@@ -35,6 +35,7 @@ static const float STRUM_X = 30.9f;
 static const float STRIKE_X = 60.54f;
 /** Shape LEDs: row below the button */
 static const float SHAPE_LED_DY = 4.4f;
+/** SHAPE LEDs: pitch between the small ones (the big Random LED in the middle gets 0.8 mm extra each side) */
 static const float SHAPE_LED_PITCH = 2.4f;
 
 /** Hero: inner CUTOFF knob, outer SPREAD ring */
@@ -44,6 +45,8 @@ static const float HERO_KNOB_D = 18.f;
 static const float HERO_LABEL_Y = 75.f;
 /** "SCALE" inside the bottom of the ring, below the CUTOFF knob, while CUTOFF is quantized */
 static const float HERO_SCALE_Y = 69.3f;
+/** "LPG" tag inside the top of the ring, above the CUTOFF knob, while the low-pass gate is on */
+static const float HERO_LPG_Y = 47.4f;
 
 /** Core selector: ALL pill and four bullets under the hero */
 static const float BULLET_Y = 79.4f;
@@ -61,8 +64,15 @@ static const float SIDE_Y2 = 67.f;
 static const float CHAR_Y = 87.f;
 /** Gap between a character knob's edge and its label (tighter than LABEL_GAP: the CV jacks are close) */
 static const float CHAR_LABEL_GAP = 2.2f;
-/** DRIVE, NOISE, COLOR, ANALOG, DIGITAL */
-static const float CHAR_X[5] = {11.72f, 28.72f, 45.72f, 62.72f, 79.72f};
+/** FEEL (+ ANALOG / DIGITAL switch), NOISE (+ COLOR mini slider), DRIVE, GAIN */
+static const float CHAR_X[4] = {9.5f, 32.5f, 60.5f, 79.5f};
+/** FEEL's switch, right of the FEEL knob; FEEL's label is centred under the knob and its switch */
+static const float FEEL_SWITCH_X = 18.f;
+static const float FEEL_LABEL_X = 13.75f;
+/** COLOR: a mini slider right of the NOISE knob (the size of the FEEL switch) */
+static const float COLOR_SLIDER_X = 41.f;
+static const float MINI_SLIDER_W = 4.7f;
+static const float MINI_SLIDER_H = 8.f;
 
 /** Jack rows */
 static const float CV_Y = 100.f;
