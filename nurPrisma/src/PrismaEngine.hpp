@@ -131,8 +131,10 @@ struct EngineParams {
 	bool quantizeCutoff = false;
 	int levelComp = LEVEL_FULL;
 	int driveVoice = VOICE_WARM;
-	/** NOISE follows: 0 = always on, 1 = each core's ring (a ping), 2 = the input level, 3 = ring or input */
-	int noiseFollow = 0;
+	/** NOISE follows what: 1 = each core's ping, 2 = the input level, 3 = ping or input */
+	int noiseFollow = 3;
+	/** How much NOISE follows (0 = plain noise, no envelope; 1 = only while a ping / the input sounds, short release) */
+	float noiseFollowAmt = 0.f;
 	/** NOISE type: 0 = coloured (white, pink, brown, crackle), 1 = digital shift register */
 	int noiseType = 0;
 	/** Level compensation detector: 0 = flat RMS, 1 = ear (weighted like a loudness meter) */
@@ -508,7 +510,7 @@ public:
 		// Inputs per core, through DRIVE
 		float x[2][NUM_CORES];
 		const float* in[2] = {inL, inR};
-		if (p.noiseFollow >= 2)
+		if (p.noiseFollowAmt > 0.f && p.noiseFollow >= 2)
 			for (int i = 0; i < NUM_CORES; i++) {
 				float a = perCore ? std::max(std::fabs(inL[i]), std::fabs(inR[i])) : std::max(std::fabs(inL[0]), std::fabs(inR[0]));
 				followIn[i] = std::max(a, followIn[i] * followDecay);
@@ -1046,23 +1048,27 @@ private:
 				lpgLp[0][i] = lpgLp[1][i] = 0.f;
 			}
 		}
-		// NOISE follows: the core's noise is scaled by its ping envelope and / or the input level, smoothed over ~5 ms.
-		// The ping envelope is set by the ping and decays at half the core's ring rate, exp(-pi fc k t / 2), so the noise
-		// has time to bloom in the resonance and fades with the tail. It is not read from the core's state, which the
-		// noise itself excites (following the state latched the noise on at 10 V).
+		// NOISE follows (amount f): the core's noise gain is 1 - f + f env, env = its ping envelope and / or the input
+		// level, smoothed over ~1 ms. f = 0 is plain noise; f = 1 is noise only while a ping / the input sounds.
+		// The ping envelope is set by the ping (velocity) and released between half the core's ring rate (low amounts:
+		// a tail that blooms in the resonance) and 40 ms (full amount: tight, short). It is not read from the core's
+		// state, which the noise itself excites (following the state latched the noise on at 10 V).
 		float followMax = 0.f;
+		float fAmt = clamp01(p.noiseFollowAmt);
 		for (int i = 0; i < NUM_CORES; i++) {
 			float target = 1.f;
-			if (p.noiseFollow != 0) {
+			if (fAmt > 0.f) {
 				float gp = 0.f;
 				if (p.noiseFollow & 1) {
-					pingEnv[i] *= std::exp(-0.5f * 3.14159265f * std::exp2(oct[i]) * std::max(kNow[0][i], 0.002f) * BLOCK / sampleRate);
+					float ringRate = 0.5f * 3.14159265f * std::exp2(oct[i]) * std::max(kNow[0][i], 0.002f);
+					float rate = (1.f - fAmt) * ringRate + fAmt * 25.f; // 1 / s (25 = 40 ms)
+					pingEnv[i] *= std::exp(-rate * BLOCK / sampleRate);
 					if (pingEnv[i] < 1e-4f)
 						pingEnv[i] = 0.f;
 					gp = pingEnv[i];
 				}
 				float gi = (p.noiseFollow & 2) ? std::min(1.f, followIn[i] * 8.f) : 0.f;
-				target = std::max(gp, gi);
+				target = 1.f - fAmt + fAmt * std::max(gp, gi);
 			}
 			followGain[i] += (target - followGain[i]) * 0.3f;
 			if (target == 0.f && followGain[i] < 1e-4f)

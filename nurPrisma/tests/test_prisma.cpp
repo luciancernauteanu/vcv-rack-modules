@@ -1613,10 +1613,11 @@ static void testNoiseFollowAndGain() {
 	// NOISE follows the ping: silent before it, there while the ring sounds, gone once it has decayed. The noise is
 	// measured as the difference to the same ping without noise (a ring and narrowband noise at its pitch can partly
 	// cancel over a short window, so comparing rms levels says little).
-	auto pingRun = [](float noise, int follow, int len) {
+	auto pingRun = [](float noise, float follow, int len) {
 		Rig r;
 		r.e.p.noise = noise;
-		r.e.p.noiseFollow = follow;
+		r.e.p.noiseFollow = 1;
+		r.e.p.noiseFollowAmt = follow;
 		r.e.p.cutoff = cutoffKnob(800.f);
 		r.e.p.spread = 0.f;
 		r.e.p.res = 0.8f;
@@ -1636,7 +1637,8 @@ static void testNoiseFollowAndGain() {
 		return std::sqrt(e / (to - from));
 	};
 	const int len = 5 * 48000;
-	std::vector<float> clean = pingRun(0.f, 1, len), follow = pingRun(0.3f, 1, len), always = pingRun(0.3f, 0, len);
+	std::vector<float> clean = pingRun(0.f, 1.f, len), follow = pingRun(0.3f, 1.f, len), always = pingRun(0.3f, 0.f, len);
+	std::vector<float> half = pingRun(0.3f, 0.5f, len);
 	double before = diffRms(follow, clean, 9600, 12000);
 	double during = diffRms(follow, clean, 12480, 12000 + 9600);
 	double after = diffRms(follow, clean, 12000 + 4 * 48000, 12000 + len);
@@ -1645,11 +1647,16 @@ static void testNoiseFollowAndGain() {
 		before, during, after, alwaysAfter);
 	check(before < 0.01 * alwaysAfter && during > 0.1 * alwaysAfter && after < 0.01 * alwaysAfter,
 		"noise follows the ping (silent before, with the ring, gone after)", "%.4f during / %.6f after", during, after);
+	// Half the amount: half the plain noise stays when nothing plays
+	double halfAfter = diffRms(half, clean, 12000 + 4 * 48000, 12000 + len);
+	check(std::fabs(halfAfter / alwaysAfter - 0.5) < 0.1, "noise follows 50%: half the noise stays between pings",
+		"%.3f of the plain noise", halfAfter / alwaysAfter);
 	// NOISE follows the input: noise only while there is input
 	{
 		Rig r;
 		r.e.p.noise = 0.7f;
 		r.e.p.noiseFollow = 2;
+		r.e.p.noiseFollowAmt = 1.f;
 		r.e.p.cutoff = cutoffKnob(800.f);
 		r.e.p.res = 0.5f;
 		double quiet = 0.0, loud = 0.0, none = 0.0;

@@ -108,6 +108,14 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
+- 2026-11-20: NOISE follows amount. `NOISE_FOLLOW_PARAM` (appended after `LPG_DECAY_PARAM`, 0..1, default 0) ->
+  `EngineParams::noiseFollowAmt`; the core's noise gain target is 1 - f + f env (env = max(ping envelope, input
+  follower x8)). Ping envelope release rate = (1 - f) x half the ring rate + f x 25 /s (40 ms at 100%). `noiseFollow`
+  is now only the source (1 ping, 2 input, 3 both = default; JSON 1..3). UI: `NoiseLabelButton` (hold 0.5 s on the
+  NOISE label -> `createMenu()` with `addNoiseFollowItems`: the slider + source submenu, shared with the module menu),
+  label shows "NOISE ~" while the amount is > 0. Cause of "noise not following" in Rack: the installed DLL (15:13)
+  predated the feature. 148 offline checks (new: 50% keeps half the noise between pings).
+
 - 2026-11-20: gain and noise follow. (1) Measured ANALOG 1 + 24 dB at RES 85% (click ping, flat detector): ping -5.9 dB,
   noise -12.6 dB, input -2.5 dB. Fixes: bass loss coefficient 1.8 -> 0.5; `slopeNoiseComp` (noise gets back the second
   stage and loss, plus ANALOG's level-dependent squash); ring and the rest get `coreGain *= 1 + slopeShare an resN^2`

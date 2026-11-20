@@ -33,6 +33,8 @@ NurPrisma::NurPrisma() {
 	configParam(BAND_PARAM, 0.f, 1.f, 0.f, "Band (narrow each core to a steep band: 3 > 1/24 octave)", "%", 0.f, 100.f);
 	configParam(LPG_PARAM, 0.f, 1.f, 0.f, "Low-pass gate depth (0 = off)", "%", 0.f, 100.f);
 	configParam(LPG_DECAY_PARAM, 0.f, 1.f, 0.5f, "Low-pass gate release (40 ms .. 1.5 s)");
+	configParam(NOISE_FOLLOW_PARAM, 0.f, 1.f, 0.f, "Noise follows the ping / input", "%", 0.f, 100.f)->description =
+		"0: plain noise. 100%: noise only while a ping or the input sounds, with a short release";
 	static const char* const CORE_NAMES[NUM_CORES] = {"Red", "Yellow", "Green", "Violet"};
 	for (int i = 0; i < NUM_CORES; i++)
 		configParam(CORE_SPREAD_PARAM + i, -1.f, 2.f, 1.f, string::f("%s core spread (drag its dot on the ring)", CORE_NAMES[i]),
@@ -89,7 +91,7 @@ void NurPrisma::onReset(const ResetEvent& e) {
 	justTuning = false;
 	lpgSource = 2;
 	noiseType = 0;
-	noiseFollow = 0;
+	noiseFollow = 3;
 	levelWeight = 1;
 	focus = -1;
 	for (int i = 0; i < NUM_CORES; i++) {
@@ -246,7 +248,7 @@ void NurPrisma::dataFromJson(json_t* root) {
 	getBool("justTuning", justTuning);
 	getInt("lpgSource", 0, 2, lpgSource);
 	getInt("noiseType", 0, 1, noiseType);
-	getInt("noiseFollow", 0, 3, noiseFollow);
+	getInt("noiseFollow", 1, 3, noiseFollow);
 	getInt("levelWeight", 0, 1, levelWeight);
 	json_t* slopeJ = json_object_get(root, "coreSlope");
 	for (int i = 0; i < NUM_CORES; i++) {
@@ -328,6 +330,7 @@ void NurPrisma::readParams() {
 	p.lpgSource = lpgSource;
 	p.noiseType = noiseType;
 	p.noiseFollow = noiseFollow;
+	p.noiseFollowAmt = params[NOISE_FOLLOW_PARAM].getValue();
 	p.levelWeight = levelWeight;
 	for (int i = 0; i < NUM_CORES; i++)
 		p.slope24[i] = coreSlope[i];
@@ -501,6 +504,86 @@ struct RandomLed : widget::OpaqueWidget {
 cores, after, both; it fires while still held). Hover shows a faint underline and a tooltip with the current setting.
 Right-click is left alone (module menu, which has the same choices). The knob itself stays a plain knob, so turning
 and double-click reset never change the voicing. */
+/** NOISE follows: the amount slider and what it follows (the module menu and the NOISE label's long press) */
+static void addNoiseFollowItems(ui::Menu* menu, NurPrisma* m) {
+	menu->addChild(createMenuLabel("Noise follows the ping / input (0 = plain noise)"));
+	ui::Slider* amt = new ui::Slider;
+	amt->quantity = m->getParamQuantity(NurPrisma::NOISE_FOLLOW_PARAM);
+	amt->box.size.x = 220.f;
+	menu->addChild(amt);
+	menu->addChild(createIndexSubmenuItem("Noise follows", {"Ping (each core's own)", "Input level", "Ping and input level"},
+		[=]() { return m->noiseFollow - 1; }, [=](int i) { m->noiseFollow = i + 1; }));
+}
+
+/** The NOISE label: hold it (0.5 s) for the "noise follows" slider. NOISE ~ shows while the noise follows. */
+struct NoiseLabelButton : widget::OpaqueWidget {
+	NurPrisma* module = nullptr;
+	bool pressed = false;
+	bool fired = false;
+	double pressTime = 0.0;
+	ui::Tooltip* tooltip = nullptr;
+	static constexpr double LONG_PRESS = 0.5;
+
+	void onButton(const ButtonEvent& e) override {
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS && module) {
+			pressed = true;
+			fired = false;
+			pressTime = system::getTime();
+			e.consume(this);
+		}
+	}
+
+	void onDragEnd(const DragEndEvent& e) override {
+		pressed = false;
+	}
+
+	void step() override {
+		if (pressed && !fired && module && system::getTime() - pressTime >= LONG_PRESS) {
+			fired = true;
+			pressed = false;
+			removeTooltip();
+			ui::Menu* menu = createMenu();
+			addNoiseFollowItems(menu, module);
+		}
+		OpaqueWidget::step();
+	}
+
+	void onEnter(const EnterEvent& e) override {
+		if (!tooltip && module && settings::tooltips) {
+			tooltip = new ui::Tooltip;
+			tooltip->text = "Noise\nHold: how much the noise follows the ping / input";
+			APP->scene->addChild(tooltip);
+		}
+	}
+
+	void onLeave(const LeaveEvent& e) override {
+		removeTooltip();
+	}
+
+	void removeTooltip() {
+		if (tooltip) {
+			APP->scene->removeChild(tooltip);
+			delete tooltip;
+			tooltip = nullptr;
+		}
+	}
+
+	~NoiseLabelButton() {
+		removeTooltip();
+	}
+
+	void draw(const DrawArgs& args) override {
+		if (APP->event->hoveredWidget != this && !pressed)
+			return;
+		nvgBeginPath(args.vg);
+		nvgMoveTo(args.vg, box.size.x * 0.15f, box.size.y - 1.f);
+		nvgLineTo(args.vg, box.size.x * 0.85f, box.size.y - 1.f);
+		nvgStrokeColor(args.vg, nvgRGBA(0xe9, 0xe3, 0xd5, pressed ? 0xc0 : 0x70));
+		nvgStrokeWidth(args.vg, 1.f);
+		nvgStroke(args.vg);
+	}
+};
+
 struct DriveLabelButton : widget::OpaqueWidget {
 	NurPrisma* module = nullptr;
 	bool pressed = false;
@@ -697,6 +780,7 @@ struct NurPrismaWidget : app::ModuleWidget {
 	enum { F_TYPE, F_RES, F_BAND, F_WIDTH, F_MIX, F_RING, F_CUTOFF, NUM_FOCUS };
 	app::ParamWidget* focusWidgets[NUM_FOCUS][1 + NurPrisma::NUM_CORES] = {};
 	DriveLabelButton* driveLabel = nullptr;
+	NoiseLabelButton* noiseLabel = nullptr;
 
 	/** One global knob and four per-core twins at the same place; step() shows the one in focus. */
 	template <class TKnob>
@@ -863,6 +947,19 @@ struct NurPrismaWidget : app::ModuleWidget {
 				driveLabel = b;
 				continue;
 			}
+			if (i == 1 && module) {
+				// NOISE's label: NOISE ~ while the noise follows the ping / input; hold it for the amount slider
+				NurPrisma* m = module;
+				text->addDynamic(Vec(CHAR_X[i], CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), [m]() {
+					return std::string(m->params[NurPrisma::NOISE_FOLLOW_PARAM].getValue() > 0.f ? "NOISE ~" : "NOISE");
+				}, 2.2f, cream);
+				NoiseLabelButton* b = createWidget<NoiseLabelButton>(
+					mm2px(Vec(CHAR_X[i] - 7.f, CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP - 1.8f)));
+				b->box.size = mm2px(Vec(14.f, 3.8f));
+				b->module = module;
+				noiseLabel = b;
+				continue;
+			}
 			text->add(Vec(CHAR_X[i], CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), CHAR_LABELS[i], 2.2f, cream,
 				np::PanelText::LABEL, 0.1f);
 		}
@@ -896,6 +993,8 @@ struct NurPrismaWidget : app::ModuleWidget {
 		// The clickable DRIVE label goes above the text (it must receive the clicks)
 		if (driveLabel)
 			addChild(driveLabel);
+		if (noiseLabel)
+			addChild(noiseLabel);
 	}
 
 	void appendContextMenu(ui::Menu* menu) override {
@@ -944,9 +1043,7 @@ struct NurPrismaWidget : app::ModuleWidget {
 			[=](int i) { m->drivePos = i; }));
 		menu->addChild(createIndexSubmenuItem("Noise type", {"Colours (white, pink, brown, crackle)", "Digital (shift register: COLOR = length)"},
 			[=]() { return m->noiseType; }, [=](int i) { m->noiseType = i; }));
-		menu->addChild(createIndexSubmenuItem("Noise follows",
-			{"Nothing (always on)", "Ping (each core's ring)", "Input level", "Ping and input level"},
-			[=]() { return m->noiseFollow; }, [=](int i) { m->noiseFollow = i; }));
+		addNoiseFollowItems(menu, m);
 		menu->addChild(createIndexSubmenuItem("Level compensation hears", {"Flat (RMS)", "Like an ear (loudness-weighted)"},
 			[=]() { return m->levelWeight; }, [=](int i) { m->levelWeight = i; }));
 		menu->addChild(createIndexSubmenuItem("Level compensation",

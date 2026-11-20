@@ -47,6 +47,8 @@ struct NurPrisma : engine::Module {
 		/** Low-pass gate: depth (0 = off) and release time; set from the right-click menu */
 		LPG_PARAM,
 		LPG_DECAY_PARAM,
+		/** How much NOISE follows the ping / input (long-press the NOISE label) */
+		NOISE_FOLLOW_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -106,8 +108,8 @@ struct NurPrisma : engine::Module {
 	int lpgSource = 2;
 	/** 24 dB slope per core (right-click a core's bullet) */
 	bool coreSlope[NUM_CORES] = {};
-	/** NOISE follows: 0 = always, 1 = ping ring, 2 = input level, 3 = ring or input */
-	int noiseFollow = 0;
+	/** NOISE follows what: 1 = ping, 2 = input level, 3 = ping or input (the amount is NOISE_FOLLOW_PARAM) */
+	int noiseFollow = 3;
 	/** NOISE type: 0 = colours, 1 = digital shift register */
 	int noiseType = 0;
 	/** Level compensation detector: 0 = flat RMS, 1 = ear (loudness-weighted) */

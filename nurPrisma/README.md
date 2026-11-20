@@ -36,9 +36,12 @@ within about 1.5 dB).
 
 ## Noise follows
 
-Right-click > **Noise follows**: Nothing (always on, default), **Ping** (each ping opens its core's noise, by its
-velocity, and it fades at half the ring's rate: a breath that blooms in the resonance and dies with the tail),
-**Input level** (noise only while there is input, ~30 ms follower) or both. With nothing to follow the cores go idle (no CPU, no noise).
+**Hold the NOISE label** (0.5 s) for a slider: how much the noise follows the ping and / or the input (also in the
+right-click menu, with what it follows: ping, input level, or both, the default). **0** = plain noise, no envelope.
+**100%** = noise only while a ping or the input sounds, with a short release (40 ms): each ping gets a tight breath.
+In between, part of the noise stays and the rest follows (50% = half the noise between pings), and the ping's noise
+lingers longer, fading with the ring. The label reads **NOISE ~** while the noise follows. A ping opens its own core's
+noise by its velocity; the input follower takes ~30 ms. With nothing to follow at 100% the cores go idle (no CPU).
 
 ## Pings and DRIVE / ANALOG
 
@@ -82,7 +85,7 @@ every ping a little life: a random
 | **WIDTH** | Spreads the cores over left and right; 0 is mono-safe |
 | **MIX** | Dry / wet |
 | Level compensation (right-click) | **Full** (default): the output keeps the input's loudness whatever BAND, TYPE or RES do (-12 .. +24 dB). **Gentle**: +-6 dB. **Off**: a closing filter gets quieter, as on a classic filter |
-| **NOISE**, **COLOR** | Noise fed into the cores (white → pink → brown → crackle): with high RES the stack sings on its own |
+| **NOISE**, **COLOR** | Noise fed into the cores (white → pink → brown → crackle): with high RES the stack sings on its own. **Hold the NOISE label** for how much it follows the ping / input (see Noise follows) |
 | **ANALOG** | Slightly mismatched cores, saturation, a soft noise floor, and resonance that reacts to level like an analog filter: loud input widens and softens the peak, quiet signals and pings ring freely, a hard ping blooms (settles fast, then rings on) |
 | **DIGITAL** | Coarse filter maths and rate reduction: the sound of old DSP |
 | **STRUM**, **STRIKE** | See Ping above |
