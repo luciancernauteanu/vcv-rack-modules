@@ -131,6 +131,8 @@ struct EngineParams {
 	bool quantizeCutoff = false;
 	int levelComp = LEVEL_FULL;
 	int driveVoice = VOICE_WARM;
+	/** NOISE follows: 0 = always on, 1 = each core's ring (a ping), 2 = the input level, 3 = ring or input */
+	int noiseFollow = 0;
 	/** NOISE type: 0 = coloured (white, pink, brown, crackle), 1 = digital shift register */
 	int noiseType = 0;
 	/** Level compensation detector: 0 = flat RMS, 1 = ear (weighted like a loudness meter) */
@@ -319,6 +321,7 @@ public:
 		randomGlide = 1.f - std::exp(-(float) BLOCK / (0.04f * sr));
 		hissGateCoef = 1.f - std::exp(-(float) BLOCK / (0.05f * sr));
 		lpgEnvDecay = std::exp(-1.f / (0.03f * sr));
+		followDecay = std::exp(-1.f / (0.03f * sr));
 		for (int c = 0; c < 2; c++) {
 			weightIn[c].setSampleRate(sr);
 			weightOut[c].setSampleRate(sr);
@@ -442,6 +445,8 @@ public:
 				// The ping also lights the core's vactrol (a short pulse, ~6 ms)
 				lpgPulse[i] = (int) (0.006f * sampleRate);
 				lpgVel[i] = pendingVel[i];
+				// NOISE follows the ping: the core's ping envelope (velocity, decaying like the ring; see updateBlock)
+				pingEnv[i] = std::max(pingEnv[i], std::min(1.f, 2.f * pendingVel[i]));
 				pingHold = grace;
 			}
 		}
@@ -503,20 +508,25 @@ public:
 		// Inputs per core, through DRIVE
 		float x[2][NUM_CORES];
 		const float* in[2] = {inL, inR};
+		if (p.noiseFollow >= 2)
+			for (int i = 0; i < NUM_CORES; i++) {
+				float a = perCore ? std::max(std::fabs(inL[i]), std::fabs(inR[i])) : std::max(std::fabs(inL[0]), std::fabs(inR[0]));
+				followIn[i] = std::max(a, followIn[i] * followDecay);
+			}
 		float noiseLR[2] = {noiseL, noiseR};
 		noiseNow[0] = noiseL;
 		noiseNow[1] = noiseR;
 		for (int c = 0; c < 2; c++) {
 			if (perCore) {
 				for (int i = 0; i < NUM_CORES; i++) {
-					noiseCore[c][i] = noiseLR[c] * noiseScale[i];
+					noiseCore[c][i] = noiseLR[c] * noiseScale[i] * followGain[i];
 					x[c][i] = drives[c][i].process(in[c][i], preAmt, grace) + noiseCore[c][i];
 				}
 			}
 			else {
 				float v = drives[c][0].process(in[c][0], preAmt, grace);
 				for (int i = 0; i < NUM_CORES; i++) {
-					noiseCore[c][i] = noiseLR[c] * noiseScale[i];
+					noiseCore[c][i] = noiseLR[c] * noiseScale[i] * followGain[i];
 					x[c][i] = v + noiseCore[c][i];
 				}
 			}
@@ -530,7 +540,7 @@ public:
 		float wet[2];
 		// Nothing to hear (no input, noise, hiss or ping, rings decayed, no self-oscillation): skip the cores. Their
 		// state is cleared once on the way in, so they restart from exactly zero when signal returns.
-		bool idle = coresQuiet && hiss == 0.f && noiseL == 0.f && noiseR == 0.f;
+		bool idle = coresQuiet && hiss == 0.f && (!noiseLive || (noiseL == 0.f && noiseR == 0.f));
 		for (int c = 0; c < 2 && idle; c++)
 			for (int i = 0; i < NUM_CORES && idle; i++)
 				idle = x[c][i] == 0.f && exc[i] == 0.f;
@@ -698,6 +708,11 @@ private:
 	float weights[NUM_CORES][4] = {{1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}, {1.f, 0.f, 0.f, 0.f}};
 	float stackNow = 0.f;
 	float limit = 0.f;
+	/** DRIVE before the cores on each core's ring: on, gain, make-up (see updateBlock) */
+	bool ringDriveOn = false;
+	float ringG = 1.f;
+	float ringMake = 1.f;
+	float ringMix = 0.f;
 	/** Level-dependent resonance amount (RES_SAT x ANALOG; 0 = off) */
 	float resSat = 0.f;
 	float pingResp[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
@@ -705,6 +720,14 @@ private:
 	float seriesNorm[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
 	/** The same for the noise that enters each core, per side (noiseCore) */
 	float noiseScale[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
+	float slopeNoiseComp[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
+	// NOISE follows (ping ring / input level): per core, the input level follower (30 ms), the ring level (per block), and
+	// the smoothed gain on the core's noise
+	float followIn[NUM_CORES] = {};
+	float pingEnv[NUM_CORES] = {};
+	float followGain[NUM_CORES] = {1.f, 1.f, 1.f, 1.f};
+	float followDecay = 0.999f;
+	bool noiseLive = true;
 	float noiseCore[2][NUM_CORES] = {};
 
 	// Character
@@ -898,6 +921,15 @@ private:
 		// ANALOG: integrators saturate earlier, mismatch and pitch bloom grow
 		float an = s.analog;
 		limit = 8.f - 6.2f * an;
+		// DRIVE before the cores also drives each core's own ring (the strike and the resonance bypass the input drive):
+		// a saturating waveshaper on the core's output, tanh(g y) / sqrt(g): odd harmonics, a compressed, sustained,
+		// fuzzy tail (quiet rings gain up to sqrt(g), loud ones are held). Faded in with the amount (a straight tanh at
+		// DRIVE 1% already bent a 5 V sine to H3 -23 dB), off at DRIVE 0 and after the cores.
+		float resDrive = posNow == DRIVE_PRE ? s.drive : posNow == DRIVE_BOTH ? BOTH_SHARE * s.drive : 0.f;
+		ringDriveOn = resDrive > 0.f;
+		ringG = std::exp(resDrive * 2.48490665f); // 1 .. 12
+		ringMake = 1.f / std::sqrt(ringG);
+		ringMix = resDrive;
 		resSat = RES_SAT * an;
 		static const float PAN[NUM_CORES] = {-1.f, 1.f / 3.f, -1.f / 3.f, 1.f};
 		static const float WIDTH_SIGN[NUM_CORES] = {-1.f, 1.f, 1.f, -1.f};
@@ -1014,15 +1046,49 @@ private:
 				lpgLp[0][i] = lpgLp[1][i] = 0.f;
 			}
 		}
+		// NOISE follows: the core's noise is scaled by its ping envelope and / or the input level, smoothed over ~5 ms.
+		// The ping envelope is set by the ping and decays at half the core's ring rate, exp(-pi fc k t / 2), so the noise
+		// has time to bloom in the resonance and fades with the tail. It is not read from the core's state, which the
+		// noise itself excites (following the state latched the noise on at 10 V).
+		float followMax = 0.f;
+		for (int i = 0; i < NUM_CORES; i++) {
+			float target = 1.f;
+			if (p.noiseFollow != 0) {
+				float gp = 0.f;
+				if (p.noiseFollow & 1) {
+					pingEnv[i] *= std::exp(-0.5f * 3.14159265f * std::exp2(oct[i]) * std::max(kNow[0][i], 0.002f) * BLOCK / sampleRate);
+					if (pingEnv[i] < 1e-4f)
+						pingEnv[i] = 0.f;
+					gp = pingEnv[i];
+				}
+				float gi = (p.noiseFollow & 2) ? std::min(1.f, followIn[i] * 8.f) : 0.f;
+				target = std::max(gp, gi);
+			}
+			followGain[i] += (target - followGain[i]) * 0.3f;
+			if (target == 0.f && followGain[i] < 1e-4f)
+				followGain[i] = 0.f;
+			followMax = std::max(followMax, followGain[i]);
+		}
+		noiseLive = followMax > 0.f;
 		// 24 dB slope: its share is the core's LP weight; the ladder's bass loss grows with RES under ANALOG
 		anySlope24 = false;
 		for (int i = 0; i < NUM_CORES; i++) {
 			bool on = p.slope24[i];
 			anySlope24 = anySlope24 || on;
 			float resN = std::min(clamp01(s.coreRes[i] + p.resCv[i]) / RES_FB_START, 1.f);
-			float loss = 1.f / (1.f + 1.8f * an * resN * resN);
+			// (about -3.5 dB at the most: "a little bass", measured against -12 dB for noise with the first, stronger setting)
+			float loss = 1.f / (1.f + 0.5f * an * resN * resN);
 			slopeShare[i] = on ? weights[i][0] : 0.f;
 			slopeGain[i] = 1.f - slopeShare[i] * (1.f - loss);
+			// Noise and the like pass the second stage and the bass loss too: give back what they take (a ping is
+			// compensated through pingResp, input through the level compensation)
+			slopeNoiseComp[i] = on ? std::min(3.f, 1.f / (slopeGain[i] * (1.f - slopeShare[i] + slopeShare[i] * 0.88f))) : 1.f;
+			// ANALOG's level-dependent damping squashes loud rings and noise at high RES (measured -1..-2 dB): give it back
+			slopeNoiseComp[i] *= 1.f + 0.3f * an * resN * resN;
+			pingResp[i] /= 1.f + 0.2f * an * resN * resN;
+			// A ring clipped by the integrator knee cannot be boosted at the strike: give the 24 dB + ANALOG loss back at the
+			// core's output (ring, noise and input alike)
+			coreGain[i] *= 1.f + 1.0f * slopeShare[i] * an * resN * resN;
 			if (on) // a ping rings through the second stage (0.707 at the ring) and the bass loss
 				pingResp[i] *= (1.f - slopeShare[i] + slopeShare[i] * 0.7071f) * slopeGain[i];
 			else
@@ -1038,7 +1104,7 @@ private:
 					down *= coreMagnitude(std::exp2(oct[i] - oct[j]), kNow[0][j], weights[j], bpGain[j]);
 			seriesNorm[i] = 1.f / (1.f + stackNow * (std::max(down, 1.f) - 1.f));
 			// Broadband noise gains a bit less than a ring's peak does (it only fills the resonance's bandwidth)
-			noiseScale[i] = std::pow(seriesNorm[i], 1.0f);
+			noiseScale[i] = std::pow(seriesNorm[i], 1.0f) * slopeNoiseComp[i];
 		}
 		// BAND: the steep band after each core (fades in over the first 10% of the knob; asleep and cleared at 0)
 		bool wasBand = bandOn;
@@ -1119,6 +1185,11 @@ private:
 				float u = x[c][i] + (prev + noiseCore[c][i] - x[c][i]) * m + hiss;
 				float y = core.process(u, gNow[c][i], SAT ? core.saturatedK(kNow[c][i], resSat) : kNow[c][i], weights[i],
 					bpGain[i], fbNow[i], limit);
+				if (SAT) {
+					// DRIVE before the cores on the ring (ringDriveOn): see updateBlock
+					if (ringDriveOn)
+						y += ringMix * (fastTanh(ringG * y) * ringMake - y);
+				}
 				if (S24) {
 					// 24 dB slope (ladder-like): the low-pass share of the core's sound goes through a second 12 dB
 					// stage at the same cutoff (Q 0.7), and under ANALOG high resonance thins the bass (slopeGain)
@@ -1191,7 +1262,7 @@ private:
 	NP_NOINLINE void runCoresAny(float x[2][NUM_CORES], const float exc[NUM_CORES], float hiss, float wet[2],
 			EngineOutput& out) {
 		coresIdle = false;
-		int flags = (digitalOn ? 1 : 0) | (bandOn ? 2 : 0) | (resSat > 0.f ? 4 : 0) | (lpgOn ? 8 : 0) | (anySlope24 ? 16 : 0);
+		int flags = (digitalOn ? 1 : 0) | (bandOn ? 2 : 0) | (resSat > 0.f || ringDriveOn ? 4 : 0) | (lpgOn ? 8 : 0) | (anySlope24 ? 16 : 0);
 		switch (flags) {
 			case 0: coresImpl<false, false, false, false, false>(x, exc, hiss, wet, out); break;
 			case 1: coresImpl<true, false, false, false, false>(x, exc, hiss, wet, out); break;

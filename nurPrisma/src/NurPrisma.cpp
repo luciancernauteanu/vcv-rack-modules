@@ -89,6 +89,7 @@ void NurPrisma::onReset(const ResetEvent& e) {
 	justTuning = false;
 	lpgSource = 2;
 	noiseType = 0;
+	noiseFollow = 0;
 	levelWeight = 1;
 	focus = -1;
 	for (int i = 0; i < NUM_CORES; i++) {
@@ -186,6 +187,7 @@ json_t* NurPrisma::dataToJson() {
 	json_object_set_new(root, "justTuning", json_boolean(justTuning));
 	json_object_set_new(root, "lpgSource", json_integer(lpgSource));
 	json_object_set_new(root, "noiseType", json_integer(noiseType));
+	json_object_set_new(root, "noiseFollow", json_integer(noiseFollow));
 	json_object_set_new(root, "levelWeight", json_integer(levelWeight));
 	json_t* slopeJ = json_array();
 	for (int i = 0; i < NUM_CORES; i++)
@@ -244,6 +246,7 @@ void NurPrisma::dataFromJson(json_t* root) {
 	getBool("justTuning", justTuning);
 	getInt("lpgSource", 0, 2, lpgSource);
 	getInt("noiseType", 0, 1, noiseType);
+	getInt("noiseFollow", 0, 3, noiseFollow);
 	getInt("levelWeight", 0, 1, levelWeight);
 	json_t* slopeJ = json_object_get(root, "coreSlope");
 	for (int i = 0; i < NUM_CORES; i++) {
@@ -324,6 +327,7 @@ void NurPrisma::readParams() {
 	p.lpgDecay = params[LPG_DECAY_PARAM].getValue();
 	p.lpgSource = lpgSource;
 	p.noiseType = noiseType;
+	p.noiseFollow = noiseFollow;
 	p.levelWeight = levelWeight;
 	for (int i = 0; i < NUM_CORES; i++)
 		p.slope24[i] = coreSlope[i];
@@ -940,6 +944,9 @@ struct NurPrismaWidget : app::ModuleWidget {
 			[=](int i) { m->drivePos = i; }));
 		menu->addChild(createIndexSubmenuItem("Noise type", {"Colours (white, pink, brown, crackle)", "Digital (shift register: COLOR = length)"},
 			[=]() { return m->noiseType; }, [=](int i) { m->noiseType = i; }));
+		menu->addChild(createIndexSubmenuItem("Noise follows",
+			{"Nothing (always on)", "Ping (each core's ring)", "Input level", "Ping and input level"},
+			[=]() { return m->noiseFollow; }, [=](int i) { m->noiseFollow = i; }));
 		menu->addChild(createIndexSubmenuItem("Level compensation hears", {"Flat (RMS)", "Like an ear (loudness-weighted)"},
 			[=]() { return m->levelWeight; }, [=](int i) { m->levelWeight = i; }));
 		menu->addChild(createIndexSubmenuItem("Level compensation",

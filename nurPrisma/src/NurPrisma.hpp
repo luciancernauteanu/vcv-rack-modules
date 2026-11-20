@@ -106,6 +106,8 @@ struct NurPrisma : engine::Module {
 	int lpgSource = 2;
 	/** 24 dB slope per core (right-click a core's bullet) */
 	bool coreSlope[NUM_CORES] = {};
+	/** NOISE follows: 0 = always, 1 = ping ring, 2 = input level, 3 = ring or input */
+	int noiseFollow = 0;
 	/** NOISE type: 0 = colours, 1 = digital shift register */
 	int noiseType = 0;
 	/** Level compensation detector: 0 = flat RMS, 1 = ear (loudness-weighted) */

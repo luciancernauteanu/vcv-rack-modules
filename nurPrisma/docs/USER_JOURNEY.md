@@ -108,6 +108,26 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
+- 2026-11-20: gain and noise follow. (1) Measured ANALOG 1 + 24 dB at RES 85% (click ping, flat detector): ping -5.9 dB,
+  noise -12.6 dB, input -2.5 dB. Fixes: bass loss coefficient 1.8 -> 0.5; `slopeNoiseComp` (noise gets back the second
+  stage and loss, plus ANALOG's level-dependent squash); ring and the rest get `coreGain *= 1 + slopeShare an resN^2`
+  at the output (a clipped ring cannot be boosted at the strike); pingResp /= 1 + 0.2 an resN^2. After: ping -0.8,
+  noise +0.8, input -1.6 dB. (2) `EngineParams::noiseFollow` (menu, saved): per-core `followGain` from the ping
+  envelope `pingEnv` (min(1, 2 x velocity), decays at half the ring rate exp(-pi fc k t / 2)) and/or the input follower
+  `followIn` (x8), smoothed per block, applied to each core's noise (`noiseCore`); `noiseLive` lets idle skip when the
+  noise is gated off. Following the core's state instead latched on (noise excites the ring, the ring opens the
+  noise: 10 V forever) - never derive a noise gate from a state the noise feeds. (3) Review fix: the ring shaper is
+  crossfaded by the drive amount (`ringMix`); a straight tanh at DRIVE 1% bent a 5 V sine to H3 -23 dB (now -49 dB,
+  level unchanged). 147 offline checks.
+
+- 2026-11-20: DRIVE before the cores is heard on pings. A ping bypasses the input drive and a ring is a clean resonance
+  whatever it is fed (measured: even a 8x louder strike left H2 / H3 at -43 / -49 dB), and the strike shaping cannot
+  change a one-sample click. Now each core's output goes through `tanh(g y) / sqrt(g)` (g = DRIVE 1..12, before / both
+  at 70%) in the SAT instantiation (`ringDriveOn`, flag raised by `resSat > 0 || ringDriveOn`): click ping 3rd
+  harmonic -45 -> -10 dB at full drive, ring loudness within 0.35 dB (rms), after-the-cores unchanged; input drive
+  unchanged (THD -7.7 dB at 100%). Tried and dropped: lowering the state saturation limit (it only squashed the ping).
+  The old assumption "before = the cores filter the drive's harmonics" no longer holds. 144 offline checks.
+
 - 2026-11-20: digital and analog feel. (1) `ShiftNoise` (Shapes.hpp): LFSR noise, register 17..3 bits stepped by COLOR,
   maximal period 2^n - 1 (tested), +-1 x 0.3; `EngineParams::noiseType` (menu, saved). (2) PCM gate: `digitalGate` =
   (DIGITAL - 0.75) x 0.24 (engine units), per sample, in the DIGITAL block of the core loop. (3) Thermal drift:

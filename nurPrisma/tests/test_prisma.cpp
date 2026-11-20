@@ -1300,8 +1300,9 @@ static void testSlope24() {
 	double pass12 = gainAt(false, 0.f, 0.f, 100.0), pass24 = gainAt(true, 0.f, 0.f, 100.0);
 	check(std::fabs(pass24 - pass12) < 0.5, "slope: passband unchanged at ANALOG 0 (100 Hz, dB)", "%.2f (limit 0.5)", pass24 - pass12);
 	// Ladder trait: at high RES and ANALOG the bass thins
+	// The ladder's bass loss is given back at the output (no drastic loss of gain): 100 Hz stays within 3 dB
 	double bass0 = gainAt(true, 0.88f, 0.f, 100.0), bass1 = gainAt(true, 0.88f, 1.f, 100.0);
-	check(bass1 < bass0 - 4.0, "slope: ANALOG + RES thins the bass of a 24 dB core (100 Hz, dB)", "%.2f vs %.2f", bass1, bass0);
+	check(std::fabs(bass1 - bass0) < 3.0, "slope: ANALOG + RES keeps a 24 dB core's level (100 Hz, dB)", "%.2f vs %.2f", bass1, bass0);
 	// A 12 dB core is not affected by ANALOG's bass loss
 	double b12 = gainAt(false, 0.88f, 1.f, 100.0);
 	check(std::fabs(b12) < 1.0, "slope: a 12 dB core keeps its bass (100 Hz, dB)", "%.2f", b12);
@@ -1571,6 +1572,134 @@ static void testDigitalAnalogLife() {
 	}
 }
 
+static void testDrivenRing() {
+	// DRIVE before the cores drives the ring itself, also for a one-sample click strike (which strike shaping cannot
+	// change): odd harmonics in the attack, a sustained tail, loudness in the same range
+	auto ring = [](float drive, int pos, double* h3, double* rms) {
+		Rig r;
+		r.e.p.cutoff = 0.51f;
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.85f;
+		r.e.p.drive = drive;
+		r.e.p.drivePos = pos;
+		r.e.p.strike = 0.f;
+		r.e.p.levelComp = LEVEL_OFF;
+		for (int n = 0; n < 2000; n++)
+			r.step();
+		r.e.pingAll(1.f);
+		std::vector<float> y;
+		double e = 0.0;
+		for (int n = 0; n < 24000; n++) {
+			r.step();
+			y.push_back(r.o.cores[0]);
+			e += r.o.cores[0] * r.o.cores[0];
+		}
+		double f0 = std::exp2(r.e.oct[0]);
+		*h3 = db(goertzel(y, 300, 2700, 3 * f0) / goertzel(y, 300, 2700, f0));
+		*rms = std::sqrt(e / 24000.0);
+	};
+	double h0, h50, h100, hPost, r0, r50, r100, rPost;
+	ring(0.f, DRIVE_PRE, &h0, &r0);
+	ring(0.5f, DRIVE_PRE, &h50, &r50);
+	ring(1.f, DRIVE_PRE, &h100, &r100);
+	ring(1.f, DRIVE_POST, &hPost, &rPost);
+	std::printf("     ping ring H3 (click strike): DRIVE 0 %.1f, 50%% %.1f, 100%% %.1f, after-cores 100%% %.1f dB; rms %.3f / %.3f / %.3f\n", h0, h50, h100, hPost, r0, r50, r100);
+	check(h50 > h0 + 12.0 && h100 > h0 + 20.0, "drive: before the cores drives a click ping's ring (H3 up, dB)", "%.1f / %.1f", h50 - h0, h100 - h0);
+	check(std::fabs(db(r100 / r0)) < 8.0, "drive: the driven ring stays in the same loudness range (rms dB)", "%.2f (limit +-8)", db(r100 / r0));
+	check(std::fabs(hPost - h0) < 1.0, "drive: after the cores leaves the ring to the post stage (H3 unchanged, dB)", "%.2f", hPost - h0);
+}
+
+static void testNoiseFollowAndGain() {
+	// NOISE follows the ping: silent before it, there while the ring sounds, gone once it has decayed. The noise is
+	// measured as the difference to the same ping without noise (a ring and narrowband noise at its pitch can partly
+	// cancel over a short window, so comparing rms levels says little).
+	auto pingRun = [](float noise, int follow, int len) {
+		Rig r;
+		r.e.p.noise = noise;
+		r.e.p.noiseFollow = follow;
+		r.e.p.cutoff = cutoffKnob(800.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.8f;
+		std::vector<float> y;
+		for (int n = 0; n < 12000 + len; n++) {
+			if (n == 12000)
+				r.e.pingAll(0.3f);
+			r.step();
+			y.push_back(r.o.l);
+		}
+		return y;
+	};
+	auto diffRms = [](const std::vector<float>& a, const std::vector<float>& b, int from, int to) {
+		double e = 0.0;
+		for (int n = from; n < to; n++)
+			e += (a[n] - b[n]) * (a[n] - b[n]);
+		return std::sqrt(e / (to - from));
+	};
+	const int len = 5 * 48000;
+	std::vector<float> clean = pingRun(0.f, 1, len), follow = pingRun(0.3f, 1, len), always = pingRun(0.3f, 0, len);
+	double before = diffRms(follow, clean, 9600, 12000);
+	double during = diffRms(follow, clean, 12480, 12000 + 9600);
+	double after = diffRms(follow, clean, 12000 + 4 * 48000, 12000 + len);
+	double alwaysAfter = diffRms(always, clean, 12000 + 4 * 48000, 12000 + len);
+	std::printf("     noise following the ping (rms vs the clean ping): before %.6f, during %.4f, 4 s later %.6f (always on: %.4f)\n",
+		before, during, after, alwaysAfter);
+	check(before < 0.01 * alwaysAfter && during > 0.1 * alwaysAfter && after < 0.01 * alwaysAfter,
+		"noise follows the ping (silent before, with the ring, gone after)", "%.4f during / %.6f after", during, after);
+	// NOISE follows the input: noise only while there is input
+	{
+		Rig r;
+		r.e.p.noise = 0.7f;
+		r.e.p.noiseFollow = 2;
+		r.e.p.cutoff = cutoffKnob(800.f);
+		r.e.p.res = 0.5f;
+		double quiet = 0.0, loud = 0.0, none = 0.0;
+		for (int n = 0; n < 4 * 48000; n++) {
+			float x = (n > 48000 && n < 2 * 48000) ? 0.25f * (float) std::sin(2.0 * M_PI * 200.0 * n / SR) : 0.f;
+			r.step(x, x);
+			if (n > 4800 && n < 48000)
+				quiet = std::max(quiet, (double) std::fabs(r.o.l));
+			else if (n > 1.2 * 48000 && n < 2 * 48000)
+				loud = std::max(loud, (double) std::fabs(r.o.l));
+			else if (n > 3.5 * 48000)
+				none = std::max(none, (double) std::fabs(r.o.l));
+		}
+		std::printf("     input follow: quiet %.6f loud %.3f none %.6f\n", quiet, loud, none);
+		check(quiet < 0.001 && loud > 0.05 && none < 0.01, "noise follows the input (silent without, present with, gone after)", "%.3f / %.5f", loud, none);
+	}
+	// ANALOG and the 24 dB slope do not take the gain away: ping rms, noise rms (RES 85%, TYPE LP, ANALOG 1)
+	auto levels = [](float analog, bool s24, double* ping, double* noise) {
+		for (int mode = 0; mode < 2; mode++) {
+			Rig r;
+			r.e.p.cutoff = 0.6f;
+			r.e.p.spread = 0.3f;
+			r.e.p.res = 0.85f;
+			r.e.p.analog = analog;
+			r.e.seedCharacter(3);
+			for (int i = 0; i < 4; i++)
+				r.e.p.slope24[i] = s24;
+			if (mode == 1)
+				r.e.p.noise = 0.6f;
+			double e = 0.0;
+			int cnt = 0;
+			for (int n = 0; n < 4 * 48000; n++) {
+				if (mode == 0 && n % 24000 == 5000)
+					r.e.pingAll(1.f);
+				r.step();
+				if (n > 2 * 48000) {
+					e += r.o.l * r.o.l;
+					cnt++;
+				}
+			}
+			(mode == 0 ? *ping : *noise) = std::sqrt(e / cnt);
+		}
+	};
+	double p0, n0, p1, n1;
+	levels(0.f, false, &p0, &n0);
+	levels(1.f, true, &p1, &n1);
+	std::printf("     24 dB + ANALOG 1 vs 12 dB + ANALOG 0: ping %.1f dB, noise %.1f dB\n", db(p1 / p0), db(n1 / n0));
+	check(std::fabs(db(p1 / p0)) < 3.5 && std::fabs(db(n1 / n0)) < 3.5, "gain: ANALOG 1 + 24 dB keeps ping and noise level (dB)", "%.2f / %.2f (limit +-3.5)", db(p1 / p0), db(n1 / n0));
+}
+
 static void testIdle() {
 	// Nothing connected, NOISE 0, high ANALOG + RES: silence (the noise floor follows activity)
 	auto idleLevel = [](float res, float analog, int seconds = 3) {
@@ -1649,8 +1778,9 @@ static void testDriveVoicings() {
 		}
 		return db(goertzel(y, 36000, 72000, 3000.0) / goertzel(y, 36000, 72000, 1000.0));
 	};
+	// (before the cores the input is saturated and each core's ring is driven too, so both positions are audible)
 	double pre = h3Out(DRIVE_PRE), post = h3Out(DRIVE_POST);
-	check(post > pre + 10.0, "drive: after the cores keeps the harmonics (H3 dB)", "%.1f vs %.1f before", post, pre);
+	check(pre > -30.0 && post > -30.0, "drive: audible before and after the cores (H3 dB)", "%.1f before, %.1f after", pre, post);
 
 	// DRIVE after the cores adds exactly one DRIVE latency to both the wet and the dry path (MIX stays aligned):
 	// a click at MIX 50% peaks exactly DRIVE_LATENCY later than with DRIVE before the cores
@@ -1740,6 +1870,8 @@ int main() {
 	testDriveVoicings();
 	testResonanceSaturation();
 	testIdle();
+	testNoiseFollowAndGain();
+	testDrivenRing();
 	testDigitalAnalogLife();
 	testPingDriveAnalog();
 	testSlope24();

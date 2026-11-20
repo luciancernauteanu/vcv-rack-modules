@@ -31,14 +31,23 @@ Each core can have a steeper, ladder-like low-pass: right-click a core's bullet 
 above the bullet), or right-click the module > "Low-pass slope, all cores". A 24 dB core adds a second low-pass stage
 at the same cutoff (about 24 dB more attenuation two octaves above it), so it sounds heavier and rounder. It only
 affects the low-pass share of the sound (TYPE LP; BP and HP are left alone). Under **ANALOG**, high RES also thins
-the bass of a 24 dB core, the classic ladder trait (about -8 dB at 100 Hz at full ANALOG and RES 88%); with level
-compensation on Full the overall level is restored, so use Gentle or Off to keep the thinner bass.
+the bass of a 24 dB core, the classic ladder trait; that loss is given back at the core's output, so a 24 dB core with ANALOG 1 keeps its level (pings, noise and input
+within about 1.5 dB).
+
+## Noise follows
+
+Right-click > **Noise follows**: Nothing (always on, default), **Ping** (each ping opens its core's noise, by its
+velocity, and it fades at half the ring's rate: a breath that blooms in the resonance and dies with the tail),
+**Input level** (noise only while there is input, ~30 ms follower) or both. With nothing to follow the cores go idle (no CPU, no noise).
 
 ## Pings and DRIVE / ANALOG
 
-The strike of a ping reacts to **DRIVE** (before the cores or both): the more drive, the more the mallet burst is
-saturated, so the hit is brighter and grittier (about +4 dB of high-frequency ring on a 5 kHz core at full drive; the
-ring keeps its loudness). **ANALOG** adds a mild saturation to the strike and gives every ping a little life: a random
+**DRIVE** (before the cores or both) drives pings too: the strike is saturated (a brighter, grittier hit) and every
+core's ring goes through a saturating waveshaper, so the ring gets odd harmonics in its attack and a compressed,
+sustained tail (a click ping: 3rd harmonic from -45 dB to -10 dB at full drive, loudness within 1 dB; it fades in with
+the amount, so a little DRIVE stays clean). Before the cores the drive therefore acts on the input and on each core's
+ring; after the cores it acts on the mixed output only. **ANALOG** adds a mild saturation to the strike and gives
+every ping a little life: a random
 +-12% in strength at full ANALOG, so no two hits are identical. At DRIVE 0 and ANALOG 0 pings are exactly as before.
 
 ## Digital and analog feel
@@ -68,7 +77,7 @@ ring keeps its loudness). **ANALOG** adds a mild saturation to the strike and gi
 | **TYPE** | LP → BP → HP → notch, morphing continuously |
 | **RES** | Resonance, self-oscillating at the top of the knob |
 | **BAND** | Narrows each core to a steep band at its pitch (3 octaves down to 1/24 octave): a drastic filter bank. 0 = off |
-| **DRIVE** | Saturation, from warm to rich (up to about +22 dB into the curve). Right-click: **voicing** Warm (tanh), Diode (one-sided: strong even harmonics), Fold (wavefolder: gritty); **position** before the cores, after them (the harmonics survive the filters; drives pings and resonances) or both at 70% each. The label shows the choice: DRIVE / DIODE / FOLD, + POST or BOTH. **Click the label** for the next voicing, **hold it** (0.5 s) for the next position. Diode and Fold add a high cut that grows with the amount |
+| **DRIVE** | Saturation, from warm to rich (up to about +22 dB into the curve). Right-click: **voicing** Warm (tanh), Diode (one-sided: strong even harmonics), Fold (wavefolder: gritty); **position** before the cores (the input and each core's ring), after them (the mixed output: the harmonics are not filtered) or both at 70% each. The label shows the choice: DRIVE / DIODE / FOLD, + POST or BOTH. **Click the label** for the next voicing, **hold it** (0.5 s) for the next position. Diode and Fold add a high cut that grows with the amount |
 | **STACK** | Parallel (resonator, vowels, chords) → series (steep, aggressive) |
 | **WIDTH** | Spreads the cores over left and right; 0 is mono-safe |
 | **MIX** | Dry / wet |
