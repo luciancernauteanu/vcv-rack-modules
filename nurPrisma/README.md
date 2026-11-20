@@ -16,6 +16,45 @@ notes ring longer); the top of RES sustains and self-oscillates. The trigger vol
 trigger the next core: a clock arpeggiates) or Random. A poly PING pings core i from channel i.
 SHAPE **Chord** tunes the cores to a chord (right-click > Chord); SPREAD climbs through its inversions.
 
+## Low-pass gate (LPG)
+
+A vactrol-style low-pass gate on every core, set from the right-click menu (a gold **LPG** shows inside the ring while
+it is on). **Depth** 0 = off; at 100% a core is shut (silent and dark) until something opens it. The gate opens in
+about 2 ms and closes slowly: its release is fast at first and slows as it closes, like a vactrol, and level and
+cutoff close together (it gets duller as it gets quieter). **Release** sets the time, 40 ms to 1.5 s. **Gate opens
+on**: ping only (every ping plucks a core), input level only (an auto-gate that follows what you play), or both
+(default). Level compensation stays at 0 dB while the gate is on.
+
+## 24 dB slope
+
+Each core can have a steeper, ladder-like low-pass: right-click a core's bullet > "24 dB slope" (a small mark shows
+above the bullet), or right-click the module > "Low-pass slope, all cores". A 24 dB core adds a second low-pass stage
+at the same cutoff (about 24 dB more attenuation two octaves above it), so it sounds heavier and rounder. It only
+affects the low-pass share of the sound (TYPE LP; BP and HP are left alone). Under **ANALOG**, high RES also thins
+the bass of a 24 dB core, the classic ladder trait (about -8 dB at 100 Hz at full ANALOG and RES 88%); with level
+compensation on Full the overall level is restored, so use Gentle or Off to keep the thinner bass.
+
+## Pings and DRIVE / ANALOG
+
+The strike of a ping reacts to **DRIVE** (before the cores or both): the more drive, the more the mallet burst is
+saturated, so the hit is brighter and grittier (about +4 dB of high-frequency ring on a 5 kHz core at full drive; the
+ring keeps its loudness). **ANALOG** adds a mild saturation to the strike and gives every ping a little life: a random
++-12% in strength at full ANALOG, so no two hits are identical. At DRIVE 0 and ANALOG 0 pings are exactly as before.
+
+## Digital and analog feel
+
+- **Digital noise** (right-click > Noise type): NOISE becomes a one-bit shift-register sequence, as in old hardware
+  noise generators. COLOR steps the register length (17, 15, 11, 9, 7, 5, 4, 3 bits): long is white, short repeats
+  every 2^n - 1 samples and turns into a pitched, metallic buzz (3 bits: sample rate / 7). Pinged through the cores it
+  gives digital bells.
+- **PCM gate** (top of DIGITAL, above 75%): every sample below a threshold is zeroed, with no envelope: a gritty,
+  broken-digital texture. Quiet material disappears first.
+- **Thermal drift** (ANALOG): each core wanders a few cents in pitch (up to +-4) and a few percent in resonance (+-8%),
+  slowly (targets every 7-20 s), on top of the fixed per-instance mismatch.
+- **Level compensation hears like an ear** (right-click > Level compensation hears; default): the detector is
+  weighted like a loudness meter (a high-pass at 120 Hz and +4 dB above ~1.7 kHz), so a dark low-pass and a bright
+  high-pass at the same setting feel equally loud. Flat (RMS) is still available.
+
 ## Controls
 
 | Control | What it does |
@@ -24,6 +63,7 @@ SHAPE **Chord** tunes the cores to a chord (right-click > Chord); SPREAD climbs 
 | **SPREAD** (prism ring around it) | From all four cores on one peak to fanned out over ±2.5 octaves. The dots on the ring show each core's frequency |
 | **Core bullets** (ALL and four colours, under the ring) | Pick a core to edit on its own: CUTOFF (centre knob), TYPE, RES, BAND and the SPREAD ring then set that core only, WIDTH becomes its PAN and MIX its LEVEL. A core follows the global knobs until you change one of them in focus; from then on it keeps its own value (an own CUTOFF is a detune from the core's place, so CUTOFF, SPREAD and SHAPE still move every core; an own PAN replaces WIDTH's placement and moves both channels of the core). Right-click > "All cores follow the global knobs again" clears every core's own settings. Click it again (or ALL) to go back. The bullets never move, so a core can be picked while MOTION moves its dot. A ring around a bullet = that core has its own settings; right-click a bullet to make it follow the global knobs again or to reset it |
 | **Core dots** (on the ring) | Each core's own share of SPREAD: drag a dot up / down (-100% .. 200%, double-click = 100%). 0% keeps that core on CUTOFF, negative puts it on the other side. In Scale and Chord, amounts other than 100% leave the scale |
+| **Quantize to the scale** (right-click, scale and root from the same menu; SCALE shows in the ring) | CUTOFF and every core that SPREAD fans out snap to notes of the scale, so the cores always play scale notes. SHAPE Chord and Scale already build their notes from the root and are not re-snapped |
 | **SHAPE** | How the cores are spaced: Even, Harmonic, Scale, **Random** (the big rainbow LED in the middle of the SHAPE LEDs: click it for new random places, which glide in), Chord, **Bell** (hum, prime, minor-third tierce, nominal: 1 : 2 : 2.4 : 4), **Vowel** (formants; SPREAD morphs A > E > I > O > U, CUTOFF shifts the voice, 1 kHz = adult). Bell / Harmonic are exact at SPREAD 50%. The label shows the shape's name. Right-click > Chord and scale tuning: Equal or **Just** (pure ratios: pinged chords fuse instead of beating) |
 | **TYPE** | LP → BP → HP → notch, morphing continuously |
 | **RES** | Resonance, self-oscillating at the top of the knob |

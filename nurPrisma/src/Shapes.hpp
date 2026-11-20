@@ -198,6 +198,44 @@ struct Rng {
 	}
 };
 
+/** Digital noise: a one-bit shift-register (LFSR) sequence, as in old consoles and the hardware noise generators in
+Winer's book: a +-1 square level changing at the sample rate. A long register (17 bits) is white; a short one repeats
+every 2^n - 1 steps, so it turns into a pitched, metallic buzz (4 bits: a buzz at sample rate / 15; 3 bits: / 7).
+COLOR 0..1 steps the register length 17, 15, 11, 9, 7, 5, 4, 3. RMS ~0.3, like the coloured noise. */
+struct ShiftNoise {
+	static const int LENGTHS = 8;
+	uint32_t reg = 1;
+	int idx = 0;
+
+	static int bitsFor(int i) {
+		static const int B[LENGTHS] = {17, 15, 11, 9, 7, 5, 4, 3};
+		return B[i];
+	}
+	/** Feedback taps (bit 0 and one more: maximal length, period 2^n - 1; checked in tests/) */
+	static uint32_t maskFor(int i) {
+		static const uint32_t M[LENGTHS] = {0x9, 0x3, 0x5, 0x11, 0x3, 0x5, 0x3, 0x3};
+		return M[i];
+	}
+
+	float process(float color) {
+		int want = std::min((int) (std::min(std::max(color, 0.f), 1.f) * LENGTHS), LENGTHS - 1);
+		if (want != idx) {
+			idx = want;
+			reg = (reg & ((1u << bitsFor(idx)) - 1u)) ? (reg & ((1u << bitsFor(idx)) - 1u)) : 1u;
+		}
+		int n = bitsFor(idx);
+		float out = (reg & 1u) ? 0.3f : -0.3f;
+		uint32_t x = reg & maskFor(idx);
+		uint32_t fb = 0;
+		while (x) {
+			fb ^= 1u;
+			x &= x - 1u;
+		}
+		reg = (reg >> 1) | (fb << (n - 1));
+		return out;
+	}
+};
+
 /** Noise in four colours, crossfaded by COLOR 0..1: white (0), pink (1/3), brown (2/3), crackle (1). Each colour
 is scaled to about the same loudness (RMS ~0.3). */
 struct ColoredNoise {

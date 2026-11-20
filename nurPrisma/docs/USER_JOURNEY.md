@@ -108,6 +108,58 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
+- 2026-11-20: digital and analog feel. (1) `ShiftNoise` (Shapes.hpp): LFSR noise, register 17..3 bits stepped by COLOR,
+  maximal period 2^n - 1 (tested), +-1 x 0.3; `EngineParams::noiseType` (menu, saved). (2) PCM gate: `digitalGate` =
+  (DIGITAL - 0.75) x 0.24 (engine units), per sample, in the DIGITAL block of the core loop. (3) Thermal drift:
+  `thermalNow` (per core two random walks, targets every 7-20 s, smoothstep) adds +-4 cents of pitch and +-8% of Q
+  under ANALOG. (4) `LoudnessWeight` (1-pole HP 120 Hz + 4 dB shelf at 1.7 kHz) on both sides of the level
+  compensation (`weightIn/Out`, `EngineParams::levelWeight`, menu, saved; default ear; flat = the old RMS).
+  Measured: ear mode matches weighted loudness within 0.1 dB (LP 200 Hz / HP 5 kHz / BAND 80%; flat was -4.2 / +3.4 /
+  +1.2 dB), thermal drift 6.9 cents over 60 s, PCM gate zeroes a quiet sine at 100% and nothing at 70%. 141 offline
+  checks. CPU: 111 ns/sample at defaults (+6 for the weighting).
+
+- 2026-11-19: pings react to DRIVE and ANALOG. `PingBurst::start(..., shapeG)`: when shapeG > 1.01 the whole strike is
+  generated once into `buf`, saturated (tanh of gain shapeG relative to its own peak), energy-matched back, and
+  replayed (`buffered`); otherwise the streaming path is unchanged (bit-identical at DRIVE 0 / ANALOG 0).
+  shapeG = exp(preAmt ln 12) x (1 + 1.5 ANALOG), preAmt = DRIVE before the cores (70% in Both, 0 for After: the post
+  stage drives the ring). ANALOG also scales each ping by 1 + 0.12 ANALOG rnd. Measured: 5 kHz ring +3.8 dB at DRIVE
+  100%, low ring +1.6 dB; ping strength spread 0.8 dB at ANALOG 1 (0.03 at 0). 133 offline checks.
+
+- 2026-11-19: 24 dB slope per core (`EngineParams::slope24`, module `coreSlope`, saved; core bullet menu + module menu).
+  `LowStage` (a 12 dB TPT low-pass, Q 0.7, same g as the core) after the core: the LP share (TYPE's LP weight,
+  `slopeShare`) goes through it. Ladder bass loss: `slopeGain` = 1 - share (1 - 1 / (1 + 1.8 ANALOG (RES / 0.92)^2)).
+  Pings scale for the stage (0.707) and the loss. The core-loop dispatch is now a 32-case flag switch
+  (`runCoresAny`: DIGITAL, BAND, ANALOG saturation, LPG, S24 as compile-time flags). Measured: 2 octaves above the
+  cutoff -49 dB (12 dB core -24.5 dB); passband and BP unchanged; bass -8.3 dB at ANALOG 1 / RES 88%; pings in tune,
+  +0.25 dB. 130 offline checks. CPU: 148 ns/sample with all four cores at 24 dB (104 otherwise).
+
+- 2026-11-19: series stacking no longer piles up level (found with the user's patch: STACK 100%, SPREAD 0, BAND 100%,
+  core LEVELs 120-163%, NOISE 33%, a ping into it: the resonator was far too loud). Three causes, all in the series
+  chain: (1) per-core LEVEL and the analog gain mismatch were applied inside the chain and compounded (four levels
+  = +12 dB): now they scale what a core adds to the output, the chain carries the core's own output; (2) BAND's
+  make-up gain compounded the same way (about +47 dB at BAND 100%): now `bandOut` on the output contribution only;
+  (3) cores on one pitch multiply their resonances in series (Q^4): each core's ping is scaled by what the cores after
+  it add at its pitch (`seriesNorm`, analytic `coreMagnitude`, only a reduction, weighted by STACK) and its noise by
+  the same (`noiseScale`, `noiseCore`). Same-pitch LP cores at RES 72%: ping peak 10 V -> 1.1 V, continuous noise in
+  series now as loud as in parallel. Stack 0 is unchanged; the golden scenario that pings in series (3) changes on
+  purpose. 123 offline checks.
+
+- 2026-11-19: "Quantize to the scale" now snaps every core's place (CUTOFF + its SPREAD offset), not only the CUTOFF
+  knob (`updateBlock`: `po` for cores without an own CUTOFF); SHAPE Chord and Scale are left alone (they build their
+  notes from the root). Cores with an own CUTOFF were already snapped. Test: all four cores within 0.001 cents of a
+  C-major note for Even / Random / Harmonic at four SPREAD amounts; off leaves them free; a Chord in D keeps its
+  major third. 119 offline checks.
+
+- 2026-11-19: low-pass gate (append-only `LPG_PARAM`, `LPG_DECAY_PARAM`; source `lpgSource` in the menu / patch).
+  One vactrol per core (`lpgV`): lit by the ping pulse (6 ms, set where the ping fires) and / or the core's input
+  level (`lpgEnv`, 30 ms follower; t = min(1, sqrt(10 env))); rises in 2 ms, falls with tau = DECAY x (0.3 + 2.2
+  (1 - v)) (DECAY 40 ms .. 1.5 s). Open amount o = 1 - depth (1 - v): gain o^2 and a one-pole cutoff 40 Hz .. 20 kHz
+  (log), both worked out per block and interpolated per sample. Applied after each core (and BAND / DIGITAL) before
+  the series chain and the pan. Only in the LPG instantiations of `coresImpl` (`runCoresLpg`), so depth 0 is
+  bit-identical (golden). The level compensation holds 0 dB while the gate is on; the engine idles cores as before.
+  Measured: ring to -20 dB 69 ms with a fast gate (208 ms without), 159 ms slow; the release slows as it closes;
+  ping peak -1.4 dB; click-free onset. 114 offline checks. CPU: +17 ns/sample (124).
+
 - 2026-11-19: silence and CPU when nothing plays. ANALOG's noise floor (hiss) now follows activity: `hissGate`
   (per block, 50 ms) = (input RMS + strongest ring) / 0.02, fully open while a core self-oscillates (so RES at the
   top still starts singing on its own). Nothing connected at ANALOG 84 % / RES 85 % went from -73 dB to digital

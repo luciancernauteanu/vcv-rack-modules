@@ -76,6 +76,7 @@ struct Rig {
 		p.digital = 0.f;
 		p.drive = 0.f;
 		p.strike = 0.f;
+		p.levelWeight = 0;
 	}
 	void step(float l = 0.f, float r = 0.f) {
 		float a[4] = {l, l, l, l}, b[4] = {r, r, r, r};
@@ -1066,6 +1067,510 @@ static void testNewShapes() {
 	}
 }
 
+static void testLpg() {
+	// A ping through the gate: time for the ring's envelope to fall 20 dB and 40 dB (ms), per setting
+	auto ringTimes = [](float depth, float decay, double* t20, double* t40, double* peakOut) {
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(440.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.85f;
+		r.e.p.lpg = depth;
+		r.e.p.lpgDecay = decay;
+		r.e.p.lpgSource = 0; // ping only
+		r.step();
+		r.e.pingAll(1.f);
+		std::vector<double> env;
+		double peak = 0.0;
+		for (int n = 0; n < 2 * 48000; n++) {
+			r.step();
+			double a = std::fabs(r.o.l);
+			peak = std::max(peak, a);
+			if (n % 48 == 0)
+				env.push_back(0.0);
+			env.back() = std::max(env.back(), a);
+		}
+		*peakOut = peak;
+		*t20 = *t40 = -1.0;
+		for (size_t k = 0; k < env.size(); k++) {
+			if (*t20 < 0.0 && k > 5 && env[k] < peak * 0.1)
+				*t20 = k;
+			if (*t40 < 0.0 && k > 5 && env[k] < peak * 0.01)
+				*t40 = k;
+		}
+	};
+	double a20, a40, ap, b20, b40, bp, c20, c40, cp;
+	ringTimes(0.f, 0.5f, &a20, &a40, &ap);
+	ringTimes(1.f, 0.2f, &b20, &b40, &bp);
+	ringTimes(1.f, 0.8f, &c20, &c40, &cp);
+	std::printf("     ring to -20 / -40 dB (ms): no gate %.0f / %.0f, gate fast %.0f / %.0f, gate slow %.0f / %.0f\n", a20, a40,
+		b20, b40, c20, c40);
+	check(b20 > 0 && b20 < a20 * 0.6, "lpg: the gate shortens a ring (fast gate vs none, -20 dB time)", "%.0f vs %.0f ms", b20, a20);
+	check(c20 > b20 * 1.5, "lpg: DECAY lengthens the release (slow vs fast, -20 dB time)", "%.0f vs %.0f ms", c20, b20);
+	double slowdown = (c40 - c20) / std::max(1.0, c20);
+	check(slowdown > 0.5, "lpg: the release slows as it closes (-20..-40 dB takes longer than 0..-20)", "%.2f x", slowdown);
+	check(std::fabs(db(bp / ap)) < 6.0, "lpg: the ping keeps its loudness (peak vs no gate, dB)", "%.2f (limit +-6)", db(bp / ap));
+
+	// A closed gate with the input source: silent without input, opens with input, closes after it
+	{
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(1000.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.2f;
+		r.e.p.lpg = 1.f;
+		r.e.p.lpgDecay = 0.2f;
+		r.e.p.lpgSource = 1;
+		double before = 0.0, during = 0.0, after = 0.0;
+		for (int n = 0; n < 4 * 48000; n++) {
+			float x = (n > 48000 && n < 2 * 48000) ? 0.3f * (float) std::sin(2.0 * M_PI * 1000.0 * n / SR) : 0.f;
+			r.step(x, x);
+			double a = std::fabs(r.o.l);
+			if (n < 48000)
+				before = std::max(before, a);
+			else if (n > 1.5 * 48000 && n < 2 * 48000)
+				during = std::max(during, a);
+			else if (n > 3.5 * 48000)
+				after = std::max(after, a);
+		}
+		std::printf("     gate on input: before %.4f, during %.3f, after %.5f\n", before, during, after);
+		check(before == 0.0 && during > 0.1 && after < 0.003, "lpg: input opens the gate and it closes after",
+			"%.3f open, %.5f closed", during, after);
+	}
+
+	// The level compensation must not boost a closed gate
+	{
+		Rig r;
+		r.e.p.res = 0.4f;
+		r.e.p.lpg = 1.f;
+		r.e.p.lpgSource = 0;
+		r.e.p.levelComp = LEVEL_FULL;
+		ColoredNoise nz;
+		for (int n = 0; n < 4 * 48000; n++) {
+			float a = nz.process(1.f / 3.f);
+			r.step(a, a);
+		}
+		check(std::fabs(r.e.levelCompDb()) < 1.f, "lpg: level compensation stays at 0 dB with the gate on", "%.2f dB",
+			r.e.levelCompDb());
+	}
+
+	// Click-free: the gate's onset on a ping is no steeper than the ring's own slope x 2
+	{
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(440.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.85f;
+		r.e.p.lpg = 1.f;
+		r.e.p.lpgSource = 0;
+		r.e.p.strike = 0.f;
+		r.step();
+		r.e.pingAll(1.f);
+		float prev = 0.f, maxStep = 0.f;
+		for (int n = 0; n < 4800; n++) {
+			r.step();
+			maxStep = std::max(maxStep, std::fabs(r.o.l - prev));
+			prev = r.o.l;
+		}
+		double ringSlope = 0.9 * 2.0 * M_PI * 440.0 / SR;
+		check(maxStep < 2.0 * ringSlope, "lpg: onset is click-free (max step vs ring slope)", "%.4f vs %.4f", maxStep, ringSlope);
+	}
+}
+
+static void testQuantizeSpread() {
+	// Quantize to the scale: every spread core lands on a note of the scale (C major), not only CUTOFF
+	const int MAJOR[7] = {0, 2, 4, 5, 7, 9, 11};
+	for (int shape : {(int) SHAPE_EVEN, (int) SHAPE_RANDOM, (int) SHAPE_HARMONIC}) {
+		double worst = 0.0;
+		for (float spread : {0.2f, 0.45f, 0.7f, 1.f}) {
+			Rig r;
+			r.e.p.quantizeCutoff = true;
+			r.e.p.scale = 0;
+			r.e.p.shape = shape;
+			r.e.p.spread = spread;
+			r.e.p.cutoff = 0.6f;
+			r.e.seedRandomShape(5);
+			for (int n = 0; n < 4800; n++)
+				r.step();
+			for (int i = 0; i < 4; i++) {
+				double semis = (r.e.oct[i] - std::log2(261.6256)) * 12.0;
+				double within = semis - 12.0 * std::floor(semis / 12.0);
+				double best = 99.0;
+				for (int k = 0; k < 7; k++)
+					best = std::min(best, std::fabs(within - MAJOR[k]));
+				best = std::min(best, std::fabs(within - 12.0));
+				worst = std::max(worst, best * 100.0);
+			}
+		}
+		char name[80];
+		std::snprintf(name, sizeof name, "quantize: spread cores on scale notes, shape %d (cents off)", shape);
+		check(worst < 0.5, name, "%.3f (limit 0.5)", worst);
+	}
+	// Off: the spread cores stay free
+	{
+		Rig r;
+		r.e.p.quantizeCutoff = false;
+		r.e.p.spread = 0.45f;
+		r.e.p.cutoff = 0.6f;
+		for (int n = 0; n < 4800; n++)
+			r.step();
+		double semis = (r.e.oct[1] - std::log2(261.6256)) * 12.0;
+		check(std::fabs(semis - std::round(semis)) > 0.05, "quantize: off leaves the spread free", "%.3f semitones", semis);
+	}
+	// A Chord keeps its intervals with quantize on (C major scale, chord from a D root)
+	{
+		Rig r;
+		r.e.p.quantizeCutoff = true;
+		r.e.p.shape = SHAPE_CHORD;
+		r.e.p.chord = 5; // major 0 4 7 12
+		r.e.p.spread = 0.f;
+		r.e.p.cutoff = cutoffKnob(293.66f); // D4
+		for (int n = 0; n < 4800; n++)
+			r.step();
+		double third = 12.0 * (r.e.oct[1] - r.e.oct[0]);
+		check(std::fabs(third - 4.0) < 0.01, "quantize: Chord keeps its major third in another key", "%.3f semitones", third);
+	}
+}
+
+static void testSeriesLevel() {
+	// Four LP cores on ONE pitch (SPREAD 0), RES 72%: in series their resonances multiply (Q^4). A ping, the noise and
+	// the per-core LEVEL / BAND make-up must not pile up: series is about as loud as parallel
+	auto run = [](float stack, float levels, float band, bool noise, double* peakOut) {
+		Rig r;
+		r.e.p.cutoff = 0.589f;
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.716f;
+		r.e.p.stack = stack;
+		r.e.p.band = band;
+		r.e.p.strike = 0.32f;
+		r.e.p.noise = noise ? 0.328f : 0.f;
+		r.e.p.color = 0.08f;
+		for (int i = 0; i < 4; i++)
+			r.e.p.coreLevel[i] = levels;
+		r.step();
+		r.e.pingAll(1.f);
+		double peak = 0.0, e = 0.0;
+		for (int n = 0; n < 2 * 48000; n++) {
+			r.step();
+			peak = std::max(peak, (double) std::fabs(r.o.l));
+			if (n > 24000)
+				e += r.o.l * r.o.l;
+		}
+		*peakOut = peak;
+		return std::sqrt(e / 24000.0);
+	};
+	double pk;
+	double par = run(0.f, 1.f, 0.f, false, &pk), parPeak = pk;
+	double ser = run(1.f, 1.f, 0.f, false, &pk), serPeak = pk;
+	std::printf("     ping, same pitch: parallel peak %.2f, series peak %.2f (engine units, x5 V)\n", parPeak, serPeak);
+	check(db(serPeak / parPeak) < 4.0, "series: a ping rings about as loud as in parallel (dB)", "%.2f (limit 4)", db(serPeak / parPeak));
+	// LEVEL 160% on all four cores does not multiply through the chain (1.6^4 = +12 dB)
+	run(1.f, 1.6f, 0.f, false, &pk);
+	check(db(pk / serPeak) < 5.0, "series: LEVEL 160% x 4 does not compound (dB vs 100%)", "%.2f (limit 5)", db(pk / serPeak));
+	// BAND 100% make-up does not multiply through the chain (about +47 dB before)
+	run(1.f, 1.f, 1.f, false, &pk);
+	check(db(pk / serPeak) < 8.0, "series: BAND 100% make-up does not compound (dB vs BAND 0)", "%.2f (limit 8)", db(pk / serPeak));
+	// Noise in series is about as loud as in parallel
+	double nPar = run(0.f, 1.f, 0.f, true, &pk), nSer = run(1.f, 1.f, 0.f, true, &pk);
+	check(db(nSer / nPar) < 6.0, "series: noise rings about as loud as in parallel (rms dB)", "%.2f (limit 6)", db(nSer / nPar));
+	(void) par;
+	(void) ser;
+}
+
+static void testSlope24() {
+	// A 4-pole low-pass: two octaves above the cutoff the 24 dB core is ~24 dB further down than the 12 dB one
+	auto gainAt = [](bool s24, float res, float an, double hz) {
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(1000.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = res;
+		r.e.p.analog = an;
+		r.e.p.levelComp = LEVEL_OFF;
+		r.e.seedCharacter(1);
+		for (int i = 0; i < 4; i++)
+			r.e.p.slope24[i] = s24;
+		std::vector<float> y;
+		for (int n = 0; n < 48000; n++) {
+			float x = 0.05f * (float) std::sin(2.0 * M_PI * hz * n / SR);
+			r.step(x, x);
+			y.push_back(r.o.cores[0]);
+		}
+		return db(goertzel(y, 24000, 48000, hz) / 0.05);
+	};
+	double slope12 = gainAt(false, 0.f, 0.f, 4000.0), slope24 = gainAt(true, 0.f, 0.f, 4000.0);
+	std::printf("     2 octaves above the cutoff: 12 dB core %.1f dB, 24 dB core %.1f dB\n", slope12, slope24);
+	check(slope24 < slope12 - 15.0, "slope: 24 dB core is steeper (2 oct above cutoff, dB further down)", "%.1f (limit 15)", slope12 - slope24);
+	double pass12 = gainAt(false, 0.f, 0.f, 100.0), pass24 = gainAt(true, 0.f, 0.f, 100.0);
+	check(std::fabs(pass24 - pass12) < 0.5, "slope: passband unchanged at ANALOG 0 (100 Hz, dB)", "%.2f (limit 0.5)", pass24 - pass12);
+	// Ladder trait: at high RES and ANALOG the bass thins
+	double bass0 = gainAt(true, 0.88f, 0.f, 100.0), bass1 = gainAt(true, 0.88f, 1.f, 100.0);
+	check(bass1 < bass0 - 4.0, "slope: ANALOG + RES thins the bass of a 24 dB core (100 Hz, dB)", "%.2f vs %.2f", bass1, bass0);
+	// A 12 dB core is not affected by ANALOG's bass loss
+	double b12 = gainAt(false, 0.88f, 1.f, 100.0);
+	check(std::fabs(b12) < 1.0, "slope: a 12 dB core keeps its bass (100 Hz, dB)", "%.2f", b12);
+	// A pinged 24 dB core rings in tune and as loud as a 12 dB one
+	auto ping = [](bool s24, double* cents) {
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(440.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.85f;
+		for (int i = 0; i < 4; i++)
+			r.e.p.slope24[i] = s24;
+		r.step();
+		r.e.pingAll(1.f);
+		std::vector<float> y;
+		double peak = 0.0;
+		for (int n = 0; n < 24000; n++) {
+			r.step();
+			y.push_back(r.o.cores[0]);
+			peak = std::max(peak, (double) std::fabs(r.o.cores[0]));
+		}
+		*cents = 1200.0 * std::log2(zeroCrossFreq(y, 960, 24000) / 440.0);
+		return peak;
+	};
+	double c12, c24;
+	double p12 = ping(false, &c12), p24 = ping(true, &c24);
+	check(std::fabs(c24 - c12) < 15.0, "slope: a pinged 24 dB core stays in tune (cents vs 12 dB)", "%.2f vs %.2f", c24, c12);
+	check(std::fabs(db(p24 / p12)) < 4.0, "slope: a pinged 24 dB core rings about as loud (dB)", "%.2f (limit +-4)", db(p24 / p12));
+	// BP is left alone: the second stage is only for the low-pass share
+	double bp12 = 0.0, bp24 = 0.0;
+	for (int k = 0; k < 2; k++) {
+		Rig r;
+		r.e.p.cutoff = cutoffKnob(1000.f);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.f;
+		r.e.p.type = 1.f;
+		r.e.p.levelComp = LEVEL_OFF;
+		for (int i = 0; i < 4; i++)
+			r.e.p.slope24[i] = k == 1;
+		std::vector<float> y;
+		for (int n = 0; n < 48000; n++) {
+			float x = 0.05f * (float) std::sin(2.0 * M_PI * 1000.0 * n / SR);
+			r.step(x, x);
+			y.push_back(r.o.cores[0]);
+		}
+		(k ? bp24 : bp12) = goertzel(y, 24000, 48000, 1000.0);
+	}
+	check(std::fabs(db(bp24 / bp12)) < 0.1, "slope: TYPE BP is unaffected (dB)", "%.3f", db(bp24 / bp12));
+}
+
+static void testPingDriveAnalog() {
+	// A ping's ring: level at the core's own frequency, for a bright core (5 kHz) where the strike's high end matters
+	auto ring = [](float drive, float analog, int pos, double hz, uint32_t seed, double* peakOut) {
+		Rig r;
+		r.e.p.cutoff = cutoffKnob((float) hz);
+		r.e.p.spread = 0.f;
+		r.e.p.res = 0.85f;
+		r.e.p.drive = drive;
+		r.e.p.drivePos = pos;
+		r.e.p.analog = analog;
+		r.e.p.strike = 0.4f; // felt
+		r.e.seedCharacter(seed);
+		for (int n = 0; n < 2000; n++)
+			r.step();
+		r.e.pingAll(1.f);
+		std::vector<float> y;
+		double peak = 0.0;
+		for (int n = 0; n < 12000; n++) {
+			r.step();
+			y.push_back(r.o.cores[0]);
+			peak = std::max(peak, (double) std::fabs(r.o.cores[0]));
+		}
+		if (peakOut)
+			*peakOut = peak;
+		return goertzel(y, 1200, 12000, hz);
+	};
+	// DRIVE saturates the strike: more high-frequency energy in the hit (brighter ring on a high core), same loudness
+	// on a low core (energy matched)
+	double hi0 = ring(0.f, 0.f, DRIVE_PRE, 5000.0, 1, nullptr), hi1 = ring(1.f, 0.f, DRIVE_PRE, 5000.0, 1, nullptr);
+	double lo0 = ring(0.f, 0.f, DRIVE_PRE, 200.0, 1, nullptr), lo1 = ring(1.f, 0.f, DRIVE_PRE, 200.0, 1, nullptr);
+	std::printf("     ping ring, DRIVE 0 -> 100%%: 5 kHz core %.1f dB, 200 Hz core %.1f dB\n", db(hi1 / hi0), db(lo1 / lo0));
+	check(db(hi1 / hi0) > 3.0, "ping: DRIVE brightens the strike (5 kHz ring, dB)", "%.2f (limit > 3)", db(hi1 / hi0));
+	check(std::fabs(db(lo1 / lo0)) < 3.0, "ping: DRIVE keeps a low ring about as loud (dB)", "%.2f (limit +-3)", db(lo1 / lo0));
+	// ANALOG: every ping a little different (a few % of strength), none at ANALOG 0
+	double mn = 1e9, mx = 0.0, mn0 = 1e9, mx0 = 0.0;
+	{
+		Rig a, z;
+		a.e.p.cutoff = z.e.p.cutoff = cutoffKnob(440.f);
+		a.e.p.spread = z.e.p.spread = 0.f;
+		a.e.p.res = z.e.p.res = 0.85f;
+		a.e.p.analog = 1.f;
+		z.e.p.analog = 0.f;
+		a.e.seedCharacter(3);
+		z.e.seedCharacter(3);
+		a.step();
+		z.step();
+		for (int k = 0; k < 12; k++) {
+			a.e.pingAll(1.f);
+			z.e.pingAll(1.f);
+			double pa = 0.0, pz = 0.0;
+			for (int n = 0; n < 24000; n++) {
+				a.step();
+				z.step();
+				if (n < 4800) {
+					pa = std::max(pa, (double) std::fabs(a.o.cores[0]));
+					pz = std::max(pz, (double) std::fabs(z.o.cores[0]));
+				}
+			}
+			mn = std::min(mn, pa);
+			mx = std::max(mx, pa);
+			mn0 = std::min(mn0, pz);
+			mx0 = std::max(mx0, pz);
+		}
+	}
+	std::printf("     12 pings, spread of the ring peak: ANALOG 1 %.2f dB, ANALOG 0 %.2f dB\n", db(mx / mn), db(mx0 / mn0));
+	check(db(mx / mn) > 0.3 && db(mx0 / mn0) < 0.05, "ping: ANALOG makes every ping a little different", "%.2f dB (ANALOG 0: %.3f dB)", db(mx / mn), db(mx0 / mn0));
+}
+
+static void testDigitalAnalogLife() {
+	// Shift-register noise: every register length has the full period 2^n - 1
+	{
+		bool ok = true;
+		int worstN = 0;
+		for (int i = 0; i < ShiftNoise::LENGTHS; i++) {
+			int n = ShiftNoise::bitsFor(i);
+			ShiftNoise sn;
+			sn.idx = i;
+			sn.reg = 1;
+			uint32_t start = 1;
+			int period = 0;
+			for (int k = 1; k <= (1 << n) + 2; k++) {
+				float c = (i + 0.5f) / ShiftNoise::LENGTHS;
+				sn.process(c);
+				if (sn.reg == start) {
+					period = k;
+					break;
+				}
+			}
+			if (period != (1 << n) - 1) {
+				ok = false;
+				worstN = n;
+			}
+		}
+		check(ok, "digital noise: every register has the maximal period 2^n - 1", "%.0f (bad length, 0 = none)", (double) worstN);
+	}
+	// A 3-bit register repeats every 7 samples: a pitched buzz at sample rate / 7; 17 bits is flat; RMS 0.3
+	{
+		ShiftNoise lo, hi;
+		std::vector<float> yl, yh;
+		for (int n = 0; n < 48000; n++) {
+			yl.push_back(lo.process(0.f));
+			yh.push_back(hi.process(0.99f));
+		}
+		double f7 = SR / 7.0;
+		double peak = goertzel(yh, 0, 48000, f7), off = goertzel(yh, 0, 48000, f7 * 0.8);
+		double flat = goertzel(yl, 0, 48000, f7) / std::max(1e-9, goertzel(yl, 0, 48000, f7 * 0.8));
+		double rms = 0.0;
+		for (float v : yl)
+			rms += v * v;
+		rms = std::sqrt(rms / yl.size());
+		std::printf("     shift noise: 3-bit tone %.4f vs off-tone %.5f; 17-bit ratio %.2f, RMS %.3f\n", peak, off, flat, rms);
+		check(peak > 20.0 * off && flat < 3.0 && std::fabs(rms - 0.3) < 0.01, "digital noise: short register pitched, long one flat, RMS 0.3",
+			"%.1f x peak, flat ratio %.2f", peak / std::max(1e-9, off), flat);
+	}
+	// The engine: NOISE type digital reaches the cores
+	{
+		Rig r;
+		r.e.p.noise = 0.8f;
+		r.e.p.noiseType = 1;
+		r.e.p.color = 0.99f;
+		r.e.p.cutoff = 1.f;
+		r.e.p.res = 0.f;
+		double e = 0.0;
+		for (int n = 0; n < 24000; n++) {
+			r.step();
+			if (n > 4800)
+				e += r.o.l * r.o.l;
+		}
+		check(e > 0.01, "digital noise: reaches the output (engine, type digital)", "%.3f", e);
+	}
+	// PCM gate at the top of DIGITAL: a quiet sine loses many samples entirely; below 75% there is no gate
+	{
+		auto zeros = [](float digital) {
+			Rig r;
+			r.e.p.digital = digital;
+			r.e.p.cutoff = 1.f;
+			r.e.p.res = 0.f;
+			r.e.p.levelComp = LEVEL_OFF;
+			int z = 0, n2 = 0;
+			for (int n = 0; n < 24000; n++) {
+				float x = 0.05f * (float) std::sin(2.0 * M_PI * 220.0 * n / SR);
+				r.step(x, x);
+				if (n > 4800) {
+					n2++;
+					z += r.o.cores[0] == 0.f;
+				}
+			}
+			return (double) z / n2;
+		};
+		double g1 = zeros(1.f), g7 = zeros(0.7f);
+		check(g1 > 0.2 && g7 < 0.05, "digital: PCM gate zeroes samples at the top of the knob (fraction)", "%.2f at 100%%, %.2f at 70%%", g1, g7);
+	}
+	// Thermal drift (ANALOG): a core wanders a few cents over tens of seconds; none at ANALOG 0
+	{
+		double span[2];
+		for (int k = 0; k < 2; k++) {
+			Rig r;
+			r.e.p.analog = k ? 1.f : 0.f;
+			r.e.p.spread = 0.f;
+			r.e.seedCharacter(11);
+			double mn = 1e9, mx = -1e9;
+			for (int n = 0; n < 60 * 48000; n++) {
+				r.step();
+				if (n % 4800 == 0 && n > 48000) {
+					double c = 1200.0 * r.e.oct[0];
+					mn = std::min(mn, c);
+					mx = std::max(mx, c);
+				}
+			}
+			span[k] = mx - mn;
+		}
+		std::printf("     thermal drift over 60 s: ANALOG 0 %.3f cents, ANALOG 1 %.2f cents\n", span[0], span[1]);
+		check(span[0] < 0.001 && span[1] > 1.0 && span[1] < 10.0, "analog: slow thermal drift of a few cents", "%.2f cents (ANALOG 0: %.3f)", span[1], span[0]);
+	}
+	// Level compensation that hears: output and input match in the weighted (ear) sense, not only in flat RMS
+	{
+		struct Case {
+			const char* name;
+			float cutoffHz;
+			float band;
+			float type;
+		};
+		const Case cases[3] = {{"LP 200 Hz", 200.f, 0.f, 0.f}, {"HP 5 kHz", 5000.f, 0.f, 2.f}, {"BAND 80%", 1000.f, 0.8f, 1.f}};
+		for (int ci = 0; ci < 3; ci++) {
+			double diff[2];
+			for (int mode = 0; mode < 2; mode++) {
+				Rig r;
+				r.e.p.levelWeight = mode;
+				r.e.p.levelComp = LEVEL_FULL;
+				r.e.p.cutoff = cutoffKnob(cases[ci].cutoffHz);
+				r.e.p.spread = 0.2f;
+				r.e.p.band = cases[ci].band;
+				r.e.p.type = cases[ci].type;
+				r.e.p.res = 0.5f;
+				ColoredNoise nl, nr;
+				nr.rng.seed(77);
+				LoudnessWeight wi[2], wo[2];
+				for (int c = 0; c < 2; c++) {
+					wi[c].setSampleRate(SR);
+					wo[c].setSampleRate(SR);
+				}
+				double ei = 0.0, eo = 0.0;
+				for (int n = 0; n < 6 * 48000; n++) {
+					float a = nl.process(1.f / 3.f), b = nr.process(1.f / 3.f);
+					r.step(a, b);
+					float xa = wi[0].process(a), xb = wi[1].process(b), ya = wo[0].process(r.o.l), yb = wo[1].process(r.o.r);
+					if (n > 4 * 48000) {
+						ei += xa * xa + xb * xb;
+						eo += ya * ya + yb * yb;
+					}
+				}
+				diff[mode] = 10.0 * std::log10(eo / ei);
+			}
+			char name[96];
+			std::snprintf(name, sizeof name, "level (ear): %s matches the input loudness (weighted dB)", cases[ci].name);
+			check(std::fabs(diff[1]) < 1.5, name, "%.2f (flat mode: %.2f)", diff[1], diff[0]);
+		}
+	}
+}
+
 static void testIdle() {
 	// Nothing connected, NOISE 0, high ANALOG + RES: silence (the noise floor follows activity)
 	auto idleLevel = [](float res, float analog, int seconds = 3) {
@@ -1235,6 +1740,12 @@ int main() {
 	testDriveVoicings();
 	testResonanceSaturation();
 	testIdle();
+	testDigitalAnalogLife();
+	testPingDriveAnalog();
+	testSlope24();
+	testSeriesLevel();
+	testQuantizeSpread();
+	testLpg();
 	testBand();
 	testLevel();
 	testPerCore();

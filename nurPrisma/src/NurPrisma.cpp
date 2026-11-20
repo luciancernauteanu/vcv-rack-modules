@@ -31,6 +31,8 @@ NurPrisma::NurPrisma() {
 	configParam(STRUM_PARAM, -1.f, 1.f, 0.f, "Strum (negative = downward)", "%", 0.f, 100.f);
 	configParam(STRIKE_PARAM, 0.f, 1.f, 0.35f, "Strike (click > mallet > breath)", "%", 0.f, 100.f);
 	configParam(BAND_PARAM, 0.f, 1.f, 0.f, "Band (narrow each core to a steep band: 3 > 1/24 octave)", "%", 0.f, 100.f);
+	configParam(LPG_PARAM, 0.f, 1.f, 0.f, "Low-pass gate depth (0 = off)", "%", 0.f, 100.f);
+	configParam(LPG_DECAY_PARAM, 0.f, 1.f, 0.5f, "Low-pass gate release (40 ms .. 1.5 s)");
 	static const char* const CORE_NAMES[NUM_CORES] = {"Red", "Yellow", "Green", "Violet"};
 	for (int i = 0; i < NUM_CORES; i++)
 		configParam(CORE_SPREAD_PARAM + i, -1.f, 2.f, 1.f, string::f("%s core spread (drag its dot on the ring)", CORE_NAMES[i]),
@@ -85,6 +87,9 @@ void NurPrisma::onReset(const ResetEvent& e) {
 	driveVoice = np::VOICE_WARM;
 	drivePos = np::DRIVE_PRE;
 	justTuning = false;
+	lpgSource = 2;
+	noiseType = 0;
+	levelWeight = 1;
 	focus = -1;
 	for (int i = 0; i < NUM_CORES; i++) {
 		own[i].store(0);
@@ -179,6 +184,13 @@ json_t* NurPrisma::dataToJson() {
 	json_object_set_new(root, "driveVoice", json_integer(driveVoice));
 	json_object_set_new(root, "drivePos", json_integer(drivePos));
 	json_object_set_new(root, "justTuning", json_boolean(justTuning));
+	json_object_set_new(root, "lpgSource", json_integer(lpgSource));
+	json_object_set_new(root, "noiseType", json_integer(noiseType));
+	json_object_set_new(root, "levelWeight", json_integer(levelWeight));
+	json_t* slopeJ = json_array();
+	for (int i = 0; i < NUM_CORES; i++)
+		json_array_append_new(slopeJ, json_boolean(coreSlope[i]));
+	json_object_set_new(root, "coreSlope", slopeJ);
 	json_object_set_new(root, "focus", json_integer(focus));
 	json_t* ownJ = json_array();
 	for (int i = 0; i < NUM_CORES; i++)
@@ -230,6 +242,14 @@ void NurPrisma::dataFromJson(json_t* root) {
 	getBool("polySplit", polySplit);
 	getBool("quantizeCutoff", quantizeCutoff);
 	getBool("justTuning", justTuning);
+	getInt("lpgSource", 0, 2, lpgSource);
+	getInt("noiseType", 0, 1, noiseType);
+	getInt("levelWeight", 0, 1, levelWeight);
+	json_t* slopeJ = json_object_get(root, "coreSlope");
+	for (int i = 0; i < NUM_CORES; i++) {
+		json_t* v = slopeJ ? json_array_get(slopeJ, i) : nullptr;
+		coreSlope[i] = v && json_boolean_value(v);
+	}
 	json_t* c = json_object_get(root, "characterSeed");
 	if (c)
 		engine.seedCharacter((uint32_t) json_number_value(c));
@@ -300,6 +320,14 @@ void NurPrisma::readParams() {
 	p.driveVoice = driveVoice;
 	p.drivePos = drivePos;
 	p.justTuning = justTuning;
+	p.lpg = params[LPG_PARAM].getValue();
+	p.lpgDecay = params[LPG_DECAY_PARAM].getValue();
+	p.lpgSource = lpgSource;
+	p.noiseType = noiseType;
+	p.levelWeight = levelWeight;
+	for (int i = 0; i < NUM_CORES; i++)
+		p.slope24[i] = coreSlope[i];
+	lpgFlag = p.lpg > 0.f;
 
 	// CV: V/OCT and CUTOFF are 1 V/oct, RES / SPREAD / STACK 10 V = the whole knob. Poly = one channel per core.
 	Input& voct = inputs[VOCT_INPUT];
@@ -585,6 +613,8 @@ struct CoreSelector : widget::OpaqueWidget {
 			menu->addChild(createMenuItem("Follow the global knobs again (TYPE, RES, BAND, CUTOFF, WIDTH)", "",
 				[=]() { m->followGlobal(h); }));
 			menu->addChild(createMenuItem("Reset (follow everything, level 100%, spread 100%)", "", [=]() { m->resetCore(h); }));
+			menu->addChild(createCheckMenuItem("24 dB slope (ladder-like low-pass)", "", [=]() { return m->coreSlope[h]; },
+				[=]() { m->coreSlope[h] = !m->coreSlope[h]; }));
 		}
 	}
 
@@ -622,6 +652,13 @@ struct CoreSelector : widget::OpaqueWidget {
 				nvgBeginPath(vg);
 				nvgCircle(vg, b.x, b.y, mm2px(2.3f));
 				nvgFillColor(vg, glow);
+				nvgFill(vg);
+			}
+			if (!lit && module && module->coreSlope[i]) {
+				// a small mark above the bullet: this core has the 24 dB slope
+				nvgBeginPath(vg);
+				nvgRect(vg, b.x - mm2px(0.9f), b.y - mm2px(3.1f), mm2px(1.8f), mm2px(0.45f));
+				nvgFillColor(vg, nvgRGB(0xe9, 0xe3, 0xd5));
 				nvgFill(vg);
 			}
 			if (!lit && module && module->coreIsCustom(i)) {
@@ -703,8 +740,11 @@ struct NurPrismaWidget : app::ModuleWidget {
 		text->coreColor = np::coreColor;
 		// Shown inside the bottom of the ring while CUTOFF snaps to the scale (right-click), so a stepped CUTOFF is
 		// never a mystery
-		if (module)
+		if (module) {
 			text->addIf(Vec(FILTER_CX, HERO_SCALE_Y), "SCALE", 1.8f, gold, &module->quantizeCutoff);
+			// LPG tag at the top of the ring while the low-pass gate is on
+			text->addIf(Vec(FILTER_CX, HERO_LPG_Y), "LPG", 1.8f, gold, &module->lpgFlag);
+		}
 		text->addFocus(Vec(FILTER_CX, HERO_LABEL_Y), "CUTOFF  \xc2\xb7  SPREAD", "CUTOFF  \xc2\xb7  CORE SPREAD", 2.3f, cream,
 			np::PanelText::LABEL, 0.3f);
 
@@ -878,17 +918,46 @@ struct NurPrismaWidget : app::ModuleWidget {
 			[=]() { return m->justTuning ? 1 : 0; }, [=](int i) { m->justTuning = i == 1; }));
 		menu->addChild(createMenuItem("Re-roll Random shape", "", [=]() { m->rerollRandomShape(); }));
 		menu->addChild(new ui::MenuSeparator);
+		menu->addChild(createMenuLabel("Low-pass gate (a vactrol on each core; LPG shows in the ring)"));
+		{
+			ui::Slider* depth = new ui::Slider;
+			depth->quantity = m->getParamQuantity(NurPrisma::LPG_PARAM);
+			depth->box.size.x = 220.f;
+			menu->addChild(depth);
+			ui::Slider* rel = new ui::Slider;
+			rel->quantity = m->getParamQuantity(NurPrisma::LPG_DECAY_PARAM);
+			rel->box.size.x = 220.f;
+			menu->addChild(rel);
+		}
+		menu->addChild(createIndexSubmenuItem("Gate opens on", {"Ping only", "Input level only", "Ping and input level"},
+			[=]() { return m->lpgSource; }, [=](int i) { m->lpgSource = i; }));
+		menu->addChild(new ui::MenuSeparator);
 		menu->addChild(createMenuLabel("Input and output"));
 		menu->addChild(createIndexSubmenuItem("Drive voicing", {"Warm (tanh)", "Diode (one-sided: even + odd)", "Fold (wavefolder)"},
 			[=]() { return m->driveVoice; }, [=](int i) { m->driveVoice = i; }));
 		menu->addChild(createIndexSubmenuItem("Drive position",
 			{"Before the cores", "After the cores (POST)", "Both, 70% each (BOTH)"}, [=]() { return m->drivePos; },
 			[=](int i) { m->drivePos = i; }));
+		menu->addChild(createIndexSubmenuItem("Noise type", {"Colours (white, pink, brown, crackle)", "Digital (shift register: COLOR = length)"},
+			[=]() { return m->noiseType; }, [=](int i) { m->noiseType = i; }));
+		menu->addChild(createIndexSubmenuItem("Level compensation hears", {"Flat (RMS)", "Like an ear (loudness-weighted)"},
+			[=]() { return m->levelWeight; }, [=](int i) { m->levelWeight = i; }));
 		menu->addChild(createIndexSubmenuItem("Level compensation",
 			{"Off (filters change the level)", "Gentle (+-6 dB)", "Full (keep the input's loudness)"},
 			[=]() { return m->levelComp; }, [=](int i) { m->levelComp = i; }));
 		menu->addChild(createBoolPtrMenuItem("Poly input: one voice per core", "", &m->polySplit));
 		menu->addChild(createMenuItem("Re-roll analog character", "", [=]() { m->rerollCharacter(); }));
+		menu->addChild(createIndexSubmenuItem("Low-pass slope, all cores", {"12 dB (state-variable)", "24 dB (ladder-like)"},
+			[=]() {
+				int n = 0;
+				for (int i = 0; i < NurPrisma::NUM_CORES; i++)
+					n += m->coreSlope[i];
+				return n == NurPrisma::NUM_CORES ? 1 : 0;
+			},
+			[=](int v) {
+				for (int i = 0; i < NurPrisma::NUM_CORES; i++)
+					m->coreSlope[i] = v == 1;
+			}));
 		menu->addChild(createMenuItem("All cores follow the global knobs again", "", [=]() {
 			for (int i = 0; i < NurPrisma::NUM_CORES; i++)
 				m->followGlobal(i);

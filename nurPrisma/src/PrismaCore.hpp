@@ -160,6 +160,38 @@ inline CoreCoefs coreCoefs(float fc, float res, float qScale, float sampleRate) 
 	return c;
 }
 
+/** Magnitude of a core's response at frequency ratio r = f / fc (TYPE weights w: LP, BP, HP, notch; BP gain as in
+Core::process): the analytic SVF response, used to know how much a downstream core adds at an upstream core's pitch. */
+inline float coreMagnitude(float r, float k, const float w[4], float bpGain) {
+	float r2 = r * r;
+	float dr = 1.f - r2, di = k * r;
+	// numerator: wLP / D + wBP bpGain j k r / D - wHP r^2 / D + wN (1 - r^2) / D  ->  (nr + j ni) / D
+	float nr = w[0] - w[2] * r2 + w[3] * dr;
+	float ni = w[1] * bpGain * k * r;
+	float den = dr * dr + di * di;
+	return std::sqrt((nr * nr + ni * ni) / std::max(den, 1e-12f));
+}
+
+/** One 12 dB low-pass stage (trapezoidal SVF, low-pass output only): the second stage of the 24 dB slope. */
+struct LowStage {
+	float ic1 = 0.f;
+	float ic2 = 0.f;
+	void reset() {
+		ic1 = ic2 = 0.f;
+	}
+	float process(float x, float g, float k) {
+		float a1 = 1.f / (1.f + g * (g + k));
+		float a2 = g * a1;
+		float a3 = g * a2;
+		float v3 = x - ic2;
+		float v1 = a1 * ic1 + a2 * v3;
+		float v2 = ic2 + a2 * ic1 + a3 * v3;
+		ic1 = 2.f * v1 - ic1;
+		ic2 = 2.f * v2 - ic2;
+		return v2;
+	}
+};
+
 /** BAND: a steep band-pass after a core, at the core's own pitch: two 2-pole band-passes in series (12 dB/oct skirts),
 unity at the centre. Turns the four cores into a filter bank of narrow slices; the core's own ring (RES, PING) is at
 the centre, so it passes. */

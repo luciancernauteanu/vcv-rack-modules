@@ -44,6 +44,9 @@ struct NurPrisma : engine::Module {
 		ENUMS(CORE_PAN_PARAM, 4),
 		/** Per-core CUTOFF (the centre knob while the core is in focus) */
 		ENUMS(CORE_CUTOFF_PARAM, 4),
+		/** Low-pass gate: depth (0 = off) and release time; set from the right-click menu */
+		LPG_PARAM,
+		LPG_DECAY_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -99,6 +102,16 @@ struct NurPrisma : engine::Module {
 	int drivePos = np::DRIVE_PRE;
 	/** SHAPE Chord / Scale in just intonation */
 	bool justTuning = false;
+	/** Low-pass gate source: 0 = ping, 1 = input level, 2 = both */
+	int lpgSource = 2;
+	/** 24 dB slope per core (right-click a core's bullet) */
+	bool coreSlope[NUM_CORES] = {};
+	/** NOISE type: 0 = colours, 1 = digital shift register */
+	int noiseType = 0;
+	/** Level compensation detector: 0 = flat RMS, 1 = ear (loudness-weighted) */
+	int levelWeight = 1;
+	/** For the panel tag: the gate is on */
+	bool lpgFlag = false;
 
 	/** Which core the knobs edit: -1 = ALL (UI state, saved in the patch) */
 	int focus = -1;
