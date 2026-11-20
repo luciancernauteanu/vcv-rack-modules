@@ -108,6 +108,21 @@ Last updated: 2026-11-18 (engine).
 
 ## Change log
 
+- 2026-11-20: panel row is now NOISE, COLOR, FEEL (+ switch), GAIN, DRIVE (`CHAR_X`, `FEEL_SWITCH_X`, `FEEL_LABEL_X` in
+  Layout.hpp). FEEL: `FEEL_PARAM` + `FEEL_SWITCH_PARAM` (CKSS, 0 = analog, down); `NurPrisma::syncFeel()` once per block:
+  a switch change loads the knob from ANALOG_PARAM / DIGITAL_PARAM, a knob change writes into the selected one, so each
+  keeps its own value and the engine still reads ANALOG / DIGITAL (old patches keep theirs; `dataFromJson` forces a
+  re-sync). `FeelKnob` (UI thread) renames the quantity, sets its reset value (analog 50%, digital 0) and draws the other
+  value as a dot on the rim. GAIN: `OUT_GAIN_PARAM` (-12..+12 dB) -> `EngineParams::outGain`, ramped per sample (5 ms)
+  before the limiter; 0 dB is bit-identical (golden unchanged). 149 offline checks.
+
+- 2026-11-20: input follow fixed. The follower was a linear map (x 8 on 0.2 x volts): full open above ~0.6 V, so the
+  noise never followed a signal's dynamics. Now dB: gi = clamp((dB + 40) / 30) on 5 x followIn (dBV, 0.2 x volts
+  undone). Test: loud (1 V) keeps the noise, -30 dBV keeps 31% (149 offline checks). Test feeds the engine 0.2 x volts.
+
+- 2026-11-20: NOISE follow curve is reversed exponential: f = x^3 of the slider (x = NOISE_FOLLOW). 50% -> 12.5% follow
+  (87.5% of the noise stays between pings), 100% -> full follow. 148 offline checks.
+
 - 2026-11-20: NOISE follows amount. `NOISE_FOLLOW_PARAM` (appended after `LPG_DECAY_PARAM`, 0..1, default 0) ->
   `EngineParams::noiseFollowAmt`; the core's noise gain target is 1 - f + f env (env = max(ping envelope, input
   follower x8)). Ping envelope release rate = (1 - f) x half the ring rate + f x 25 /s (40 ms at 100%). `noiseFollow`

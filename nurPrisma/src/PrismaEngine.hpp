@@ -91,6 +91,8 @@ struct EngineParams {
 	float drive = 0.f;
 	float width = 0.5f;
 	float mix = 1.f;
+	/** Output gain (linear; the GAIN knob, -12 .. +12 dB), before the safety limiter */
+	float outGain = 1.f;
 	float noise = 0.f;
 	float color = 0.3333f;
 	float analog = 0.5f;
@@ -324,6 +326,7 @@ public:
 		hissGateCoef = 1.f - std::exp(-(float) BLOCK / (0.05f * sr));
 		lpgEnvDecay = std::exp(-1.f / (0.03f * sr));
 		followDecay = std::exp(-1.f / (0.03f * sr));
+		outGainCoef = 1.f - std::exp(-1.f / (0.005f * sr));
 		for (int c = 0; c < 2; c++) {
 			weightIn[c].setSampleRate(sr);
 			weightOut[c].setSampleRate(sr);
@@ -606,6 +609,10 @@ public:
 			l *= driveFade;
 			r *= driveFade;
 		}
+		// GAIN: ramped per sample (5 ms) so a fast turn does not step; exactly 1 at 0 dB
+		outGainNow += (s.outGain - outGainNow) * outGainCoef;
+		l *= outGainNow;
+		r *= outGainNow;
 		limiter.process(l, r, CEILING, &out.l, &out.r);
 
 		for (int i = 0; i < NUM_CORES; i++)
@@ -667,6 +674,8 @@ private:
 	Rng hissRng;
 	Rng pingRng;
 	SafetyLimiter limiter;
+	float outGainNow = 1.f;
+	float outGainCoef = 0.004f;
 
 	// Per block, per side and core
 	float gNow[2][NUM_CORES] = {};
@@ -846,6 +855,7 @@ private:
 		smooth(s.drive, p.drive, c);
 		smooth(s.width, p.width, c);
 		smooth(s.mix, p.mix, c);
+		smooth(s.outGain, p.outGain, c);
 		smooth(s.noise, p.noise, c);
 		smooth(s.color, p.color, c);
 		smooth(s.analog, p.analog, c);
@@ -1054,7 +1064,9 @@ private:
 		// a tail that blooms in the resonance) and 40 ms (full amount: tight, short). It is not read from the core's
 		// state, which the noise itself excites (following the state latched the noise on at 10 V).
 		float followMax = 0.f;
+		// Reversed exponential: the slider's lower part barely changes the noise, the top gates it (x^3 of the travel)
 		float fAmt = clamp01(p.noiseFollowAmt);
+		fAmt = fAmt * fAmt * fAmt;
 		for (int i = 0; i < NUM_CORES; i++) {
 			float target = 1.f;
 			if (fAmt > 0.f) {
@@ -1067,7 +1079,13 @@ private:
 						pingEnv[i] = 0.f;
 					gp = pingEnv[i];
 				}
-				float gi = (p.noiseFollow & 2) ? std::min(1.f, followIn[i] * 8.f) : 0.f;
+				// Input level in dB (followIn is the peak at 0.2 x volts): -40 dBV = closed, -10 dBV = open, so the noise
+				// follows the input's dynamics (a linear map was full open above ~0.6 V and never followed a signal)
+				float gi = 0.f;
+				if (p.noiseFollow & 2) {
+					float db = 20.f * std::log10(followIn[i] * 5.f + 1e-6f);
+					gi = clamp01((db + 40.f) / 30.f);
+				}
 				target = 1.f - fAmt + fAmt * std::max(gp, gi);
 			}
 			followGain[i] += (target - followGain[i]) * 0.3f;

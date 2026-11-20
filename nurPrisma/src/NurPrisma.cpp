@@ -33,6 +33,10 @@ NurPrisma::NurPrisma() {
 	configParam(BAND_PARAM, 0.f, 1.f, 0.f, "Band (narrow each core to a steep band: 3 > 1/24 octave)", "%", 0.f, 100.f);
 	configParam(LPG_PARAM, 0.f, 1.f, 0.f, "Low-pass gate depth (0 = off)", "%", 0.f, 100.f);
 	configParam(LPG_DECAY_PARAM, 0.f, 1.f, 0.5f, "Low-pass gate release (40 ms .. 1.5 s)");
+	configParam(FEEL_PARAM, 0.f, 1.f, 0.5f, "Feel", "%", 0.f, 100.f)->description =
+		"ANALOG or DIGITAL, as the switch says; each keeps its own value";
+	configSwitch(FEEL_SWITCH_PARAM, 0.f, 1.f, 0.f, "FEEL edits", {"Analog", "Digital"});
+	configParam(OUT_GAIN_PARAM, -12.f, 12.f, 0.f, "Output gain", " dB");
 	configParam(NOISE_FOLLOW_PARAM, 0.f, 1.f, 0.f, "Noise follows the ping / input", "%", 0.f, 100.f)->description =
 		"0: plain noise. 100%: noise only while a ping or the input sounds, with a short release";
 	static const char* const CORE_NAMES[NUM_CORES] = {"Red", "Yellow", "Green", "Violet"};
@@ -249,6 +253,8 @@ void NurPrisma::dataFromJson(json_t* root) {
 	getInt("lpgSource", 0, 2, lpgSource);
 	getInt("noiseType", 0, 1, noiseType);
 	getInt("noiseFollow", 1, 3, noiseFollow);
+	// (FEEL re-reads ANALOG / DIGITAL on the next block, whatever was loaded)
+	feelSwitchLast = -1;
 	getInt("levelWeight", 0, 1, levelWeight);
 	json_t* slopeJ = json_object_get(root, "coreSlope");
 	for (int i = 0; i < NUM_CORES; i++) {
@@ -297,6 +303,7 @@ void NurPrisma::readParams() {
 	p.noise = params[NOISE_PARAM].getValue();
 	p.color = params[COLOR_PARAM].getValue();
 	p.analog = params[ANALOG_PARAM].getValue();
+	p.outGain = std::pow(10.f, params[OUT_GAIN_PARAM].getValue() / 20.f);
 	p.digital = params[DIGITAL_PARAM].getValue();
 	p.strum = params[STRUM_PARAM].getValue();
 	p.strike = params[STRIKE_PARAM].getValue();
@@ -348,9 +355,26 @@ void NurPrisma::readParams() {
 	p.stackCv = 0.1f * inputs[STACK_INPUT].getVoltage();
 }
 
+void NurPrisma::syncFeel() {
+	int sw = (int) std::round(params[FEEL_SWITCH_PARAM].getValue());
+	int target = sw == 1 ? DIGITAL_PARAM : ANALOG_PARAM;
+	float f = params[FEEL_PARAM].getValue();
+	if (sw != feelSwitchLast) {
+		// Switched (or first run / patch loaded): the knob shows the value of the one it now edits
+		feelSwitchLast = sw;
+		f = params[target].getValue();
+		params[FEEL_PARAM].setValue(f);
+	}
+	else if (f != feelLast) {
+		params[target].setValue(f);
+	}
+	feelLast = f;
+}
+
 void NurPrisma::process(const ProcessArgs& args) {
 	if (paramCounter-- <= 0) {
 		paramCounter = np::PrismaEngine::BLOCK - 1;
+		syncFeel();
 		readParams();
 		int shape = (int) params[SHAPE_PARAM].getValue();
 		for (int i = 0; i < NUM_SHAPES; i++)
@@ -504,6 +528,44 @@ struct RandomLed : widget::OpaqueWidget {
 cores, after, both; it fires while still held). Hover shows a faint underline and a tooltip with the current setting.
 Right-click is left alone (module menu, which has the same choices). The knob itself stays a plain knob, so turning
 and double-click reset never change the voicing. */
+/** FEEL: the knob edits ANALOG or DIGITAL (the switch beside it). Its pointer shows the one being edited; a small
+coloured dot on its rim shows the other one's value (amber = ANALOG, cyan = DIGITAL). The tooltip names both. */
+struct FeelKnob : RoundBlackKnob {
+	NurPrisma* nmodule = nullptr;
+
+	void step() override {
+		if (nmodule) {
+			// (UI thread: the quantity's name and reset value follow the switch)
+			bool digital = nmodule->params[NurPrisma::FEEL_SWITCH_PARAM].getValue() > 0.5f;
+			engine::ParamQuantity* pq = nmodule->getParamQuantity(NurPrisma::FEEL_PARAM);
+			if (pq) {
+				pq->name = digital ? "Feel: digital" : "Feel: analog";
+				pq->defaultValue = digital ? 0.f : 0.5f;
+				pq->description = string::f("ANALOG %d%%, DIGITAL %d%% (the switch picks which one this knob edits)",
+					(int) std::round(nmodule->params[NurPrisma::ANALOG_PARAM].getValue() * 100.f),
+					(int) std::round(nmodule->params[NurPrisma::DIGITAL_PARAM].getValue() * 100.f));
+			}
+		}
+		RoundBlackKnob::step();
+	}
+
+	void draw(const DrawArgs& args) override {
+		RoundBlackKnob::draw(args);
+		if (!nmodule)
+			return;
+		bool digital = nmodule->params[NurPrisma::FEEL_SWITCH_PARAM].getValue() > 0.5f;
+		float other = nmodule->params[digital ? NurPrisma::ANALOG_PARAM : NurPrisma::DIGITAL_PARAM].getValue();
+		float a = minAngle + (maxAngle - minAngle) * other;
+		Vec c = box.size.div(2.f);
+		float r = box.size.x * 0.5f + mm2px(0.9f);
+		Vec d = c.plus(Vec(std::sin(a), -std::cos(a)).mult(r));
+		nvgBeginPath(args.vg);
+		nvgCircle(args.vg, d.x, d.y, mm2px(0.55f));
+		nvgFillColor(args.vg, digital ? nvgRGB(0xf2, 0xa6, 0x3b) : nvgRGB(0x4f, 0xd8, 0xe8));
+		nvgFill(args.vg);
+	}
+};
+
 /** NOISE follows: the amount slider and what it follows (the module menu and the NOISE label's long press) */
 static void addNoiseFollowItems(ui::Menu* menu, NurPrisma* m) {
 	menu->addChild(createMenuLabel("Noise follows the ping / input (0 = plain noise)"));
@@ -927,12 +989,31 @@ struct NurPrismaWidget : app::ModuleWidget {
 		selector->module = module;
 		addChild(selector);
 
-		static const int CHAR_PARAMS[5] = {NurPrisma::DRIVE_PARAM, NurPrisma::NOISE_PARAM, NurPrisma::COLOR_PARAM,
-			NurPrisma::ANALOG_PARAM, NurPrisma::DIGITAL_PARAM};
-		static const char* const CHAR_LABELS[5] = {"DRIVE", "NOISE", "COLOR", "ANALOG", "DIGITAL"};
+		// NOISE, COLOR, FEEL (+ switch), GAIN, DRIVE
+		enum { CH_NOISE, CH_COLOR, CH_FEEL, CH_GAIN, CH_DRIVE };
+		static const int CHAR_PARAMS[5] = {NurPrisma::NOISE_PARAM, NurPrisma::COLOR_PARAM, NurPrisma::FEEL_PARAM,
+			NurPrisma::OUT_GAIN_PARAM, NurPrisma::DRIVE_PARAM};
+		static const char* const CHAR_LABELS[5] = {"NOISE", "COLOR", "FEEL", "GAIN", "DRIVE"};
 		for (int i = 0; i < 5; i++) {
+			if (i == CH_FEEL) {
+				FeelKnob* fk = createParamCentered<FeelKnob>(mm2px(Vec(CHAR_X[i], CHAR_Y)), module, CHAR_PARAMS[i]);
+				fk->nmodule = module;
+				addParam(fk);
+				addParam(createParamCentered<CKSS>(mm2px(Vec(FEEL_SWITCH_X, CHAR_Y)), module, NurPrisma::FEEL_SWITCH_PARAM));
+				if (module) {
+					NurPrisma* m = module;
+					text->addDynamic(Vec(FEEL_LABEL_X, CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), [m]() {
+						return std::string(m->params[NurPrisma::FEEL_SWITCH_PARAM].getValue() > 0.5f ? "FEEL · DIGITAL"
+							: "FEEL · ANALOG");
+					}, 2.2f, cream);
+				}
+				else
+					text->add(Vec(FEEL_LABEL_X, CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), "FEEL · ANALOG", 2.2f, cream,
+						np::PanelText::LABEL, 0.1f);
+				continue;
+			}
 			addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(CHAR_X[i], CHAR_Y)), module, CHAR_PARAMS[i]));
-			if (i == 0 && module) {
+			if (i == CH_DRIVE && module) {
 				// DRIVE's label names its voicing and position: DRIVE / DIODE / FOLD, + POST (after the cores) or BOTH
 				NurPrisma* m = module;
 				text->addDynamic(Vec(CHAR_X[i], CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), [m]() {
@@ -947,7 +1028,7 @@ struct NurPrismaWidget : app::ModuleWidget {
 				driveLabel = b;
 				continue;
 			}
-			if (i == 1 && module) {
+			if (i == CH_NOISE && module) {
 				// NOISE's label: NOISE ~ while the noise follows the ping / input; hold it for the amount slider
 				NurPrisma* m = module;
 				text->addDynamic(Vec(CHAR_X[i], CHAR_Y + KNOB_MEDIUM / 2.f + CHAR_LABEL_GAP), [m]() {

@@ -49,6 +49,12 @@ struct NurPrisma : engine::Module {
 		LPG_DECAY_PARAM,
 		/** How much NOISE follows the ping / input (long-press the NOISE label) */
 		NOISE_FOLLOW_PARAM,
+		/** FEEL: one knob for ANALOG and DIGITAL; the switch picks which one it edits (each keeps its own value in
+		ANALOG_PARAM / DIGITAL_PARAM, which the engine reads) */
+		FEEL_PARAM,
+		FEEL_SWITCH_PARAM,
+		/** Output gain, -12 .. +12 dB */
+		OUT_GAIN_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -139,6 +145,10 @@ struct NurPrisma : engine::Module {
 
 	NurPrisma();
 	void process(const ProcessArgs& args) override;
+	/** FEEL knob <-> ANALOG / DIGITAL (see FEEL_PARAM) */
+	void syncFeel();
+	int feelSwitchLast = -1;
+	float feelLast = -1.f;
 	void onSampleRateChange(const SampleRateChangeEvent& e) override;
 	void onReset(const ResetEvent& e) override;
 	json_t* dataToJson() override;

@@ -39,9 +39,10 @@ within about 1.5 dB).
 **Hold the NOISE label** (0.5 s) for a slider: how much the noise follows the ping and / or the input (also in the
 right-click menu, with what it follows: ping, input level, or both, the default). **0** = plain noise, no envelope.
 **100%** = noise only while a ping or the input sounds, with a short release (40 ms): each ping gets a tight breath.
-In between, part of the noise stays and the rest follows (50% = half the noise between pings), and the ping's noise
-lingers longer, fading with the ring. The label reads **NOISE ~** while the noise follows. A ping opens its own core's
-noise by its velocity; the input follower takes ~30 ms. With nothing to follow at 100% the cores go idle (no CPU).
+The curve is reversed exponential: the lower part of the slider barely changes the noise (50% keeps 87.5% of it between
+pings), the top gates it (100% leaves none between pings, only the ping's breath). The ping's noise lingers longer at low
+amounts, fading with the ring. The label reads **NOISE ~** while the noise follows. A ping opens its own core's
+noise by its velocity; the input follows its level in dB (-40 dBV closed, -10 dBV open, ~30 ms), so the noise moves with the dynamics. With nothing to follow at 100% the cores go idle (no CPU).
 
 ## Pings and DRIVE / ANALOG
 
@@ -84,10 +85,12 @@ every ping a little life: a random
 | **STACK** | Parallel (resonator, vowels, chords) → series (steep, aggressive) |
 | **WIDTH** | Spreads the cores over left and right; 0 is mono-safe |
 | **MIX** | Dry / wet |
+| **GAIN** | Output gain, -12 .. +12 dB (left of DRIVE), to set the level yourself; ramped over 5 ms, before the 10 V safety limiter |
 | Level compensation (right-click) | **Full** (default): the output keeps the input's loudness whatever BAND, TYPE or RES do (-12 .. +24 dB). **Gentle**: +-6 dB. **Off**: a closing filter gets quieter, as on a classic filter |
 | **NOISE**, **COLOR** | Noise fed into the cores (white → pink → brown → crackle): with high RES the stack sings on its own. **Hold the NOISE label** for how much it follows the ping / input (see Noise follows) |
-| **ANALOG** | Slightly mismatched cores, saturation, a soft noise floor, and resonance that reacts to level like an analog filter: loud input widens and softens the peak, quiet signals and pings ring freely, a hard ping blooms (settles fast, then rings on) |
-| **DIGITAL** | Coarse filter maths and rate reduction: the sound of old DSP |
+| **FEEL** + switch | One knob for **ANALOG** and **DIGITAL**: the switch beside it (down = ANALOG, up = DIGITAL) picks which one the knob edits, and each keeps its own value (saved with the patch). Flip the switch and the knob jumps to that one's value; a small dot on the knob's rim shows the other one (amber = ANALOG, cyan = DIGITAL), the label reads FEEL · ANALOG / FEEL · DIGITAL and the tooltip shows both |
+| ANALOG (FEEL) | Slightly mismatched cores, saturation, a soft noise floor, and resonance that reacts to level like an analog filter: loud input widens and softens the peak, quiet signals and pings ring freely, a hard ping blooms (settles fast, then rings on) |
+| DIGITAL (FEEL) | Coarse filter maths and rate reduction: the sound of old DSP |
 | **STRUM**, **STRIKE** | See Ping above |
 
 

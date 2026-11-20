@@ -1647,10 +1647,13 @@ static void testNoiseFollowAndGain() {
 		before, during, after, alwaysAfter);
 	check(before < 0.01 * alwaysAfter && during > 0.1 * alwaysAfter && after < 0.01 * alwaysAfter,
 		"noise follows the ping (silent before, with the ring, gone after)", "%.4f during / %.6f after", during, after);
-	// Half the amount: half the plain noise stays when nothing plays
+	// Reversed exponential: at 50% of the slider only 12.5% follows, so 87.5% of the noise stays between pings; at
+	// 100% the noise is gone between pings (only the ping's own breath is left)
 	double halfAfter = diffRms(half, clean, 12000 + 4 * 48000, 12000 + len);
-	check(std::fabs(halfAfter / alwaysAfter - 0.5) < 0.1, "noise follows 50%: half the noise stays between pings",
-		"%.3f of the plain noise", halfAfter / alwaysAfter);
+	double fullAfter = diffRms(follow, clean, 12000 + 4 * 48000, 12000 + len);
+	check(std::fabs(halfAfter / alwaysAfter - 0.875) < 0.05 && fullAfter < 0.01 * alwaysAfter,
+		"noise follow is reversed exponential (50% keeps 87.5%, 100% keeps ~0 between pings)",
+		"%.3f at 50%%, %.4f at 100%%", halfAfter / alwaysAfter, fullAfter / alwaysAfter);
 	// NOISE follows the input: noise only while there is input
 	{
 		Rig r;
@@ -1672,6 +1675,41 @@ static void testNoiseFollowAndGain() {
 		}
 		std::printf("     input follow: quiet %.6f loud %.3f none %.6f\n", quiet, loud, none);
 		check(quiet < 0.001 && loud > 0.05 && none < 0.01, "noise follows the input (silent without, present with, gone after)", "%.3f / %.5f", loud, none);
+	}
+	// NOISE follows the input's level (dynamics): the same noise under a loud and a quiet segment of the input.
+	// The noise is measured as the difference to the same run without noise (the input itself cancels out).
+	{
+		auto segRun = [](float noise, float amt, float amp) {
+			Rig r;
+			r.e.p.noise = noise;
+			r.e.p.noiseFollow = 2;
+			r.e.p.noiseFollowAmt = amt;
+			r.e.p.cutoff = cutoffKnob(800.f);
+			r.e.p.res = 0.5f;
+			std::vector<float> y;
+			for (int n = 0; n < 2 * 48000; n++) {
+				// the module feeds the engine at 0.2 x volts
+				float x = 0.2f * amp * (float) std::sin(2.0 * M_PI * 200.0 * n / SR);
+				r.step(x, x);
+				y.push_back(r.o.l);
+			}
+			return y;
+		};
+		auto seg = [](const std::vector<float>& a, const std::vector<float>& b, int from, int to) {
+			double e = 0.0;
+			for (int n = from; n < to; n++)
+				e += (a[n] - b[n]) * (a[n] - b[n]);
+			return std::sqrt(e / (to - from));
+		};
+		// loud (1 V, ~0 dBV) and quiet (0.03 V, ~-30 dBV) halves; the second half of each is the measured part
+		std::vector<float> loudClean = segRun(0.f, 1.f, 1.f), loudFollow = segRun(0.7f, 1.f, 1.f), loudPlain = segRun(0.7f, 0.f, 1.f);
+		std::vector<float> quietClean = segRun(0.f, 1.f, 0.03f), quietFollow = segRun(0.7f, 1.f, 0.03f), quietPlain = segRun(0.7f, 0.f, 0.03f);
+		double loudRatio = seg(loudFollow, loudClean, 24000, 48000) / seg(loudPlain, loudClean, 24000, 48000);
+		double quietRatio = seg(quietFollow, quietClean, 24000, 48000) / seg(quietPlain, quietClean, 24000, 48000);
+		std::printf("     noise under the input: loud (1 V) follows to %.2f of the plain noise, quiet (-30 dBV) to %.2f\n",
+			loudRatio, quietRatio);
+		check(loudRatio > 0.9 && quietRatio < 0.5 && quietRatio > 0.1,
+			"noise follows the input level (loud keeps the noise, -30 dBV keeps part of it)", "%.2f loud / %.2f quiet", loudRatio, quietRatio);
 	}
 	// ANALOG and the 24 dB slope do not take the gain away: ping rms, noise rms (RES 85%, TYPE LP, ANALOG 1)
 	auto levels = [](float analog, bool s24, double* ping, double* noise) {
